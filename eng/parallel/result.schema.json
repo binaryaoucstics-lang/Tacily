@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["taskId", "status", "summary", "changedFiles", "tests", "risks", "permissionRequests"],
+  "properties": {
+    "taskId": {"type": "string"},
+    "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
+    "summary": {"type": "string"},
+    "changedFiles": {"type": "array", "items": {"type": "string"}},
+    "tests": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["command", "outcome", "details"],
+      "properties": {
+        "command": {"type": "string"},
+        "outcome": {"type": "string", "enum": ["passed", "failed", "blocked"]},
+        "details": {"type": "string"}
+      }
+    }},
+    "risks": {"type": "array", "items": {"type": "string"}},
+    "permissionRequests": {"type": "array", "items": {"type": "string"}}
+  }
+}

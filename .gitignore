@@ -1,4 +1,5 @@
 .tools/
+.parallel/
 .playwright-cli/
 output/
 artifacts/
