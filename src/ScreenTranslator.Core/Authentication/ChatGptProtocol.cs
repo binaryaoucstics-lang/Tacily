@@ -1,5 +1,7 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ScreenTranslator.Core.Translation;
 using ScreenTranslator.Core.Models;
 
@@ -20,20 +22,34 @@ public sealed class ChatGptException : TranslationException
     public HttpStatusCode? StatusCode { get; }
     public string? RequestId { get; }
     public string? Parameter { get; }
+    public string? ErrorType { get; }
+    public string? ServerMessage { get; }
+    public string? Detail { get; }
     public string ResponseShape { get; }
     public bool IsUsageLimit => Code == "subscription_sharing_usage_limit_exceeded";
     public bool IsTerminalRefreshError => Code is "invalid_grant" or "invalid_refresh_token" or "token_expired"
         or "refresh_token_expired" or "refresh_token_invalidated" or "refresh_token_reused";
 
     public ChatGptException(string message, string? code = null, HttpStatusCode? status = null,
-        string? requestId = null, string? parameter = null, string responseShape = "unknown") : base(message)
-    { Code = code; StatusCode = status; RequestId = requestId; Parameter = parameter; ResponseShape = responseShape; }
+        string? requestId = null, string? parameter = null, string responseShape = "unknown",
+        string? errorType = null, string? serverMessage = null, string? detail = null) : base(SafeText(message, 1200) ?? "ChatGPT 请求未完成。")
+    {
+        Code = SafeMetadata(code, 128); StatusCode = status; RequestId = SafeMetadata(requestId, 128);
+        Parameter = SafeMetadata(parameter, 128); ResponseShape = SafeMetadata(responseShape, 32) ?? "unknown";
+        ErrorType = SafeMetadata(errorType, 128); ServerMessage = SafeText(serverMessage); Detail = SafeText(detail);
+    }
 
     public static ChatGptException FromError(JsonElement root, HttpStatusCode? status = null, string? requestId = null)
     {
-        var error = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var nested) ? nested : root;
+        var error = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var nested) ? nested
+            : root.ValueKind == JsonValueKind.Object && root.TryGetProperty("detail", out var nestedDetail)
+                && nestedDetail.ValueKind == JsonValueKind.Object ? nestedDetail : root;
         var code = error.ValueKind == JsonValueKind.String ? error.GetString() : ChatGptProtocol.Text(error, "code");
         var parameter = ChatGptProtocol.Text(error, "param");
+        var errorType = ChatGptProtocol.Text(error, "type");
+        var serverMessage = SafeText(ChatGptProtocol.Text(error, "message")
+            ?? ChatGptProtocol.Text(root, "error_description"));
+        var detail = SafeText(ReadDetail(root) ?? ReadDetail(error));
         var shape = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("detail", out _) ? "detail"
             : root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _) ? "error" : "unknown";
         var message = code switch
@@ -49,7 +65,7 @@ public sealed class ChatGptException : TranslationException
                 or "refresh_token_invalidated" or "refresh_token_reused" => "ChatGPT 登录已失效，请使用原账户重新登录。",
             "invalid_client" => "ChatGPT 登录注册信息未被接受，请添加新的账户连接。",
             "access_denied" => "已取消 ChatGPT 授权，可以稍后重新登录。",
-            _ => status switch
+            _ => serverMessage ?? detail ?? status switch
             {
                 HttpStatusCode.Unauthorized => "ChatGPT 授权未被接受，请检查账户和额度授权。",
                 HttpStatusCode.Forbidden => "当前账户、工作区或所在区域不允许此 ChatGPT 请求。",
@@ -58,19 +74,90 @@ public sealed class ChatGptException : TranslationException
                 _ => "ChatGPT 请求未完成，请检查账户权限、模型与输入后重试。",
             },
         };
-        return new(message, code, status, requestId, parameter, shape);
+        // Known recovery guidance remains actionable; unfamiliar failures expose their actual reason.
+        if (serverMessage is not null && message != serverMessage) message += " 原因：" + serverMessage;
+        if (detail is not null && detail != serverMessage && message != detail) message += " " + detail;
+        message = SafeText(message, 1000) + StatusAndParameter(status, parameter);
+        return new(message, code, status, requestId, parameter, shape, errorType, serverMessage, detail);
+    }
+
+    private static string? ReadDetail(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("detail", out var detail)) return null;
+        return DetailText(detail);
+    }
+
+    private static string? DetailText(JsonElement detail) => detail.ValueKind switch
+    {
+        JsonValueKind.String => detail.GetString(),
+        JsonValueKind.Object => ChatGptProtocol.Text(detail, "message") ?? ChatGptProtocol.Text(detail, "msg"),
+        JsonValueKind.Array => string.Join("; ", detail.EnumerateArray().Take(4).Select(DetailText).Where(text => text is not null)),
+        _ => null,
+    };
+
+    private static string StatusAndParameter(HttpStatusCode? status, string? parameter)
+    {
+        var parts = new List<string>();
+        if (status is { } code) parts.Add("HTTP " + (int)code);
+        if (SafeText(parameter, 128) is { } safeParameter) parts.Add("参数 " + safeParameter);
+        return parts.Count == 0 ? string.Empty : "（" + string.Join("，", parts) + "）";
+    }
+
+    // Sanitize before the final display bound so a credential crossing that bound cannot leak.
+    // The inspection window and regex timeout also bound work on hostile diagnostics.
+    private static string? SafeMetadata(string? value, int limit)
+    {
+        // Metadata is machine vocabulary. Do not turn malformed fields into valid
+        // identifiers by trimming/removing controls before the logger validates them.
+        if (string.IsNullOrEmpty(value) || value.Length > limit || value.Any(c => char.IsWhiteSpace(c)
+            || char.IsControl(c) || char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format)) return null;
+        return SafeText(value, limit);
+    }
+
+    private static string? SafeText(string? text, int limit = 512)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        text = new string(text.Take(8192).Select(c => char.IsControl(c) && char.IsWhiteSpace(c) ? ' ' : c).Where(c => !char.IsControl(c)
+            && char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format).ToArray());
+        try
+        {
+            const RegexOptions options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking;
+            var timeout = TimeSpan.FromMilliseconds(100);
+            text = Regex.Replace(text, @"\b(?:Bearer|Basic)\s+[^\s,;""'<>]+", "[redacted]", options, timeout);
+            text = Regex.Replace(text, @"\b(?:sk-|sess-)[a-z0-9_-]+|\beyJ[a-z0-9_-]*(?:\.[a-z0-9_-]*){1,2}|\b[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}", "[redacted]", options, timeout);
+            text = Regex.Replace(text, @"\b(?:authorization|api[_-]?key|x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|credentials?|token|secret)\b[""']?\s*[:=]\s*(?:""[^""]*(?:""|$)|'[^']*(?:'|$)|[^\s,;<>]+)", "[redacted]", options, timeout);
+            text = Regex.Replace(text, @"https?://[^/\s@]+@", "https://[redacted]@", options, timeout);
+            text = Regex.Replace(text, @"\s+", " ", options, timeout).Trim();
+        }
+        catch (RegexMatchTimeoutException) { return "[redacted]"; }
+        if (text.Length == 0) return null;
+        return text.Length <= limit ? text : text[..(limit - 1)] + "…";
     }
 
     public static async Task<ChatGptException> FromResponseAsync(HttpResponseMessage response, CancellationToken token)
     {
-        var requestId = response.Headers.TryGetValues("x-request-id", out var values)
-            || response.Headers.TryGetValues("openai-request-id", out values) ? values.FirstOrDefault() : null;
+        var requestId = ChatGptProtocol.RequestId(response);
+        string body;
         try
         {
-            using var json = await ChatGptProtocol.ReadJsonAsync(response, token).ConfigureAwait(false);
+            body = await ChatGptProtocol.ReadBodyAsync(response, token).ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            return new("ChatGPT 错误响应超过接收长度预算。" + StatusAndParameter(response.StatusCode, null),
+                status: response.StatusCode, requestId: requestId, responseShape: "response_too_large");
+        }
+        try
+        {
+            using var json = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 32 });
             return FromError(json.RootElement, response.StatusCode, requestId);
         }
-        catch (JsonException) { return new("ChatGPT 返回了无法识别的错误，请稍后重试。", status: response.StatusCode, requestId: requestId, responseShape: "non_json"); }
+        catch (JsonException)
+        {
+            var reason = SafeText(body);
+            return new((reason ?? "ChatGPT 返回了无法识别的错误。") + StatusAndParameter(response.StatusCode, null),
+                status: response.StatusCode, requestId: requestId, responseShape: "non_json", serverMessage: reason);
+        }
     }
 }
 
@@ -81,10 +168,20 @@ internal static class ChatGptProtocol
     internal const string Scope = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
     internal const string SharingScope = "chatgpt.tokens.use.direct";
     internal const string DynamicClient = "dynamic_agent_client";
+    internal static string? RequestId(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("x-oai-request-id", out var values)
+        || response.Headers.TryGetValues("x-request-id", out values)
+        || response.Headers.TryGetValues("openai-request-id", out values) ? values.FirstOrDefault() : null;
     internal static string? Text(JsonElement root, string field) => root.ValueKind == JsonValueKind.Object
         && root.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
     internal static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, CancellationToken token)
+        => JsonDocument.Parse(await ReadBytesAsync(response, token).ConfigureAwait(false), new JsonDocumentOptions { MaxDepth = 32 });
+
+    internal static async Task<string> ReadBodyAsync(HttpResponseMessage response, CancellationToken token)
+        => Encoding.UTF8.GetString(await ReadBytesAsync(response, token).ConfigureAwait(false));
+
+    private static async Task<byte[]> ReadBytesAsync(HttpResponseMessage response, CancellationToken token)
     {
         const int limit = 2 * 1024 * 1024;
         if (response.Content.Headers.ContentLength > limit) throw new JsonException("Response too large.");
@@ -97,6 +194,6 @@ internal static class ChatGptProtocol
             if (buffer.Length + count > limit) throw new JsonException("Response too large.");
             buffer.Write(chunk, 0, count);
         }
-        return JsonDocument.Parse(buffer.ToArray(), new JsonDocumentOptions { MaxDepth = 32 });
+        return buffer.ToArray();
     }
 }
