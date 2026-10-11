@@ -37,7 +37,8 @@ public sealed class TranslationModelCatalog(HttpClient http)
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) throw await ChatGptException.FromResponseAsync(response, deadline.Token).ConfigureAwait(false);
             using var json = await ChatGptProtocol.ReadJsonAsync(response, deadline.Token).ConfigureAwait(false);
-            if (!json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+            if (json.RootElement.ValueKind != JsonValueKind.Object
+                || !json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
                 throw new ModelCatalogException("ChatGPT 未返回账户可用模型，请稍后重新读取。");
             var choices = new List<TranslationModelChoice>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -47,14 +48,34 @@ public sealed class TranslationModelCatalog(HttpClient http)
                 if (ChatGptProtocol.Text(model, "visibility") != "list" || string.IsNullOrWhiteSpace(id)
                     || id.Length > 200 || id.Any(char.IsControl) || !seen.Add(id)) continue;
                 var name = ChatGptProtocol.Text(model, "display_name");
-                choices.Add(new(id, string.IsNullOrWhiteSpace(name) ? id : name));
+                var levels = ReadReasoningLevels(model);
+                var defaultEffort = ChatGptProtocol.Text(model, "default_reasoning_level");
+                choices.Add(new(id, string.IsNullOrWhiteSpace(name) ? id : name)
+                {
+                    SupportedReasoningLevels = levels,
+                    DefaultReasoningLevel = ThinkingLevelNames.TryParseEffort(defaultEffort, out var level)
+                        && levels?.Contains(level) == true ? level : null,
+                });
                 if (choices.Count == MaximumModels) break;
             }
+            deadline.Token.ThrowIfCancellationRequested();
+            tokens.UpdateModelCapabilities(accountId, choices);
             return new(choices.Select(c => c.Id).ToArray(), models.GetArrayLength() > MaximumModels) { Choices = choices };
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new ModelCatalogException("读取 ChatGPT 模型超时或账户已退出，请重试。"); }
         catch (HttpRequestException) { throw new ModelCatalogException("无法读取 ChatGPT 模型，请检查网络后重试。"); }
         catch (JsonException) { throw new ModelCatalogException("ChatGPT 模型列表格式无效，请稍后重试。"); }
+    }
+
+    private static IReadOnlyList<ThinkingLevel>? ReadReasoningLevels(JsonElement model)
+    {
+        if (!model.TryGetProperty("supported_reasoning_levels", out var entries)) return null;
+        var levels = new List<ThinkingLevel>();
+        if (entries.ValueKind == JsonValueKind.Array)
+            foreach (var entry in entries.EnumerateArray())
+                if (ThinkingLevelNames.TryParseEffort(ChatGptProtocol.Text(entry, "effort"), out var level)
+                    && !levels.Contains(level)) levels.Add(level);
+        return levels.AsReadOnly();
     }
 
     public static Uri Endpoint(TranslationProviderKind provider, string baseUrl)
