@@ -22,12 +22,14 @@
 每行请求是一个 JSON 对象：
 
 ```json
-{"schemaVersion":1,"id":"case-001-probe","action":"message","caseId":"case-001","url":"https://en.wikipedia.org/wiki/Machine_translation","message":{"type":"pageAutoProbe","requestId":"r1","documentToken":"opaque-document-token","tabId":1,"browserWindowId":1,"frameId":0,"generation":1,"revision":1,"documentLanguage":"en","siteHost":"en.wikipedia.org","blocks":[],"samples":[],"pageSummary":{}}}
+{"schemaVersion":1,"id":"case-001-probe","action":"message","caseId":"case-001","url":"https://en.wikipedia.org/wiki/Machine_translation","message":{"type":"pageAutoCandidate","requestId":"r1","documentToken":"opaque-document-token","tabId":1,"browserWindowId":1,"frameId":0,"generation":1,"revision":1,"documentLanguage":"en","siteHost":"en.wikipedia.org","blocks":[],"samples":[],"pageSummary":{}}}
 ```
 
-`action` 为 `capabilities`、`message` 或 `cancel`。message 是生产页面 session 发出的
-原始 `pageAutoProbe`、`pageAutoTranslate`/当前实际请求类型；只添加传输要求的
+`action` 为 `capabilities`、`assess`、`message` 或 `cancel`。message 是生产页面 session 发出的
+原始 `pageAutoCandidate`；只添加传输要求的
 tab/window/frame 信息。用现有协议读取和验证，不放宽实际限制。
+`assess` 提供 `samples` 和 `statistics`，单独核对被前端本地跳过的页面；只调用生产
+规则决策，不创建服务商、不读取凭据、不发起云请求。事件 type 为 `assessment`。
 
 每行事件保留请求的 `id` 和 `caseId`，`type` 为：
 
