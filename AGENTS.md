@@ -5,6 +5,7 @@
 3～5 个不重叠的文件归属任务，使用本仓库的 PowerShell 调度器。
 
 - 并行开发必须使用独立 `codex exec` 进程、独立 Git Worktree 和独立分支。
+- 开发 Agent 默认使用 gpt-6.1-sol、High 思考、fast 快速模式（priority 请求）；显式传入 CLI，不改全局配置。
 - 公共接口、依赖配置、共享入口先由主控完成并提交，再固定所有任务的基线 SHA。
 - 开发 Agent 只在分配的 Worktree 内修改 ownedPaths，禁止提交、合并、推送或操作其他工作区。
 - 需要越过文件归属或额外权限时，返回 blocked 和具体原因，由主控处理。

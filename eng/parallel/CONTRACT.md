@@ -56,7 +56,9 @@ Start-CodexTask.ps1 参数：Worktree、PromptPath、AttemptPath、CodexPath='co
 --cd <own> --json --output-schema <schema> --output-last-message <result> -。
 提示经 UTF-8 stdin 传入；日志由外层 worker 捕获；CLI 不获得其他 Worktree 写权限。
 明确清空额外 writable_roots 并禁止沙盒内网络访问；依赖和资源由主控预备。
-默认使用现有 Codex 登录与模型设置；无需复制认证文件或覆盖用户配置。
+使用现有 Codex 登录；无需复制认证文件或覆盖用户配置。
+用户指定四个开发 Agent 统一使用 gpt-6.1-sol、model_reasoning_effort="high"、
+service_tier="fast"（快速模式，CLI 映射为 priority 请求）。启动器显式传参，并在 process.json 中记录设置。
 CLI 启用 prefer_mxc：设备支持时使用官方推荐的原生 MXC，保留配置中的旧式沙盒回退；
 若旧式沙盒初始化失败，报告日志原因，不降低沙盒或自动申请管理员权限。
 不接受降低沙盒的参数。非交互审批不能取得授权时，返回 blocked 和权限原因交主控。
