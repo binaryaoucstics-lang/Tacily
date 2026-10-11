@@ -292,16 +292,18 @@
                         <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock Text="思考等级" Style="{StaticResource SettingLabelStyle}" />
-                            <TextBlock Text="速度优先建议关闭；复杂对白可选低。" Style="{StaticResource SettingDescriptionStyle}" />
+                            <TextBlock Text="{Binding ThinkingRecommendation}" Style="{StaticResource SettingDescriptionStyle}" />
                         </StackPanel>
                         <ComboBox Grid.Column="1" ItemsSource="{Binding ThinkingLevels}" SelectedItem="{Binding ThinkingLevel}" MinWidth="260" />
                     </Grid>
                     <TextBlock Text="{Binding ThinkingDescription}"
                                TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
                     <CheckBox Content="限制低思考等待时间" IsChecked="{Binding BoundedLowThinkingEnabled}"
-                              IsEnabled="{Binding CanBoundLowThinkingWait}" Margin="0,12,0,0" />
+                              IsEnabled="{Binding CanBoundLowThinkingWait}" Margin="0,12,0,0"
+                              Visibility="{Binding ShowDeepSeekThinking, Converter={StaticResource BooleanToVisibilityConverter}}" />
                     <TextBlock Text="仅 DeepSeek：低思考 12 秒仍未返回内容时，以关闭思考重试一次，可能多一次请求。"
-                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0"
+                               Visibility="{Binding ShowDeepSeekThinking, Converter={StaticResource BooleanToVisibilityConverter}}" />
                 </StackPanel>
             </Border>
             <Border Style="{StaticResource SettingCardStyle}">

@@ -4,6 +4,8 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ScreenTranslator.Core.Translation;
 using ScreenTranslator.Core.Settings;
+using ScreenTranslator.Core.Models;
+using ThinkingValue = ScreenTranslator.Core.Models.ThinkingLevel;
 
 namespace ScreenTranslator.App.ViewModels;
 
@@ -34,7 +36,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             {
                 _providerDrafts[ProviderKind] = (SelectedModel, BaseUrl);
                 _defaultProvider = SelectedProvider;
-                _defaultThinking = ThinkingLevel;
+                _defaultThinking = _preferredThinkingLevel;
                 _defaultBounded = BoundedLowThinkingEnabled;
                 _defaultNetwork = CollectNetwork();
                 _defaultOpenAiAuthenticationMode = _authenticationMode;
@@ -52,8 +54,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                     SelectedProvider = TranslationProviderConfiguration.Label(config.Provider);
                     SelectedModel = config.Model;
                     BaseUrl = config.BaseUrl;
-                    ThinkingLevel = config.ThinkingLevel switch
-                    { ScreenTranslator.Core.Models.ThinkingLevel.None => "关闭", ScreenTranslator.Core.Models.ThinkingLevel.High => "高", ScreenTranslator.Core.Models.ThinkingLevel.Max => "最高", _ => "低" };
+                    ThinkingLevel = ThinkingLevelNames.Label(config.ThinkingLevel);
                     BoundedLowThinkingEnabled = config.BoundedLowThinkingEnabled;
                     ApplyNetwork(config.Network);
                     _authenticationMode = config.AuthenticationMode;
@@ -103,9 +104,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         {
             Id = preset.Id, Name = string.IsNullOrWhiteSpace(preset.Name) ? "自定义服务商" : preset.Name.Trim(),
             Provider = ProviderKind, Model = SelectedModel.Trim(), BaseUrl = BaseUrl.Trim(),
-            ThinkingLevel = ThinkingLevel switch { "关闭" => ScreenTranslator.Core.Models.ThinkingLevel.None,
-                "高" => ScreenTranslator.Core.Models.ThinkingLevel.High, "最高" => ScreenTranslator.Core.Models.ThinkingLevel.Max,
-                _ => ScreenTranslator.Core.Models.ThinkingLevel.Low }, BoundedLowThinkingEnabled = BoundedLowThinkingEnabled,
+            ThinkingLevel = ThinkingLevelNames.FromLabel(_preferredThinkingLevel), BoundedLowThinkingEnabled = BoundedLowThinkingEnabled,
             Network = CollectNetwork(),
             AuthenticationMode = UsesChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
             ChatGptAccountId = _chatGptAccountId,
@@ -122,9 +121,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             Name = copy ? (SelectedPreset?.Name ?? SelectedProvider) + " 副本" : "自定义服务商 " + (Presets.Count + 1),
             Provider = copy ? ProviderKind : TranslationProviderKind.ChatCompletions,
             Model = copy ? SelectedModel : "", BaseUrl = copy ? BaseUrl : TranslationProviderConfiguration.DefaultOpenAiBaseUrl,
-            ThinkingLevel = copy ? (ThinkingLevel switch { "低" => ScreenTranslator.Core.Models.ThinkingLevel.Low,
-                "高" => ScreenTranslator.Core.Models.ThinkingLevel.High, "最高" => ScreenTranslator.Core.Models.ThinkingLevel.Max,
-                _ => ScreenTranslator.Core.Models.ThinkingLevel.None }) : ScreenTranslator.Core.Models.ThinkingLevel.None,
+            ThinkingLevel = copy ? ThinkingLevelNames.FromLabel(_preferredThinkingLevel) : ThinkingValue.None,
             BoundedLowThinkingEnabled = BoundedLowThinkingEnabled,
             Network = copy ? CollectNetwork() : new(),
             AuthenticationMode = copy && UsesChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
@@ -189,6 +186,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                 NotifyChatGptState();
             }
             finally { IsSwitchingProvider = _applyingPreset; }
+            RefreshThinkingLevels();
+            if (!_applyingPreset) QueueChatGptModelRefresh();
             OnPropertyChanged();
         }
     }
@@ -216,38 +215,61 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         NotifyChatGptState();
         if (saving) InvalidateClashDiscovery();
     }
-    public string ThinkingDescription => TranslationProviderConfiguration.ThinkingDescription(ProviderKind, SelectedModel, _thinkingLevel switch
-    { "关闭" => ScreenTranslator.Core.Models.ThinkingLevel.None, "高" => ScreenTranslator.Core.Models.ThinkingLevel.High,
-        "最高" => ScreenTranslator.Core.Models.ThinkingLevel.Max, _ => ScreenTranslator.Core.Models.ThinkingLevel.Low });
+    public bool ShowDeepSeekThinking => ProviderKind == TranslationProviderKind.DeepSeek;
+    private bool HasNoIndependentThinking => ProviderKind == TranslationProviderKind.OpenAI
+        && _supportedThinkingLevels.Count == 1 && _supportedThinkingLevels[0] == ThinkingValue.None
+        && (!UsesChatGptPlan || ChatGptModels.FirstOrDefault(c => c.Id == SelectedModel)?.SupportedReasoningLevels is null)
+        && TranslationProviderConfiguration.Thinking(ProviderKind, SelectedModel, ThinkingValue.None).Mode == "unsupported";
+    public string ThinkingRecommendation => ShowDeepSeekThinking ? "速度优先建议关闭；复杂对白可选低。"
+        : HasNoIndependentThinking ? "该模型不支持独立思考等级。"
+        : _supportedThinkingLevels.Count == 0 ? "当前模型使用服务端默认思考配置。"
+        : "按当前模型支持的等级选择；等级越高，通常等待越久。";
+    public string ThinkingDescription => ProviderKind == TranslationProviderKind.OpenAI
+        ? HasNoIndependentThinking ? "该模型不支持独立思考参数，不发送 reasoning 配置。"
+            : _supportedThinkingLevels.Count == 0 ? "当前模型未提供已识别的思考等级，使用服务端默认，不发送额外思考参数。"
+            : $"{SelectedModel} · 使用 Responses reasoning.effort={ThinkingLevelNames.Effort(ThinkingLevelNames.FromLabel(ThinkingLevel))}；"
+                + (_supportedThinkingLevels.Contains(ThinkingValue.None) ? "等级控制推理强度。" : "该模型无法关闭思考；等级控制推理强度。")
+        : TranslationProviderConfiguration.ThinkingDescription(ProviderKind, SelectedModel, ThinkingLevelNames.FromLabel(ThinkingLevel));
 
     public void ApplyProviderSettings(AppSettings settings)
     {
-        _providerDrafts[TranslationProviderKind.DeepSeek] = (settings.DeepSeekModel, settings.DeepSeekBaseUrl);
-        _providerDrafts[TranslationProviderKind.OpenAI] = (settings.OpenAiModel, settings.OpenAiBaseUrl);
-        _providerDrafts[TranslationProviderKind.Claude] = (settings.ClaudeModel, settings.ClaudeBaseUrl);
-        _providerDrafts[TranslationProviderKind.ChatCompletions] = (settings.ChatCompletionsModel, settings.ChatCompletionsBaseUrl);
-        _authenticationMode = _defaultOpenAiAuthenticationMode = settings.OpenAiAuthenticationMode;
-        _chatGptAccountId = _defaultChatGptAccountId = settings.ChatGptAccountId;
-        _selectedPreset = null;
-        _defaultNetwork = settings.ApiNetwork;
-        ApplyNetwork(_defaultNetwork);
-        Presets.Clear();
-        foreach (var preset in settings.TranslationProviderPresets) Presets.Add(new ProviderPresetViewModel(preset));
-        // Do not overwrite the just-loaded draft when changing provider.
-        var target = TranslationProviderConfiguration.Label(settings.TranslationProvider);
-        if (target != SelectedProvider)
+        _applyingPreset = true;
+        IsSwitchingProvider = true;
+        try
         {
-            var activeDraft = _providerDrafts[ProviderKind];
-            SelectedModel = activeDraft.Model;
-            BaseUrl = activeDraft.Url;
-            SelectedProvider = target;
+            _providerDrafts[TranslationProviderKind.DeepSeek] = (settings.DeepSeekModel, settings.DeepSeekBaseUrl);
+            _providerDrafts[TranslationProviderKind.OpenAI] = (settings.OpenAiModel, settings.OpenAiBaseUrl);
+            _providerDrafts[TranslationProviderKind.Claude] = (settings.ClaudeModel, settings.ClaudeBaseUrl);
+            _providerDrafts[TranslationProviderKind.ChatCompletions] = (settings.ChatCompletionsModel, settings.ChatCompletionsBaseUrl);
+            _authenticationMode = _defaultOpenAiAuthenticationMode = settings.OpenAiAuthenticationMode;
+            _chatGptAccountId = _defaultChatGptAccountId = settings.ChatGptAccountId;
+            _selectedPreset = null;
+            _defaultNetwork = settings.ApiNetwork;
+            ApplyNetwork(_defaultNetwork);
+            Presets.Clear();
+            foreach (var preset in settings.TranslationProviderPresets) Presets.Add(new ProviderPresetViewModel(preset));
+            // Do not overwrite the just-loaded draft when changing provider.
+            var target = TranslationProviderConfiguration.Label(settings.TranslationProvider);
+            if (target != SelectedProvider)
+            {
+                var activeDraft = _providerDrafts[ProviderKind];
+                SelectedModel = activeDraft.Model;
+                BaseUrl = activeDraft.Url;
+                SelectedProvider = target;
+            }
+            var selected = _providerDrafts[ProviderKind];
+            SelectedModel = selected.Model;
+            BaseUrl = selected.Url;
+            ThinkingLevel = _defaultThinking = ThinkingLevelNames.Label(settings.ThinkingLevel);
+            BoundedLowThinkingEnabled = _defaultBounded = settings.BoundedLowThinkingEnabled;
+            _defaultProvider = target;
         }
-        var selected = _providerDrafts[ProviderKind];
-        SelectedModel = selected.Model;
-        BaseUrl = selected.Url;
+        finally { _applyingPreset = false; IsSwitchingProvider = false; }
+        InvalidateModelList();
         SelectedPreset = Presets.FirstOrDefault(p => p.Id == settings.SelectedTranslationPresetId);
         OnPropertyChanged(nameof(SelectedPreset)); OnPropertyChanged(nameof(PresetName)); OnPropertyChanged(nameof(CanEditPreset));
         OnPropertyChanged(nameof(SelectedAuthentication)); OnPropertyChanged(nameof(SelectedChatGptAccount)); NotifyChatGptState();
+        QueueChatGptModelRefresh();
     }
 
     public AppSettings CollectProviderSettings(AppSettings settings)
@@ -258,6 +280,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             _defaultNetwork = CollectNetwork();
             _defaultOpenAiAuthenticationMode = _authenticationMode;
             _defaultChatGptAccountId = _chatGptAccountId;
+            _defaultThinking = _preferredThinkingLevel;
+            _defaultBounded = BoundedLowThinkingEnabled;
         }
         CapturePreset();
         return settings with
@@ -274,6 +298,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             SelectedTranslationPresetId = SelectedPreset?.Id ?? "",
             ApiNetwork = _defaultNetwork,
             OpenAiAuthenticationMode = _defaultOpenAiAuthenticationMode, ChatGptAccountId = _defaultChatGptAccountId,
+            ThinkingLevel = ThinkingLevelNames.FromLabel(_defaultThinking), BoundedLowThinkingEnabled = _defaultBounded,
         };
     }
 
@@ -283,6 +308,10 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
     private bool _isEditingApiKey;
     private string _selectedModel = "deepseek-flash";
     private string _thinkingLevel = "关闭";
+    // Keep the saved/user choice while OAuth metadata is absent; a fallback display must not erase it.
+    private string _preferredThinkingLevel = "关闭";
+    private bool _refreshingThinkingLevels;
+    private IReadOnlyList<ThinkingValue> _supportedThinkingLevels = [ThinkingValue.None, ThinkingValue.Low, ThinkingValue.High, ThinkingValue.Max];
     private bool _boundedLowThinkingEnabled = true;
     private string _inputMode = "VLM 直接翻译";
     private bool _inPlaceTranslationEnabled = true;
@@ -339,9 +368,61 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         get => _thinkingLevel;
         set
         {
-            if (SetProperty(ref _thinkingLevel, value))
+            if (_refreshingThinkingLevels || value is null) return;
+            _preferredThinkingLevel = ThinkingLevelNames.Label(ThinkingLevelNames.FromLabel(value));
+            if (_applyingPreset) return;
+            var choice = UsesChatGptPlan ? ChatGptModels.FirstOrDefault(c => c.Id == SelectedModel) : null;
+            var effective = NormalizeThinkingPreference(choice);
+            PreserveNormalizedThinkingPreference(choice, effective);
+            if (SetProperty(ref _thinkingLevel, _supportedThinkingLevels.Count == 0 ? "服务端默认" : ThinkingLevelNames.Label(effective)))
             { OnPropertyChanged(nameof(CanBoundLowThinkingWait)); OnPropertyChanged(nameof(ThinkingDescription)); }
         }
+    }
+
+    private ThinkingValue NormalizeThinkingPreference(TranslationModelChoice? choice)
+    {
+        var requested = ThinkingLevelNames.FromLabel(_preferredThinkingLevel);
+        return _supportedThinkingLevels.Contains(requested) ? requested
+            : choice?.DefaultReasoningLevel is { } suggested && _supportedThinkingLevels.Contains(suggested) ? suggested
+            : TranslationThinkingCatalog.Normalize(requested, _supportedThinkingLevels);
+    }
+
+    private void PreserveNormalizedThinkingPreference(TranslationModelChoice? choice, ThinkingValue effective)
+    {
+        // Missing account metadata is temporary. Normalize permanently only once capabilities are known.
+        if (_supportedThinkingLevels.Count > 0 && (!UsesChatGptPlan || choice?.SupportedReasoningLevels is not null))
+            _preferredThinkingLevel = ThinkingLevelNames.Label(effective);
+    }
+
+    private void RefreshThinkingLevels()
+    {
+        if (_applyingPreset) return;
+        var choice = UsesChatGptPlan ? ChatGptModels.FirstOrDefault(c => c.Id == SelectedModel) : null;
+        _supportedThinkingLevels = choice?.SupportedReasoningLevels
+            ?? TranslationThinkingCatalog.SupportedLevels(ProviderKind, SelectedModel, UsesChatGptPlan);
+        var effective = NormalizeThinkingPreference(choice);
+        var labels = _supportedThinkingLevels.Count == 0 ? new[] { "服务端默认" }
+            : _supportedThinkingLevels.Select(ThinkingLevelNames.Label).ToArray();
+        _refreshingThinkingLevels = true;
+        var replacedLevels = !ThinkingLevels.SequenceEqual(labels);
+        try
+        {
+            if (replacedLevels)
+            {
+                ThinkingLevels.Clear();
+                foreach (var label in labels) ThinkingLevels.Add(label);
+            }
+            var changed = SetProperty(ref _thinkingLevel, _supportedThinkingLevels.Count == 0 ? "服务端默认" : ThinkingLevelNames.Label(effective), nameof(ThinkingLevel));
+            // Rebind SelectedItem after replacing the collection, even if its text stayed the same.
+            if (replacedLevels && !changed) OnPropertyChanged(nameof(ThinkingLevel));
+            PreserveNormalizedThinkingPreference(choice, effective);
+        }
+        finally { _refreshingThinkingLevels = false; }
+        OnPropertyChanged(nameof(ThinkingLevels));
+        OnPropertyChanged(nameof(ThinkingDescription));
+        OnPropertyChanged(nameof(ThinkingRecommendation));
+        OnPropertyChanged(nameof(ShowDeepSeekThinking));
+        OnPropertyChanged(nameof(CanBoundLowThinkingWait));
     }
 
     public bool BoundedLowThinkingEnabled
@@ -430,7 +511,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             if (_updatingModels) return;
             value ??= "";
             if (SetProperty(ref _selectedModel, value))
-            { InvalidateConnection(); OnPropertyChanged(nameof(ThinkingDescription)); TestConnectionCommand.NotifyCanExecuteChanged(); }
+            { InvalidateConnection(); RefreshThinkingLevels(); TestConnectionCommand.NotifyCanExecuteChanged(); }
         }
     }
 
@@ -584,9 +665,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         });
         var request = new TranslationConnectionTestRequest(ApiKey, SelectedModel, UsesChatGptPlan ? TranslationProviderConfiguration.DefaultOpenAiBaseUrl : BaseUrl, provider, ActiveSecretName, CollectNetwork())
         {
-            ThinkingLevel = ThinkingLevel switch { "低" => ScreenTranslator.Core.Models.ThinkingLevel.Low,
-                "高" => ScreenTranslator.Core.Models.ThinkingLevel.High, "最高" => ScreenTranslator.Core.Models.ThinkingLevel.Max,
-                _ => ScreenTranslator.Core.Models.ThinkingLevel.None }, Progress = stream,
+            ThinkingLevel = ThinkingLevelNames.FromLabel(ThinkingLevel), Progress = stream,
             UseChatGptPlan = UsesChatGptPlan, ChatGptAccountId = _chatGptAccountId,
         };
         ConnectionStatus = $"正在通过 {TranslationProviderConfiguration.Label(provider)} 翻译测试句…";
