@@ -55,6 +55,10 @@ DpapiSecretStore 和 provider，参数与 ApplicationController.AutoPages 相同
 OAuth 仅使用正常账户服务的 token 获取/续期；正常续期可能更新受保护 OAuth token，
 不调用登录或授权 UI，不切换账户、计费模式、provider 或模型，不提供模拟回退。
 
+首批候选按生产规则判断页面。后续候选不带 samples 时，复用同 case/document/tab/window/
+generation/revision 的判断，与生产协调器的文档会话一致；未知文档的无样本候选失败，
+不会误当成“不需要翻译”的成功结束。新版本或新文档不能继承旧判断。
+
 ## 主控责任
 
 worker 仅运行离线验收。主控负责在已授权环境准备构建资源、执行真实模式、Browser Use
