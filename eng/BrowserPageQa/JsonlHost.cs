@@ -25,6 +25,7 @@ internal sealed class JsonlHost : IAsyncDisposable
     private readonly Dictionary<string, Work> _active = new(StringComparer.Ordinal);
     private readonly HashSet<string> _usedIds = new(StringComparer.Ordinal);
     private readonly AsyncLocal<Work?> _current = new();
+    private readonly ConcurrentDictionary<DocumentKey, PageTranslationAssessment> _documentAssessments = new();
     private readonly BrowserPageTranslationCache _cache = new();
     private readonly BrowserPageTranslationService _service;
     private bool _stopping;
@@ -161,6 +162,24 @@ internal sealed class JsonlHost : IAsyncDisposable
         return PageTranslationDecision.Inspect(candidate.Samples ?? [], settings.TargetLanguage, candidate.Statistics).RuleDecision;
     }
 
+    private PageTranslationAssessment AssessDocument(Work work)
+    {
+        var candidate = work.Candidate;
+        if (candidate.ManualMode is not null) return Assess(candidate, work.Settings!);
+        var key = new DocumentKey(work.CaseId, candidate.TabId, candidate.WindowId,
+            candidate.DocumentToken, candidate.Generation, candidate.Revision);
+        // Production's coordinator retains the assessment in its document session.
+        // Continuation packets intentionally omit samples: they are not new pages.
+        if (candidate.Samples is null)
+            return _documentAssessments.TryGetValue(key, out var prior) ? prior
+                : throw new HostException("page_assessment_missing");
+        if (_documentAssessments.Count >= 2048 && !_documentAssessments.ContainsKey(key))
+            throw new HostException("assessment_capacity");
+        var assessment = Assess(candidate, work.Settings!);
+        _documentAssessments[key] = assessment with { EligibleBlocks = [] };
+        return assessment;
+    }
+
     private async Task ExecuteSafelyAsync(Work work)
     {
         try { await ExecuteAsync(work); }
@@ -188,7 +207,7 @@ internal sealed class JsonlHost : IAsyncDisposable
             // Admission is an empty valid production translations frame. The transport metadata
             // lets the bridge resolve session.send with { accepted: true }; no invented frame type.
             await PacketAsync(work, new("pageAutoTranslations"), accepted: true);
-            var assessment = Assess(work.Candidate, work.Settings);
+            var assessment = AssessDocument(work);
             await PacketAsync(work, new("pageAutoAssessment", assessment));
             if (assessment.NeedsTranslation && work.Candidate.Blocks.Count != 0)
             {
@@ -315,6 +334,7 @@ internal sealed class JsonlHost : IAsyncDisposable
     }
 
     private sealed class HostException(string code) : Exception { public string Code { get; } = code; }
+    private sealed record DocumentKey(string CaseId, int TabId, int WindowId, string Token, long Generation, long Revision);
     private sealed class Work(string id, string caseId, AutoPageCandidate candidate)
     {
         public string Id { get; } = id;

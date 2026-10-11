@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ScreenTranslator.Core.Abstractions;
 using ScreenTranslator.Core.Models;
 using ScreenTranslator.Core.Settings;
@@ -26,6 +27,7 @@ internal static class SelfTest
             ("live-factory-failure-never-falls-back", NoFallbackAsync),
             ("read-only-settings-migration-and-corruption", SettingsAsync),
             ("running-preset-scope-resolution", RunningPresetAsync),
+            ("continuation-reuses-document-assessment", ContinuationAsync),
             ("bounded-jsonl-and-eof-drain", InputAsync),
             ("broken-output-cannot-exit-successfully", TransportAsync),
         };
@@ -233,6 +235,27 @@ internal static class SelfTest
         catch (InvalidDataException) { mismatch = true; }
         Check(mismatch);
         return Task.CompletedTask;
+    }
+
+    private static async Task ContinuationAsync()
+    {
+        var output = new StringWriter();
+        await using var host = Host(output, _ => new SyntheticProvider(FinishAsync));
+        await host.HandleAsync(Candidate("document-first")); await host.DrainAsync();
+        var follow = JsonNode.Parse(Candidate("document-next").Replace(Source, Source + " The flowers are blooming."))!;
+        follow["message"]!.AsObject().Remove("samples");
+        follow["message"]!.AsObject().Remove("pageSummary");
+        await host.HandleAsync(follow.ToJsonString()); await host.DrainAsync();
+        var terminal = Terminal(output, "document-next");
+        Check(terminal.GetProperty("success").GetBoolean() && terminal.GetProperty("requestCount").GetInt32() > 0);
+        Check(Events(output).Where(e => Id(e) == "document-next" && Type(e) == "packet")
+            .SelectMany(e => e.GetProperty("packet").GetProperty("updates").EnumerateArray())
+            .Any(u => u.GetProperty("complete").GetBoolean()));
+        follow["id"] = "unknown-document";
+        follow["message"]!["requestId"] = "unknown-document";
+        follow["message"]!["documentToken"] = "new-document-without-assessment";
+        await host.HandleAsync(follow.ToJsonString()); await host.DrainAsync();
+        Check(!Terminal(output, "unknown-document").GetProperty("success").GetBoolean());
     }
 
     private static async Task InputAsync()
