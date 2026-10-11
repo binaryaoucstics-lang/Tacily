@@ -26,6 +26,8 @@
 
 ## 使用
 
+下载 [Windows 最新发布包](https://github.com/binaryaoucstics-lang/Tacily/releases/latest)。提供安装版和解压即用版，均包含 Chrome 扩展，无需另装 .NET。
+
 ### 使用 ChatGPT 订阅额度
 
 在“翻译设置”选择 **OpenAI Responses**，将“使用方式”改为 **ChatGPT 登录（使用订阅额度）**，点击 **Continue with ChatGPT**，在系统浏览器中登录并授权。返回后从账户可用模型中选择模型，保存并运行“翻译测速”。无需填写 API Key，翻译使用官方 Responses API。
@@ -54,7 +56,7 @@ dotnet test ScreenTranslator.sln -c Release --no-build
 node --test (Get-ChildItem ./browser-extension/tests -Filter *.test.js).FullName
 
 # 生成 Windows 自包含包；输出目录须为空
-./eng/build-release.ps1 -Version 0.14.5
+./eng/build-release.ps1 -Version 0.14.6
 ```
 
 大体积字体与 ONNX 权重不纳入 Git，来源、版本、哈希见 [资源清单](eng/assets.json)。网页语言识别使用固定的 Unicode、正文与常用词程序规则，不加载语言模型；图片判断使用轻量 PP-OCRv5。本地判断不发送网络请求。已移除旧 OvisOCR2/Python、Manga OCR、CRAFT/Comic Text Detector、D1、NTextCat/Core14 与双 VLM 定位实验链路。
