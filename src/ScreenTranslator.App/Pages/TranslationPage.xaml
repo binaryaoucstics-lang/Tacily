@@ -83,6 +83,11 @@
                     <ComboBox x:Name="ChatGptAccountCombo" ItemsSource="{Binding ChatGptAccounts}" DisplayMemberPath="Label"
                               SelectedItem="{Binding SelectedChatGptAccount}" IsEnabled="{Binding CanEditProvider}" MinWidth="260" />
                     <TextBlock Text="{Binding ChatGptPlanStatus}" FontWeight="SemiBold" Margin="0,10,0,0" TextWrapping="Wrap" />
+                    <CheckBox x:Name="ChatGptFastModeToggle" Content="快速模式" Margin="0,12,0,0"
+                              IsChecked="{Binding ChatGptFastModeEnabled, Mode=TwoWay}"
+                              IsEnabled="{Binding CanEditChatGptFastMode}" />
+                    <TextBlock x:Name="ChatGptFastModeDescriptionText" Text="{Binding ChatGptFastModeDescription}"
+                               Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" />
                     <WrapPanel Margin="0,12,0,0">
                         <ui:Button x:Name="ChatGptSignInButton" Content="Continue with ChatGPT" Command="{Binding SignInChatGptCommand}" Padding="14,7" />
                         <ui:Button Content="添加账户 / 工作区" Command="{Binding AddChatGptAccountCommand}" Padding="12,7" Margin="8,0,0,0" />
@@ -358,6 +363,9 @@
                         <TextBlock Text="{Binding TotalTimeMetric}" Margin="0,0,0,8" FontWeight="SemiBold" />
                     </WrapPanel>
                     <TextBlock Text="{Binding ThroughputNote}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
+                    <TextBlock x:Name="ServiceTierNoteText" Text="{Binding ServiceTierNote}" TextWrapping="Wrap"
+                               Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0"
+                               Visibility="{Binding ShowServiceTierNote, Converter={StaticResource BooleanToVisibilityConverter}}" />
                 </StackPanel>
             </Border>
 

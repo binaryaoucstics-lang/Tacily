@@ -116,6 +116,9 @@ public static class InstallationCheck
                 && modelControl.Text == translationModel.SelectedModel && modelControl.Items.Count >= 3;
             if (provider == "OpenAI") modelControl.Text = "gpt-6.1-sol";
             else modelControl.Text = "claude-opus-5-5";
+            // Each provider check starts from the requested "off" choice. The prior
+            // model may have normalized that choice to low thinking.
+            translationModel.ThinkingLevel = "关闭";
             settingsPage.UpdateLayout();
             translationProviderControlsVerified &= translationModel.SelectedModel == modelControl.Text
                 && translationModel.ThinkingDescription.Contains("无法关闭", StringComparison.Ordinal);
@@ -345,11 +348,23 @@ public static class InstallationCheck
         var vm = new TranslationSettingsViewModel { SelectedProvider = "OpenAI" };
         var page = new TranslationPage(vm);
         Render(page, 760, 900, Path.Combine(folder, "chatgpt-api-key-preview.png"));
+        var fastMode = (System.Windows.Controls.CheckBox)page.FindName("ChatGptFastModeToggle");
+        var fastModeDescription = (System.Windows.Controls.TextBlock)page.FindName("ChatGptFastModeDescriptionText");
+        var tierNote = (System.Windows.Controls.TextBlock)page.FindName("ServiceTierNoteText");
+        var accountCard = (FrameworkElement)page.FindName("ChatGptAccountCard");
+        var verified = accountCard.Visibility == Visibility.Collapsed && fastMode.IsChecked == false
+            && !fastMode.IsEnabled && !vm.ChatGptFastModeEnabled && tierNote.Visibility == Visibility.Collapsed;
         var authentication = (System.Windows.Controls.ComboBox)page.FindName("OpenAiAuthenticationCombo");
         authentication.SelectedItem = "ChatGPT 登录（使用订阅额度）";
         page.UpdateLayout();
-        var verified = vm.UsesChatGptPlan && ((FrameworkElement)page.FindName("ChatGptAccountCard")).Visibility == Visibility.Visible
-            && ((FrameworkElement)page.FindName("ApiKeyCard")).Visibility == Visibility.Collapsed && !vm.TestConnectionCommand.CanExecute(null);
+        verified &= vm.UsesChatGptPlan && accountCard.Visibility == Visibility.Visible
+            && ((FrameworkElement)page.FindName("ApiKeyCard")).Visibility == Visibility.Collapsed && !vm.TestConnectionCommand.CanExecute(null)
+            && fastMode.IsEnabled && fastMode.IsChecked == false && fastModeDescription.Text == vm.ChatGptFastModeDescription
+            && fastModeDescription.Text.Contains("额度");
+        vm.SetSaving(true); page.UpdateLayout();
+        verified &= !fastMode.IsEnabled;
+        vm.SetSaving(false); page.UpdateLayout();
+        verified &= fastMode.IsEnabled;
         var account = new ChatGptAccount(Guid.NewGuid().ToString("N"), "离线演示账户 · 仅用于界面检查", true, true, false);
         vm.ChatGptAccountsLoader = _ => Task.FromResult<IReadOnlyList<ChatGptAccount>>([account]);
         vm.ChatGptSigner = (_, _) => Task.FromResult(new ChatGptSignInResult(account, false));
@@ -362,8 +377,73 @@ public static class InstallationCheck
         models.SelectedValue = "offline-model-b";
         page.UpdateLayout();
         verified &= vm.SelectedModel == "offline-model-b" && models.SelectedItem is TranslationModelChoice { DisplayName: "演示模型 B" };
-        Render(page, 760, 2450, Path.Combine(folder, "chatgpt-oauth-settings-preview.png"));
-        Render((FrameworkElement)page.FindName("ChatGptAccountCard"), 680, 340, Path.Combine(folder, "chatgpt-oauth-card-preview.png"));
+        Render(page, 760, 2700, Path.Combine(folder, "chatgpt-oauth-settings-preview.png"));
+        Render(accountCard, 680, 440, Path.Combine(folder, "chatgpt-oauth-card-preview.png"));
+        // These delegates use only synthetic account metadata and results. No controller,
+        // credential store, HTTP client or real account is involved in this check.
+        var observedRequests = new List<TranslationConnectionTestRequest>();
+        string? effectiveTier = "priority";
+        vm.ConnectionTester = (request, _) =>
+        {
+            observedRequests.Add(request);
+            return Task.FromResult(new ConnectionTestResult(true, "离线合成测速")
+            {
+                Benchmark = new(TranslationBenchmark.SourceSentence, "离线合成译文，仅用于检查界面。", TimeSpan.FromSeconds(1),
+                    TimeSpan.FromMilliseconds(200), 40, 32, 0, BenchmarkRateKind.ContentGeneration)
+                { RequestedServiceTier = request.ChatGptFastModeEnabled ? "fast" : null, EffectiveServiceTier = effectiveTier },
+            });
+        };
+        fastMode.SetCurrentValue(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty, true);
+        page.UpdateLayout();
+        verified &= vm.ChatGptFastModeEnabled && fastMode.IsChecked == true;
+        await vm.TestConnectionCommand.ExecuteAsync(null); page.UpdateLayout();
+        verified &= observedRequests[^1].ChatGptFastModeEnabled && observedRequests[^1].UseChatGptPlan
+            && tierNote.Visibility == Visibility.Visible && tierNote.Text == "请求：快速模式；实际：快速模式。";
+        var fastPreview = Path.Combine(folder, "chatgpt-fast-settings-preview.png");
+        Render(page, 760, 2900, fastPreview);
+        // Crop from the rendered page: an attached card inherits ScrollViewer clipping.
+        var fastFrame = BitmapFrame.Create(new Uri(fastPreview, UriKind.RelativeOrAbsolute), BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+        foreach (var (control, filename) in new[]
+        {
+            (accountCard, "chatgpt-fast-mode-preview.png"),
+            ((FrameworkElement)page.FindName("ApiBenchmarkCard"), "chatgpt-fast-benchmark-preview.png"),
+        })
+        {
+            var origin = control.TransformToAncestor(page).Transform(new System.Windows.Point());
+            var crop = new CroppedBitmap(fastFrame, new Int32Rect((int)origin.X, (int)origin.Y,
+                (int)Math.Ceiling(control.ActualWidth), (int)Math.Ceiling(control.ActualHeight)));
+            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(crop));
+            using var file = File.Create(Path.Combine(folder, filename)); encoder.Save(file);
+        }
+        foreach (var (tier, expected) in new (string?, string)[]
+        {
+            ("fast", "请求：快速模式；实际：快速模式。"),
+            ("default", "请求：快速模式；实际：普通模式（快速模式未生效）。"),
+            (null, "请求：快速模式；实际：未确认（服务端未返回处理模式）。"),
+            ("unknown-tier", "请求：快速模式；实际：未确认（服务端返回未识别的模式：unknown-tier）。"),
+        })
+        {
+            effectiveTier = tier;
+            await vm.TestConnectionCommand.ExecuteAsync(null); page.UpdateLayout();
+            verified &= tierNote.Visibility == Visibility.Visible && tierNote.Text == expected;
+        }
+        var pending = new TaskCompletionSource<ConnectionTestResult>();
+        CancellationToken previousToken = default;
+        vm.ConnectionTester = (_, token) => { previousToken = token; return pending.Task; };
+        var oldTest = vm.TestConnectionCommand.ExecuteAsync(null);
+        fastMode.SetCurrentValue(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty, false);
+        page.UpdateLayout();
+        verified &= !vm.ChatGptFastModeEnabled && previousToken.IsCancellationRequested && vm.ConnectionBenchmark is null
+            && tierNote.Visibility == Visibility.Collapsed;
+        pending.SetResult(new(true, "旧测速不应出现")
+        { Benchmark = new(TranslationBenchmark.SourceSentence, "旧译文", TimeSpan.FromSeconds(1), null, null, null, null, BenchmarkRateKind.Unavailable)
+            { RequestedServiceTier = "fast", EffectiveServiceTier = "fast" } });
+        await oldTest; page.UpdateLayout();
+        verified &= !vm.ConnectionSucceeded && vm.ConnectionBenchmark is null && tierNote.Visibility == Visibility.Collapsed
+            && !vm.ConnectionStatus.Contains("旧测速");
+        authentication.SelectedItem = "API Key"; page.UpdateLayout();
+        verified &= accountCard.Visibility == Visibility.Collapsed && !fastMode.IsEnabled;
+        authentication.SelectedItem = "ChatGPT 登录（使用订阅额度）"; page.UpdateLayout();
         var usageOpened = false;
         vm.ChatGptUsageOpener = () => usageOpened = true;
         ((Wpf.Ui.Controls.Button)page.FindName("ChatGptManageUsageButton")).Command.Execute(null);
@@ -371,7 +451,7 @@ public static class InstallationCheck
         account = account with { UsagePaused = true };
         await vm.RefreshChatGptAccountsAsync(); page.UpdateLayout();
         verified &= ((FrameworkElement)page.FindName("ChatGptResumeUsageButton")).Visibility == Visibility.Visible && !vm.TestConnectionCommand.CanExecute(null);
-        Render((FrameworkElement)page.FindName("ChatGptAccountCard"), 680, 340, Path.Combine(folder, "chatgpt-usage-limit-preview.png"));
+        Render(accountCard, 680, 440, Path.Combine(folder, "chatgpt-usage-limit-preview.png"));
         account = account with { UsagePaused = false, CanUsePlan = false };
         await vm.RefreshChatGptAccountsAsync(); page.UpdateLayout();
         verified &= ((FrameworkElement)page.FindName("ChatGptAuthorizePlanButton")).Visibility == Visibility.Visible && !vm.CanUseChatGptPlan;
