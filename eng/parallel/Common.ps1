@@ -1,6 +1,10 @@
 #requires -Version 7.2
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Git emits UTF-8 paths even when a redirected PowerShell child defaults to an OEM code page.
+# Keep native command decoding and script output consistent without changing the system code page.
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function Write-ParallelJson {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
@@ -142,7 +146,18 @@ function Resolve-ParallelExecutable {
     param([Parameter(Mandatory)][string]$Name)
     $command = Get-Command $Name -ErrorAction Stop | Select-Object -First 1
     if ($command.CommandType -notin @('Application', 'ExternalScript')) { throw "An executable or script is required: $Name" }
-    return $command.Source
+    $resolved = $command.Source
+    # Prefer npm's matching native CLI to a PowerShell wrapper that transcodes JSONL/stdin.
+    # Arbitrary custom .ps1 executables (including test doubles) retain their supplied behavior.
+    if ([IO.Path]::GetFileName($resolved) -eq 'codex.ps1') {
+        $packageRoot = Join-Path (Split-Path $resolved -Parent) 'node_modules/@openai/codex/node_modules/@openai'
+        foreach ($candidate in @('codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe',
+            'codex-win32-arm64/vendor/aarch64-pc-windows-msvc/bin/codex.exe')) {
+            $native = Join-Path $packageRoot $candidate
+            if (Test-Path -LiteralPath $native -PathType Leaf) { return $native }
+        }
+    }
+    return $resolved
 }
 
 function New-ParallelProcessInfo {
