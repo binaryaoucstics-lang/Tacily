@@ -25,6 +25,7 @@ internal static class SelfTest
             ("interrupted-stream-is-failure", InterruptedAsync),
             ("live-factory-failure-never-falls-back", NoFallbackAsync),
             ("read-only-settings-migration-and-corruption", SettingsAsync),
+            ("running-preset-scope-resolution", RunningPresetAsync),
             ("bounded-jsonl-and-eof-drain", InputAsync),
             ("broken-output-cannot-exit-successfully", TransportAsync),
         };
@@ -210,6 +211,28 @@ internal static class SelfTest
         await host.HandleAsync(Candidate("bad-settings")); await host.DrainAsync();
         Check(created == 0 && !Terminal(output, "bad-settings").GetProperty("success").GetBoolean()
             && !output.ToString().Contains("DO_NOT_LEAK"));
+    }
+
+    private static Task RunningPresetAsync()
+    {
+        var settings = new AppSettings();
+        var id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var selected = settings with { SelectedTranslationPresetId = id, TranslationProviderPresets = [new()
+            { Id = id, Provider = TranslationProviderKind.DeepSeek, Model = settings.DeepSeekModel, BaseUrl = settings.DeepSeekBaseUrl }] };
+        var result = LiveRuntime.ResolveRunningPreset(settings, LiveRuntime.CacheScope(selected), ["invalid", id, id]);
+        Check(TranslationProviderConfiguration.SecretName(result) == TranslationProviderConfiguration.PresetSecretName(id));
+        Check(ReferenceEquals(settings, LiveRuntime.ResolveRunningPreset(settings, LiveRuntime.CacheScope(settings), [])));
+        foreach (var scope in new[] { "invalid", new string('0', 64) })
+        {
+            var threw = false;
+            try { LiveRuntime.ResolveRunningPreset(settings, scope, [id]); } catch (InvalidDataException) { threw = true; }
+            Check(threw);
+        }
+        var mismatch = false;
+        try { LiveRuntime.ResolveRunningPreset(settings with { TranslationProvider = TranslationProviderKind.OpenAI }, LiveRuntime.CacheScope(selected), [id]); }
+        catch (InvalidDataException) { mismatch = true; }
+        Check(mismatch);
+        return Task.CompletedTask;
     }
 
     private static async Task InputAsync()

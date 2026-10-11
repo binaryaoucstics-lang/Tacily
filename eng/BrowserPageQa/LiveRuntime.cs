@@ -1,5 +1,8 @@
 using System.IO;
 using System.Text.Json;
+using System.Reflection;
+using ScreenTranslator.App.Services;
+using ScreenTranslator.App.Services.Browser;
 using ScreenTranslator.App.Services.Networking;
 using ScreenTranslator.App.Services.Settings;
 using ScreenTranslator.Core.Abstractions;
@@ -18,14 +21,59 @@ internal sealed class LiveRuntime : IDisposable
     private DpapiSecretStore? _secrets;
     private ChatGptAccountService? _accounts;
 
-    public static async Task<AppSettings> LoadSettingsAsync()
+    public static async Task<AppSettings> LoadSettingsAsync(bool useRunningPreset = false)
     {
         // JsonSettingsStore.LoadAsync backs up corrupt settings. This read-only host must not use it.
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "GlobalAITranslator", "settings.json");
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
             4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        return await ReadSettingsAsync(stream).ConfigureAwait(false);
+        var settings = await ReadSettingsAsync(stream).ConfigureAwait(false);
+        if (!useRunningPreset) return settings;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        await using var bridge = new BrowserBridgeClient();
+        await bridge.ConnectAsync(timeout.Token).ConfigureAwait(false);
+        await bridge.WriteAsync("{\"type\":\"bridgeReady\",\"browser\":\"chrome\"}", timeout.Token).ConfigureAwait(false);
+        while (true)
+        {
+            var line = await bridge.ReadAsync(timeout.Token).ConfigureAwait(false)
+                ?? throw new InvalidDataException("running_configuration_unavailable");
+            using var frame = JsonDocument.Parse(line);
+            if (frame.RootElement.GetProperty("type").GetString() != "pageAutoConfig") continue;
+            var scope = frame.RootElement.GetProperty("cacheScope").GetString();
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "GlobalAITranslator", "secrets");
+            // Enumerate names only. Credential contents remain lazy in CreateProvider.
+            var ids = Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "translation-preset-*.bin")
+                .Select(path => Path.GetFileNameWithoutExtension(path)["translation-preset-".Length..]).ToArray() : [];
+            return ResolveRunningPreset(settings, scope, ids);
+        }
+    }
+
+    internal static string CacheScope(AppSettings settings) => (string)(typeof(ApplicationController)
+        .GetMethod("PageCacheScope", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidDataException("running_configuration_version_unsupported"))
+        .Invoke(null, [settings])!;
+
+    internal static AppSettings ResolveRunningPreset(AppSettings settings, string? scope, IEnumerable<string> ids)
+    {
+        if (scope is not { Length: 64 } || scope.Any(c => !Uri.IsHexDigit(c)))
+            throw new InvalidDataException("running_configuration_invalid");
+        if (scope == CacheScope(settings)) return settings;
+        // This recovery is restricted to the user's confirmed official DeepSeek
+        // configuration. Never try another provider, model, endpoint or key as fallback.
+        if (TranslationProviderConfiguration.Provider(settings) != TranslationProviderKind.DeepSeek)
+            throw new InvalidDataException("running_configuration_mismatch");
+        var matches = new List<AppSettings>();
+        foreach (var id in ids.Where(id => Guid.TryParseExact(id, "N", out _)).Distinct())
+        {
+            var candidate = settings with { SelectedTranslationPresetId = id,
+                TranslationProviderPresets = [new() { Id = id, Provider = TranslationProviderKind.DeepSeek,
+                    Model = TranslationProviderConfiguration.Model(settings), BaseUrl = TranslationProviderConfiguration.BaseUrl(settings),
+                    Network = TranslationProviderConfiguration.Network(settings), ThinkingLevel = settings.ThinkingLevel }] };
+            if (scope == CacheScope(candidate)) matches.Add(candidate);
+        }
+        return matches.Count == 1 ? matches[0] : throw new InvalidDataException("running_configuration_mismatch");
     }
 
     internal static async Task<AppSettings> ReadSettingsAsync(Stream stream)
