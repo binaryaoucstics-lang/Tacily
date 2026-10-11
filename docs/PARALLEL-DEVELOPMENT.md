@@ -107,6 +107,15 @@ main HEAD 等于启动时 mainHead 且可快进，只执行 `merge --ff-only`。
 
 ## 状态与证据
 
+开发代码已完成但 worker 的本机测试宿主通信被沙盒拒绝时，主控可在自身已经获授权的环境
+执行原验收命令。保持 worker 沙盒限制、原始 blocked 结果和日志；先解释每项阻塞如何解决，
+再运行 `Resolve-ParallelTaskBlock.ps1 -RunPath <run> -TaskId <id> -ResolutionNotes '具体解决说明'`。
+存在归属外主控修复时同时传 `-ControllerRef <已验证提交>`；该提交须与所有任务归属不重叠，
+并通过 Sync 纳入 integration，否则 main 提升失败。该步骤不授予 worker 任何新权限。
+解析器必须已正常退出、原始证据不变、代码归属/HEAD 正确、全部原验收命令成功且未改源文件，
+才记为 `validation_resolved`；随后仍运行正常 Review、人工差异审查、提交和完整门禁。
+权限或实现缺陷尚未解决时不得使用此步骤，失败保留 blocked 状态。无需修改原结果为 completed。
+
 - 任务：`pending → running → completed → reviewed → integrated`。`completed` 只是 CLI
   声明完成；主控验证与明确批准后才是 reviewed。失败为 `failed`、`blocked`、`needs_rework`、`timed_out`。
 - 总体状态建议：prepared、running、awaiting_review、failed、integrated、validated、promoted。
