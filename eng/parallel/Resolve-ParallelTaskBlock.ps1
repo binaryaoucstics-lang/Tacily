@@ -33,8 +33,12 @@ try {
     if ($process.status -ne 'exited' -or $process.exitCode -ne 0 -or -not $process.finishedAt) { throw 'CLI must have exited successfully with its original result.' }
     foreach ($id in @($process.codexPid,$process.workerPid)) {
         $live = if ($id) { Get-Process -Id $id -ErrorAction SilentlyContinue } else { $null }
-        if ($live -and $live.StartTime.ToUniversalTime() -ge ([DateTime]$process.startedAt).ToUniversalTime().AddSeconds(-5)
-            -and $live.StartTime.ToUniversalTime() -le ([DateTime]$process.finishedAt).ToUniversalTime()) { throw 'Worker or CLI is still running.' }
+        if ($live) {
+            $liveStarted = $live.StartTime.ToUniversalTime()
+            $recordStarted = ([DateTime]$process.startedAt).ToUniversalTime().AddSeconds(-5)
+            $recordFinished = ([DateTime]$process.finishedAt).ToUniversalTime()
+            if ($liveStarted -ge $recordStarted -and $liveStarted -le $recordFinished) { throw 'Worker or CLI is still running.' }
+        }
     }
     if ($result.taskId -cne $TaskId -or $result.status -notin @('blocked','completed')) { throw 'Cannot resolve a failed or mismatched implementation result.' }
     if ($result.status -eq 'completed' -and -not @($result.permissionRequests).Count) { throw 'Completed task has no block to resolve; use normal review.' }
