@@ -6,7 +6,7 @@ param(
     [string]$ControllerRef
 )
 . (Join-Path $PSScriptRoot 'Common.ps1')
-$lock = $null
+$lock = $null; $state = $null
 try {
     $RunPath = [IO.Path]::GetFullPath($RunPath)
     $MainWorktree = [IO.Path]::GetFullPath($MainWorktree)
