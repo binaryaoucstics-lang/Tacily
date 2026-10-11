@@ -56,9 +56,13 @@ Start-CodexTask.ps1 参数：Worktree、PromptPath、AttemptPath、CodexPath='co
 --cd <own> --json --output-schema <schema> --output-last-message <result> -。
 提示经 UTF-8 stdin 传入；日志由外层 worker 捕获；CLI 不获得其他 Worktree 写权限。
 明确清空额外 writable_roots 并禁止沙盒内网络访问；依赖和资源由主控预备。
-默认使用现有 Codex 登录与模型设置；无需复制认证文件或覆盖用户配置。
+使用现有 Codex 登录；无需复制认证文件或覆盖用户配置。
+用户指定四个开发 Agent 统一使用 gpt-6.1-sol、model_reasoning_effort="high"、
+service_tier="fast"（快速模式，CLI 映射为 priority 请求）。启动器显式传参，并在 process.json 中记录设置。
 CLI 启用 prefer_mxc：设备支持时使用官方推荐的原生 MXC，保留配置中的旧式沙盒回退；
 若旧式沙盒初始化失败，报告日志原因，不降低沙盒或自动申请管理员权限。
+worker 启用 --no-daemon，使各 CLI 的执行生命周期随自身进程管理；默认优先使用
+npm 包中的原生 codex.exe，公共 PowerShell 层固定 UTF-8 以保留中文路径和 JSONL。
 不接受降低沙盒的参数。非交互审批不能取得授权时，返回 blocked 和权限原因交主控。
 
 ## 公共 PowerShell 函数（dot source Common.ps1）
@@ -116,5 +120,10 @@ CLI 启用 prefer_mxc：设备支持时使用官方推荐的原生 MXC，保留�
    templates/controller-prompt.md 是复用主控指令。
 
 以上四组所有文件独占，跨组需求以结果 risks 上报。共享文件仅由主控集成后调整。
+主控额外提供 Sync-ParallelMain.ps1(RunPath,MainWorktree,ControllerRef 可选)：
+main 新增提交后，核对干净 main、原 mainHead 的后代、已审查任务与集成 HEAD，
+把固定的新 main 提交合入 integration；可纳入与任务归属不重叠的已提交主控基础变更。
+记录原/新 SHA 的重规划审计，取消旧验证，Complete 必须重新运行完整门禁；不修改 main。
+发生冲突或 main 再次移动时保留 integration 和证据，拒绝提升。
 基础验收：pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1
 -PlanPath .parallel/plan.json -TaskId <id>，各任务再自行增加有意义的本地验证。

@@ -12,12 +12,14 @@ $processPath = Join-Path $AttemptPath 'process.json'
 $process = $null; $outputStream = $null; $errorStream = $null
 $exitCode = 1
 $record = @{ status = 'starting'; workerPid = $PID; codexPid = $null; exitCode = $null;
+    model = 'gpt-6.1-sol'; reasoningEffort = 'high'; serviceTier = 'fast'; requestServiceTier = 'priority';
     startedAt = [DateTime]::UtcNow.ToString('o'); finishedAt = $null; error = ''; arguments = @(); resultPath = $resultPath }
 try {
     Assert-ParallelChildPath $Worktree $PromptPath | Out-Null
     [IO.Directory]::CreateDirectory($AttemptPath) | Out-Null
     # The output directory is prepared by the controller; only the assigned checkout is writable to the model.
-    $arguments = @('--enable', 'prefer_mxc', '--ask-for-approval', 'on-request', 'exec', '--sandbox', 'workspace-write',
+    $arguments = @('--no-daemon', '--enable', 'prefer_mxc', '--ask-for-approval', 'on-request', 'exec', '--model', 'gpt-6.1-sol',
+        '-c', 'model_reasoning_effort="high"', '-c', 'service_tier="fast"', '--sandbox', 'workspace-write',
         '-c', 'sandbox_workspace_write.writable_roots=[]', '-c', 'sandbox_workspace_write.network_access=false',
         '--cd', $Worktree, '--json', '--color', 'never', '--output-schema',
         (Join-Path $Worktree '.parallel/result.schema.json'), '--output-last-message', $resultPath, '-')
