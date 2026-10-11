@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "runId": "browser-policy-regression",
+  "baseline": "d075a82651559d1fe6ea11ce659755cd16cddd9b",
+  "mainBranch": "main",
+  "maxParallel": 3,
+  "tasks": [
+    {
+      "id": "core-policy",
+      "title": "站点策略输入边界回归",
+      "instructions": "基于共享提交的现有 BrowserSitePolicy 接口补齐域名规范化与最具体规则回归用例，发现缺陷仅在归属的实现内修复。覆盖 Unicode 域名、非法输入、父子域、同级黑名单优先，不更改公共签名、BrowserProtocol、设置或依赖配置。仅修改 ownedPaths，不提交、不合并、不推送；缺权限或需共享接口变更返回 blocked。",
+      "ownedPaths": [
+        "src/ScreenTranslator.Core/Browser/BrowserSitePolicy.cs",
+        "tests/ScreenTranslator.Core.Tests/Browser/BrowserSitePolicyTests.cs"
+      ],
+      "dependsOn": [],
+      "acceptance": [
+        "合法域名规范化且非法输入被拒绝，最具体站点规则及同级黑名单优先保持一致",
+        "公共接口与设置格式不变，测试包含明确的边界断言",
+        "归属检查和 Core.Tests 全部通过，提交结构化实际测试证据"
+      ],
+      "validation": [
+        {
+          "filePath": "pwsh",
+          "arguments": ["-NoProfile", "-File", "eng/parallel/Test-OwnedFiles.ps1", "-PlanPath", ".parallel/plan.json", "-TaskId", "core-policy"],
+          "timeoutSeconds": 120
+        },
+        {
+          "filePath": "dotnet",
+          "arguments": ["test", "tests/ScreenTranslator.Core.Tests/ScreenTranslator.Core.Tests.csproj", "-c", "Release", "--no-restore"],
+          "timeoutSeconds": 600
+        }
+      ]
+    },
+    {
+      "id": "app-memo",
+      "title": "页面决策缓存失效回归",
+      "instructions": "使用基线已存在的 Core 和 App 接口，补齐 BrowserPageDecisionMemo 的缓存容量、取消和清除期间旧判定不能重新写回的回归测试；必要修复仅在归属实现内。不得修改共享缓存类型、协议、项目依赖或其他任务文件。不依赖同轮 Core 任务改动；若需要新接口返回 blocked。保留改动、不提交、不合并、不推送，结果如实记录验收。",
+      "ownedPaths": [
+        "src/ScreenTranslator.App/Services/Browser/BrowserPageDecisionMemo.cs",
+        "tests/ScreenTranslator.IntegrationTests/Browser/BrowserPageDecisionMemoTests.cs"
+      ],
+      "dependsOn": [],
+      "acceptance": [
+        "取消不产生有效缓存命中，清除期间完成的旧判定不恢复失效数据",
+        "容量边界有回归断言，不改变 Core/App 公共接口",
+        "归属检查与页面决策缓存集成测试通过，记录实际命令和结果"
+      ],
+      "validation": [
+        {
+          "filePath": "pwsh",
+          "arguments": ["-NoProfile", "-File", "eng/parallel/Test-OwnedFiles.ps1", "-PlanPath", ".parallel/plan.json", "-TaskId", "app-memo"],
+          "timeoutSeconds": 120
+        },
+        {
+          "filePath": "dotnet",
+          "arguments": ["test", "tests/ScreenTranslator.IntegrationTests/ScreenTranslator.IntegrationTests.csproj", "-c", "Release", "--no-restore", "--filter", "FullyQualifiedName~BrowserPageDecisionMemoTests"],
+          "timeoutSeconds": 900
+        }
+      ]
+    },
+    {
+      "id": "extension-policy",
+      "title": "扩展自动页面策略回归",
+      "instructions": "在现有 page-auto-policy 公共导出和 BrowserProtocol 不变的前提下补齐页面自动策略边界与重复触发回归用例，必要修复仅限归属 JS 实现。禁止修改 background/content 共享入口、manifest、依赖配置或 Core/App 文件。不提交、不合并、不推送；越界或权限不足返回 blocked 并说明。",
+      "ownedPaths": [
+        "browser-extension/page-auto-policy.js",
+        "browser-extension/tests/page-auto-policy.test.js"
+      ],
+      "dependsOn": [],
+      "acceptance": [
+        "自动页面策略的禁用与重复触发边界有明确断言且通过",
+        "现有 JS 导出和浏览器协议不变，不新增依赖",
+        "归属检查及页面自动策略 Node 测试通过，提供真实测试证据"
+      ],
+      "validation": [
+        {
+          "filePath": "pwsh",
+          "arguments": ["-NoProfile", "-File", "eng/parallel/Test-OwnedFiles.ps1", "-PlanPath", ".parallel/plan.json", "-TaskId", "extension-policy"],
+          "timeoutSeconds": 120
+        },
+        {
+          "filePath": "node",
+          "arguments": ["--check", "browser-extension/page-auto-policy.js"],
+          "timeoutSeconds": 120
+        },
+        {
+          "filePath": "node",
+          "arguments": ["--test", "browser-extension/tests/page-auto-policy.test.js"],
+          "timeoutSeconds": 120
+        }
+      ]
+    }
+  ]
+}
