@@ -18,7 +18,7 @@ try {
     Assert-ParallelChildPath $Worktree $PromptPath | Out-Null
     [IO.Directory]::CreateDirectory($AttemptPath) | Out-Null
     # The output directory is prepared by the controller; only the assigned checkout is writable to the model.
-    $arguments = @('--enable', 'prefer_mxc', '--ask-for-approval', 'on-request', 'exec', '--model', 'gpt-6.1-sol',
+    $arguments = @('--no-daemon', '--enable', 'prefer_mxc', '--ask-for-approval', 'on-request', 'exec', '--model', 'gpt-6.1-sol',
         '-c', 'model_reasoning_effort="high"', '-c', 'service_tier="fast"', '--sandbox', 'workspace-write',
         '-c', 'sandbox_workspace_write.writable_roots=[]', '-c', 'sandbox_workspace_write.network_access=false',
         '--cd', $Worktree, '--json', '--color', 'never', '--output-schema',

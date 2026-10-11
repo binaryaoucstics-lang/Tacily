@@ -61,6 +61,8 @@ Start-CodexTask.ps1 参数：Worktree、PromptPath、AttemptPath、CodexPath='co
 service_tier="fast"（快速模式，CLI 映射为 priority 请求）。启动器显式传参，并在 process.json 中记录设置。
 CLI 启用 prefer_mxc：设备支持时使用官方推荐的原生 MXC，保留配置中的旧式沙盒回退；
 若旧式沙盒初始化失败，报告日志原因，不降低沙盒或自动申请管理员权限。
+worker 启用 --no-daemon，使各 CLI 的执行生命周期随自身进程管理；默认优先使用
+npm 包中的原生 codex.exe，公共 PowerShell 层固定 UTF-8 以保留中文路径和 JSONL。
 不接受降低沙盒的参数。非交互审批不能取得授权时，返回 blocked 和权限原因交主控。
 
 ## 公共 PowerShell 函数（dot source Common.ps1）
