@@ -150,8 +150,22 @@ public sealed class ChatGptFastModeSettingsTests
             : settings with { ChatGptFastModeEnabled = false };
         Assert.False(TranslationProviderConfiguration.ChatGptFastModeEnabled(disabled));
         Assert.Equal(TranslationProviderConfiguration.TransportIdentity(disabled), TranslationProviderConfiguration.TransportIdentity(settings));
-        Assert.Equal(expected, TranslationProviderConfiguration.ConnectionIdentity(disabled)
-            != TranslationProviderConfiguration.ConnectionIdentity(settings));
+        var disabledConnection = TranslationProviderConfiguration.ConnectionIdentity(disabled);
+        var enabledConnection = TranslationProviderConfiguration.ConnectionIdentity(settings);
+        Assert.DoesNotContain("service_tier:", disabledConnection);
+        Assert.DoesNotContain("service_tier:fast", enabledConnection);
+        Assert.DoesNotContain("service_tier:", TranslationProviderConfiguration.TransportIdentity(settings));
+        if (expected)
+        {
+            Assert.Contains("service_tier:priority", enabledConnection);
+            Assert.Equal(disabledConnection + "\nservice_tier:priority", enabledConnection);
+        }
+        else
+        {
+            Assert.DoesNotContain("service_tier:", enabledConnection);
+            Assert.Equal(disabledConnection, enabledConnection);
+        }
+        Assert.Equal(enabledConnection, TranslationProviderConfiguration.ConnectionIdentity(settings.Migrate(out _)));
     }
 
     [Theory]

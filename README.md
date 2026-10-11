@@ -36,12 +36,14 @@
 
 **快速模式**默认关闭，仅适用于 OpenAI 的 ChatGPT 登录方式。默认配置和各个预设分别保存开关；API Key、Claude、OpenAI 兼容协议和 DeepSeek 不启用此模式。快速模式可能更快消耗订阅额度，是否可用由账户、工作区和所选模型决定，速度也会因请求和服务状态而变化。
 
+本修正版为 ChatGPT 登录的快速模式请求发送兼容值 `service_tier: priority`。官方配置参考说明 `fast` 映射为请求值 `priority`。若旧版出现 HTTP 400 `Unsupported service tier: fast`，请退出旧程序，使用修正版后重新运行“翻译测速”；此修复不保证未实测账户或模型支持快速模式。
+
 1. 在“翻译设置”选择要使用的默认配置或预设，确认使用方式为 **ChatGPT 登录（使用订阅额度）**，选择账户与模型。
 2. 勾选 **快速模式** 并保存，再运行 **翻译测速**。
 3. 查看测速结果中的**实际处理模式**：`fast` 或 `priority` 表示服务端按快速模式处理；`default` 表示普通模式。服务端未返回实际模式时，只能视为未确认；勾选开关或显示已请求快速模式并不代表已生效。
 4. 若服务端拒绝快速模式或提示账户／模型不支持，手动取消勾选、保存后再试，也可选择账户支持的模型后重新测速。应用不会自动降级重试或切换到 API Key 计费。
 
-切换快速模式会更新后续请求配置，已有译文缓存仍可复用。模式与额度规则参见 [OpenAI 快速模式文档](https://developers.openai.com/api/docs/guides/fast-mode)；登录接入说明参见上述 SIWC 文档。
+切换快速模式会更新后续请求配置，已有译文缓存仍可复用。请求值映射参见 [官方配置参考的 service_tier 条目](https://learn.chatgpt.com/docs/config-file/config-reference)；模式与额度规则参见 [OpenAI 快速模式文档](https://developers.openai.com/api/docs/guides/fast-mode)；登录接入说明参见上述 SIWC 文档。
 
 ### 使用 API Key
 
