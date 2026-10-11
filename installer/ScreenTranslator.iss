@@ -52,20 +52,20 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: unchecked
-Name: "startup"; Description: "登录 Windows 后自动启动屏译"; GroupDescription: "启动："; Flags: unchecked
+Name: "startup"; Description: "登录 Windows 后自动启动默译 · Tacily"; GroupDescription: "启动："; Flags: unchecked
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\屏译"; Filename: "{app}\{#AppExeName}"
-Name: "{group}\卸载屏译"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\屏译"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\屏译"; Filename: "{app}\{#AppExeName}"; Tasks: startup
+Name: "{group}\默译 · Tacily"; Filename: "{app}\{#AppExeName}"
+Name: "{group}\卸载默译 · Tacily"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\默译 · Tacily"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{userstartup}\默译 · Tacily"; Filename: "{app}\{#AppExeName}"; Tasks: startup
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Parameters: "--register-browser-host"; Flags: runhidden waituntilterminated
-Filename: "{app}\{#AppExeName}"; Description: "启动屏译"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "启动默译 · Tacily"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{app}\{#AppExeName}"; Parameters: "--unregister-browser-host"; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterBrowserHost"

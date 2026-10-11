@@ -95,7 +95,12 @@ public sealed class BrowserImageTranslationJudgeTests
         using (var canvas = new SKCanvas(bitmap))
         {
             canvas.Clear(SKColors.White);
-            using var face = SKTypeface.FromFamilyName("Meiryo");
+            // Use the shipped font so a clean Windows runner renders Japanese
+            // glyphs instead of fallback squares when Meiryo is not installed.
+            var fontPath = System.IO.Path.Combine(AppContext.BaseDirectory, "fonts", "NotoSansCJKsc-Regular.otf");
+            Assert.True(System.IO.File.Exists(fontPath));
+            using var face = SKTypeface.FromFile(fontPath);
+            Assert.NotNull(face);
             using var font = new SKFont(face, 55);
             using var paint = new SKPaint { Color = SKColors.Black, IsAntialias = true };
             var row = 0;

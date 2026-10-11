@@ -74,15 +74,25 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          name: 默译 · Tacily ${{ github.ref_name }}
           generate_release_notes: true
           body: |
             ## 安装
 
-            推荐下载 `ScreenTranslator-Setup-x64.exe`。首次安装未签名版本时，
+            推荐下载 `ScreenTranslator-Setup-x64.exe`；也可选择解压即用的
+            `ScreenTranslator-Portable-x64.zip`。支持 Windows 10 2004 及以上的
+            64 位系统，无需另装 .NET。两个版本均包含 Chrome 扩展。
+
+            首次安装未签名版本时，
             Windows SmartScreen 可能显示“未知发布者”，请核对本页 SHA-256 后再运行。
 
-            Chrome/Edge 扩展需要在软件“常规”页按引导确认加载一次；
-            桌面连接组件会自动安装和重连。
+            Chrome 扩展需要在软件“常规”页按引导加载一次。
+            使用前请在翻译设置中配置翻译服务。升级前先退出旧程序，个人设置保留在本机。
+
+            ## 许可
+
+            默译 · Tacily 采用 PolyForm Noncommercial 1.0.0，仅允许协议规定的非商业用途。
+            第三方组件和此前 Apache 2.0 版本保留原许可，详见仓库的许可说明。
           files: |
             artifacts/release/${{ github.ref_name }}/artifacts/ScreenTranslator-Setup-x64.exe
             artifacts/release/${{ github.ref_name }}/artifacts/ScreenTranslator-Portable-x64.zip
