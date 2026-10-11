@@ -14,7 +14,7 @@ namespace BrowserPageQa;
 
 internal sealed class JsonlHost : IAsyncDisposable
 {
-    internal const int MaximumActiveRequests = 4;
+    internal const int MaximumActiveRequests = 10;
     internal const int MaximumLineCharacters = 1_048_576;
     private readonly bool _live;
     private readonly Lazy<Task<AppSettings>> _settings;

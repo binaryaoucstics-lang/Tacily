@@ -27,7 +27,7 @@ dotnet eng/BrowserPageQa/bin/Release/net8.0-windows10.0.19041.0/BrowserPageQa.dl
 
 `cancel` 的 id 指向原 message 请求，caseId 必须一致；未知/已完成请求返回错误。
 取消结果归属原请求，只在生产任务真正退出后输出一次失败 terminal。
-最多同时接纳四个 message，共享生产服务的十个 provider 执行槽；超限返回 `busy`。
+最多同时接纳十个 message，与生产页面配置的十个并发 job 对齐；共享生产服务的十个 provider 执行槽，超限返回 `busy`。
 每行最多 1 Mi 个 UTF-16 字符，每进程最多 100,000 个非取消 id；嵌套/重复字段及
 生产候选边界无效时拒绝。输入 EOF 等待已接纳请求结束；Ctrl+C 取消并清理自己的任务。
 
