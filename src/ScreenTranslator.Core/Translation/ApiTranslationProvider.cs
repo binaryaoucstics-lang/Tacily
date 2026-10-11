@@ -242,9 +242,15 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
                         stats.Outcome = type == "response.incomplete" ? DeepSeekRequestOutcome.Truncated : DeepSeekRequestOutcome.Interrupted;
                         throw new TranslationFormatException($"{Label} 未完整生成译文，请缩小选区或调整思考等级。");
                     case "response.completed":
-                        var answer = ExtractResponses(root.GetProperty("response"), stats);
+                        var completed = root.GetProperty("response");
+                        var answer = ExtractResponses(completed, stats, allowStreamSummary: true);
+                        var hasFinalTextEnvelope = completed.TryGetProperty("output", out var finalOutput)
+                            && finalOutput.ValueKind == JsonValueKind.Array && finalOutput.GetArrayLength() > 0;
                         if (output.Length == 0) Append(answer);
-                        else if (!string.Equals(output.ToString(), answer, StringComparison.Ordinal))
+                        // ChatGPT's direct route can send only status/usage in the terminal
+                        // envelope (output=[]). Completed deltas remain the response text.
+                        // When an aggregate output is provided, still verify it exactly.
+                        else if (hasFinalTextEnvelope && !string.Equals(output.ToString(), answer, StringComparison.Ordinal))
                             throw new TranslationFormatException("最终译文与流式内容不一致。");
                         terminal = true;
                         break;
@@ -327,7 +333,7 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
         return output.ToString();
     }
 
-    private static string ExtractResponses(JsonElement root, RequestState stats)
+    private static string ExtractResponses(JsonElement root, RequestState stats, bool allowStreamSummary = false)
     {
         var status = Text(root, "status");
         stats.FinishReason = status;
@@ -339,6 +345,7 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
         if (root.TryGetProperty("error", out var error) && error.ValueKind != JsonValueKind.Null)
             throw new TranslationUnavailableException("OpenAI 没有成功生成译文。");
         ObserveUsage(root, stats);
+        if (allowStreamSummary && !root.TryGetProperty("output", out _)) return string.Empty;
         var text = new StringBuilder();
         foreach (var item in root.GetProperty("output").EnumerateArray())
         {

@@ -11,6 +11,38 @@ namespace ScreenTranslator.Core.Tests.Translation;
 
 public sealed class ChatGptTranslationTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Completed_Stream_Summary_Uses_Deltas_When_Aggregate_Output_Is_Empty_Or_Omitted(bool omitOutput)
+    {
+        var terminal = omitOutput
+            ? Event(new { type = "response.completed", response = new { status = "completed", usage = new { input_tokens = 20, output_tokens = 12 } } })
+            : Event(new { type = "response.completed", response = new { status = "completed", output = Array.Empty<object>(), usage = new { input_tokens = 20, output_tokens = 12 } } });
+        var handler = new Handler(Event(new { type = "response.output_text.delta", delta = Answer })
+            + Event(new { type = "response.output_text.done", text = Answer }) + terminal);
+        var provider = Provider(handler, new Tokens());
+        ApiTranslationRequestMetrics? metrics = null; provider.RequestCompleted += value => metrics = value;
+        Assert.Equal(Answer, await provider.TranslateRawAsync(Request(), default));
+        Assert.Equal(DeepSeekRequestOutcome.Success, metrics!.Outcome);
+        Assert.Equal(12, metrics.OutputTokens); Assert.Equal(1, handler.Calls);
+    }
+
+    [Fact]
+    public async Task Summary_Completion_Without_Any_Text_Is_Still_A_Failure()
+    {
+        var handler = new Handler(Event(new { type = "response.completed", response = new { status = "completed", output = Array.Empty<object>() } }));
+        await Assert.ThrowsAsync<TranslationFormatException>(() => Provider(handler, new Tokens()).TranslateRawAsync(Request(), default));
+    }
+
+    [Fact]
+    public async Task A_Provided_Final_Text_Envelope_Must_Still_Match_The_Deltas()
+    {
+        var inconsistent = Event(new { type = "response.output_text.delta", delta = Answer })
+            + Event(new { type = "response.completed", response = new { status = "completed", output = new[]
+            { new { type = "message", role = "assistant", content = new[] { new { type = "output_text", text = Answer + " " } } } } } });
+        await Assert.ThrowsAsync<TranslationFormatException>(() => Provider(new Handler(inconsistent), new Tokens()).TranslateRawAsync(Request(), default));
+    }
     private const string Answer = """{"blocks":[{"id":"b1","translation":"你好"}]}""";
     private static TranslationRequest Request() => new("auto", "zh-CN", TranslationStyle.Natural, "", [new("b1", "Hello", 1, new(0, 0, 100, 20), 0)]);
     private static string Event(object value) => "data: " + JsonSerializer.Serialize(value) + "\n\n";
