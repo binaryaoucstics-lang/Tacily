@@ -390,7 +390,7 @@ public static class InstallationCheck
             {
                 Benchmark = new(TranslationBenchmark.SourceSentence, "离线合成译文，仅用于检查界面。", TimeSpan.FromSeconds(1),
                     TimeSpan.FromMilliseconds(200), 40, 32, 0, BenchmarkRateKind.ContentGeneration)
-                { RequestedServiceTier = request.ChatGptFastModeEnabled ? "fast" : null, EffectiveServiceTier = effectiveTier },
+                { RequestedServiceTier = request.ChatGptFastModeEnabled ? "priority" : null, EffectiveServiceTier = effectiveTier },
             });
         };
         fastMode.SetCurrentValue(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty, true);
@@ -398,6 +398,7 @@ public static class InstallationCheck
         verified &= vm.ChatGptFastModeEnabled && fastMode.IsChecked == true;
         await vm.TestConnectionCommand.ExecuteAsync(null); page.UpdateLayout();
         verified &= observedRequests[^1].ChatGptFastModeEnabled && observedRequests[^1].UseChatGptPlan
+            && vm.ConnectionBenchmark?.RequestedServiceTier == "priority"
             && tierNote.Visibility == Visibility.Visible && tierNote.Text == "请求：快速模式；实际：快速模式。";
         var fastPreview = Path.Combine(folder, "chatgpt-fast-settings-preview.png");
         Render(page, 760, 2900, fastPreview);
@@ -425,7 +426,8 @@ public static class InstallationCheck
         {
             effectiveTier = tier;
             await vm.TestConnectionCommand.ExecuteAsync(null); page.UpdateLayout();
-            verified &= tierNote.Visibility == Visibility.Visible && tierNote.Text == expected;
+            verified &= vm.ConnectionBenchmark?.RequestedServiceTier == "priority"
+                && tierNote.Visibility == Visibility.Visible && tierNote.Text == expected;
         }
         var pending = new TaskCompletionSource<ConnectionTestResult>();
         CancellationToken previousToken = default;
@@ -437,7 +439,7 @@ public static class InstallationCheck
             && tierNote.Visibility == Visibility.Collapsed;
         pending.SetResult(new(true, "旧测速不应出现")
         { Benchmark = new(TranslationBenchmark.SourceSentence, "旧译文", TimeSpan.FromSeconds(1), null, null, null, null, BenchmarkRateKind.Unavailable)
-            { RequestedServiceTier = "fast", EffectiveServiceTier = "fast" } });
+            { RequestedServiceTier = "priority", EffectiveServiceTier = "fast" } });
         await oldTest; page.UpdateLayout();
         verified &= !vm.ConnectionSucceeded && vm.ConnectionBenchmark is null && tierNote.Visibility == Visibility.Collapsed
             && !vm.ConnectionStatus.Contains("旧测速");

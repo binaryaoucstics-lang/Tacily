@@ -144,7 +144,7 @@ public sealed class ChatGptFastModeSettingsTests
         vm.ConnectionTester = (request, _) =>
         {
             observed.Add(request);
-            return Task.FromResult(Result(request.ChatGptFastModeEnabled ? "fast" : null, "default"));
+            return Task.FromResult(Result(request.ChatGptFastModeEnabled ? "priority" : null, "default"));
         };
         await vm.TestConnectionCommand.ExecuteAsync(null);
         vm.ChatGptFastModeEnabled = true;
@@ -186,7 +186,7 @@ public sealed class ChatGptFastModeSettingsTests
         Assert.True(vm.CanEditChatGptFastMode);
         vm.ChatGptFastModeEnabled = !initial;
         Assert.True(previous.IsCancellationRequested);
-        pending.SetResult(Result(initial ? "fast" : null, "fast") with { Message = "过期测速" });
+        pending.SetResult(Result(initial ? "priority" : null, "fast") with { Message = "过期测速" });
         await test;
         Assert.Null(vm.ConnectionBenchmark);
         Assert.Empty(vm.ConnectionTranslation);
@@ -194,23 +194,21 @@ public sealed class ChatGptFastModeSettingsTests
         Assert.DoesNotContain("过期测速", vm.ConnectionStatus);
         Assert.False(vm.ShowServiceTierNote);
         Assert.Empty(vm.ServiceTierNote);
-        vm.ConnectionTester = (request, _) => Task.FromResult(Result(request.ChatGptFastModeEnabled ? "fast" : null, "default"));
+        vm.ConnectionTester = (request, _) => Task.FromResult(Result(request.ChatGptFastModeEnabled ? "priority" : null, "default"));
         await vm.TestConnectionCommand.ExecuteAsync(null);
         Assert.True(vm.ConnectionSucceeded);
-        Assert.Equal(!initial ? "fast" : null, vm.ConnectionBenchmark!.RequestedServiceTier);
+        Assert.Equal(!initial ? "priority" : null, vm.ConnectionBenchmark!.RequestedServiceTier);
         Assert.Equal("default", vm.ConnectionBenchmark.EffectiveServiceTier);
     }
 
     [Theory]
-    [InlineData("fast", "fast", "请求：快速模式；实际：快速模式。")]
-    [InlineData("fast", "priority", "请求：快速模式；实际：快速模式。")]
     [InlineData("priority", "fast", "请求：快速模式；实际：快速模式。")]
-    [InlineData(" FAST ", " Priority ", "请求：快速模式；实际：快速模式。")]
-    [InlineData("fast", "default", "请求：快速模式；实际：普通模式（快速模式未生效）。")]
+    [InlineData("priority", "priority", "请求：快速模式；实际：快速模式。")]
+    [InlineData(" PRIORITY ", " Priority ", "请求：快速模式；实际：快速模式。")]
     [InlineData("priority", "default", "请求：快速模式；实际：普通模式（快速模式未生效）。")]
-    [InlineData("fast", null, "请求：快速模式；实际：未确认（服务端未返回处理模式）。")]
-    [InlineData("fast", " ", "请求：快速模式；实际：未确认（服务端未返回处理模式）。")]
-    [InlineData("fast", "future-tier", "请求：快速模式；实际：未确认（服务端返回未识别的模式：future-tier）。")]
+    [InlineData("priority", null, "请求：快速模式；实际：未确认（服务端未返回处理模式）。")]
+    [InlineData("priority", " ", "请求：快速模式；实际：未确认（服务端未返回处理模式）。")]
+    [InlineData("priority", "future-tier", "请求：快速模式；实际：未确认（服务端返回未识别的模式：future-tier）。")]
     [InlineData(null, "default", "请求：未指定快速模式；实际：普通模式。")]
     [InlineData(null, "priority", "请求：未指定快速模式；实际：快速模式。")]
     [InlineData(null, null, "请求：未指定快速模式；实际：未确认（服务端未返回处理模式）。")]
