@@ -30,6 +30,7 @@ internal static class TranslationPromptBuilder
             {
                 id = block.Id,
                 text = request.ImagePng is null ? block.Text : null,
+                sourceFacts = request.IsPageText ? PageSourceFactsFromText(block.Text) : null,
                 direction = request.AtlasRegions.FirstOrDefault(region => region.Id == block.Id)?.IsVertical == true ? "vertical-rtl" : null,
                 order = request.IsOcrDocument ? (int?)block.ReadingOrder : null,
                 region = request.IsOcrDocument && block.BoundsInCapturePixels.IsUsable ? new[] { block.BoundsInCapturePixels.X, block.BoundsInCapturePixels.Y,
@@ -78,6 +79,52 @@ internal static class TranslationPromptBuilder
             systemPrompt += "\nOmit already-target-language text, photo/copyright credits, URLs, media watermarks and pure numerals/formulas. Keep meaningful dialogue, captions and names; do not typeset excluded content.";
         return new(systemPrompt, content);
     }
+
+    private sealed record PageSourceFacts(string[] NumericLiterals, bool IsPartial);
+
+    private static PageSourceFacts? PageSourceFactsFromText(string? text)
+    {
+        // Literal excerpts, not semantic claims. Bound both scanning and serialized
+        // metadata; never inspect adjacent blocks, context, settings or credentials.
+        const int maxScanCharacters = 4096;
+        const int maxLiterals = 16;
+        const int maxLiteralCharacters = 64;
+        const int maxTotalCharacters = 512;
+        if (string.IsNullOrEmpty(text)) return null;
+        var limit = Math.Min(text.Length, maxScanCharacters);
+        var partial = text.Length > limit;
+        var literals = new List<string>();
+        var totalCharacters = 0;
+        for (var index = 0; index < limit;)
+        {
+            if (!char.IsDigit(text[index])) { index++; continue; }
+            var start = index;
+            if (start > 0 && text[start - 1] is '+' or '-' or '−') start--;
+            index++;
+            while (index < limit)
+            {
+                if (char.IsDigit(text[index])) index++;
+                else if (IsNumericSeparator(text[index]) && index + 1 < limit && char.IsDigit(text[index + 1])) index += 2;
+                else break;
+            }
+            // Do not turn a number crossing the scan boundary into a new value.
+            if (index == limit && limit < text.Length && (char.IsDigit(text[index])
+                || (IsNumericSeparator(text[index]) && index + 1 < text.Length && char.IsDigit(text[index + 1]))))
+                break;
+            if (index + 1 == limit && limit < text.Length && IsNumericSeparator(text[index]) && char.IsDigit(text[limit]))
+                break;
+            if (index < limit && text[index] is '%' or '％') index++;
+            var length = index - start;
+            if (length > maxLiteralCharacters) { partial = true; continue; }
+            if (literals.Count == maxLiterals || totalCharacters + length > maxTotalCharacters)
+            { partial = true; break; }
+            literals.Add(text.Substring(start, length));
+            totalCharacters += length;
+        }
+        return literals.Count == 0 && !partial ? null : new(literals.ToArray(), partial);
+    }
+
+    private static bool IsNumericSeparator(char value) => value is '.' or ',' or ':' or '/' or '-';
 
     internal static void Validate(TranslationRequest request, ThinkingLevel thinking)
     {
