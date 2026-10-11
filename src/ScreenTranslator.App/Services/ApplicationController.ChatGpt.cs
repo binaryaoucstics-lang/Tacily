@@ -25,26 +25,46 @@ public sealed partial class ApplicationController
             if (TranslationSettings.UsesChatGptPlan && TranslationSettings.CanUseChatGptPlan)
                 await TranslationSettings.LoadModelsCommand.ExecuteAsync(null);
         }
-        catch { TranslationSettings.SetConnectionError("读取 ChatGPT 账户失败，请检查本机凭据存储后重试。"); }
+        catch (Exception error)
+        {
+            ChatGptFailureDiagnostics.Write("initialize", error);
+            TranslationSettings.SetConnectionError("读取 ChatGPT 账户失败，请检查本机凭据存储后重试。");
+        }
     }
 
     private async Task<ChatGptSignInResult> SignInChatGptAsync(ChatGptSignInRequest request, CancellationToken token)
     {
-        var result = await _chatGpt.SignInAsync(_apiHttp.GetClient(request.Network), request.AccountId, request.RequestConsent, token);
-        if (result.ShowWelcome)
+        try
         {
-            MessageBox.Show("你正在使用 ChatGPT 订阅额度。\n\n符合条件的翻译请求会使用此账户授权的计划额度或余额，可随时通过“管理额度”查看和调整。",
-                "ChatGPT 已连接", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
-            await _chatGpt.MarkWelcomeShownAsync(result.Account.Id, token);
+            var result = await _chatGpt.SignInAsync(_apiHttp.GetClient(request.Network), request.AccountId, request.RequestConsent, token);
+            if (result.ShowWelcome)
+            {
+                MessageBox.Show("你正在使用 ChatGPT 订阅额度。\n\n符合条件的翻译请求会使用此账户授权的计划额度或余额，可随时通过“管理额度”查看和调整。",
+                    "ChatGPT 已连接", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+                await _chatGpt.MarkWelcomeShownAsync(result.Account.Id, token);
+            }
+            return result;
         }
-        return result;
+        catch (Exception error)
+        {
+            ChatGptFailureDiagnostics.Write("sign_in", error);
+            throw;
+        }
     }
 
     private async Task<ChatGptSignOutResult> SignOutChatGptAsync(string id, ApiNetworkOptions network, CancellationToken token)
     {
-        var result = await _chatGpt.SignOutAsync(_apiHttp.GetClient(network), id, token);
-        SyncAutoImageConfiguration(force: true);
-        return result;
+        try
+        {
+            var result = await _chatGpt.SignOutAsync(_apiHttp.GetClient(network), id, token);
+            SyncAutoImageConfiguration(force: true);
+            return result;
+        }
+        catch (Exception error)
+        {
+            ChatGptFailureDiagnostics.Write("sign_out", error);
+            throw;
+        }
     }
 
     private void OnChatGptAccountsChanged()
@@ -65,6 +85,10 @@ public sealed partial class ApplicationController
                 SyncAutoImageConfiguration(force: true);
             }
         }
-        catch { if (!_disposed) TranslationSettings.SetConnectionError("无法更新 ChatGPT 账户状态，请重新打开设置。 "); }
+        catch (Exception error)
+        {
+            ChatGptFailureDiagnostics.Write("refresh_state", error);
+            if (!_disposed) TranslationSettings.SetConnectionError("无法更新 ChatGPT 账户状态，请重新打开设置。 ");
+        }
     }
 }
