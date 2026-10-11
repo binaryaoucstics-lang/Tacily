@@ -1,0 +1,12 @@
+Global AI Translator / 全局 AI 翻译器
+Copyright 2026 Global AI Translator contributors
+
+This derivative project is licensed under the Apache License, Version 2.0.
+It includes and extends ScreenTranslator:
+https://github.com/NiniTakukon/ScreenTranslator
+Copyright (c) 2026 ScreenTranslator contributors
+
+The original ScreenTranslator code remains subject to its MIT notice,
+reproduced in docs/licenses/ScreenTranslator-MIT.txt. Third-party components,
+fonts, dictionaries and model assets retain their respective licenses;
+see docs/THIRD-PARTY-NOTICE.txt and the license files beside those resources.

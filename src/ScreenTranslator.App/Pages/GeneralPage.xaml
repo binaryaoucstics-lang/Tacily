@@ -1,0 +1,324 @@
+<Page x:Class="ScreenTranslator.App.Pages.GeneralPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      Background="Transparent"
+      FontFamily="{DynamicResource AppFontFamily}"
+      FontSize="14">
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="32,28,36,36"
+                    MaxWidth="760"
+                    HorizontalAlignment="Left">
+            <TextBlock Text="常规" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="设置日常使用方式，并随时开始一次屏幕翻译。"
+                       Style="{StaticResource PageSubtitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}"
+                    Padding="22"
+                    Margin="0,0,0,18">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <Border Style="{StaticResource CompactBadgeStyle}"
+                                HorizontalAlignment="Left"
+                                Margin="0,0,0,12">
+                            <TextBlock x:Name="HotkeyBadgeText"
+                                       Text="{Binding CaptureHotkeyText}"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}" />
+                        </Border>
+                        <TextBlock Text="点击或框选，翻译屏幕内容"
+                                   FontSize="20"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="屏幕保持原样。鼠标附近的浮窗先折叠，收到译文后展开并流式显示。"
+                                   Style="{StaticResource SettingDescriptionStyle}"
+                                   Margin="0,6,24,0" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1"
+                                VerticalAlignment="Center">
+                        <ui:Button Appearance="Primary"
+                                   Padding="20,8"
+                                   HorizontalAlignment="Stretch"
+                                   Command="{Binding StartCaptureCommand}">
+                            <TextBlock x:Name="PrimaryCaptureButtonText"
+                                       Text="开始翻译"
+                                       Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}" />
+                        </ui:Button>
+                        <ui:Button Content="连续框选"
+                                   Padding="20,8"
+                                   Margin="0,8,0,0"
+                                   HorizontalAlignment="Stretch"
+                                   Command="{Binding StartContinuousCaptureCommand}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <TextBlock Text="{Binding ContinuousCaptureStatusText}"
+                       Style="{StaticResource SettingDescriptionStyle}"
+                       Margin="4,-10,0,18" />
+
+            <TextBlock Text="启动与语言" Style="{StaticResource SectionTitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="默认目标语言" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="每次翻译默认输出的语言。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding TargetLanguages}"
+                              SelectedItem="{Binding TargetLanguage}"
+                              MinWidth="180"
+                              VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="最小化到系统托盘" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="关闭设置窗口后继续监听翻译快捷键。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1"
+                                     IsChecked="{Binding MinimizeToTray}"
+                                     VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="开机启动" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="登录 Windows 后自动启动屏译，默认关闭。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1"
+                                     IsChecked="{Binding StartWithWindows}"
+                                     VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="自启动时静默运行" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="仅在开机启动开启时生效；登录 Windows 后不自动打开设置窗口。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1"
+                                     IsChecked="{Binding StartSilently}"
+                                     VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="显示托盘图标" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="关闭后隐藏系统托盘图标和托盘菜单，快捷键与已有译文仍可继续使用。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1"
+                                     IsChecked="{Binding ShowTrayIcon}"
+                                     VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <TextBlock Text="浏览器原图读取"
+                       Style="{StaticResource SectionTitleStyle}"
+                       Margin="0,24,0,10" />
+
+            <Border Style="{StaticResource SettingCardStyle}"
+                    Padding="22">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,24,0">
+                            <TextBlock Text="Chrome / Edge 普通网页"
+                                       Style="{StaticResource SettingLabelStyle}" />
+                            <TextBlock Text="加载扩展后，点击网页图片会读取完整原图；原位译文随滚动和缩放移动，已翻译图片可直接复用。未连接时使用截图。"
+                                       Style="{StaticResource SettingDescriptionStyle}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ui:ToggleSwitch Grid.Column="1"
+                                         IsChecked="{Binding BrowserIntegration.IsEnabled}" Visibility="Collapsed"
+                                         VerticalAlignment="Top" />
+                    </Grid>
+
+                    <Border Margin="0,18,0,14"
+                            Padding="14,12"
+                            CornerRadius="8"
+                            Background="{DynamicResource ControlFillColorSecondaryBrush}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Chrome"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,10,0" />
+                                <TextBlock Text="{Binding BrowserIntegration.ChromeStatus}"
+                                           Opacity="0.72" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1"
+                                        Orientation="Horizontal">
+                                <TextBlock Text="Edge"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,10,0" />
+                                <TextBlock Text="{Binding BrowserIntegration.EdgeStatus}"
+                                           Opacity="0.72" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock Text="{Binding BrowserIntegration.DetailText}"
+                               Style="{StaticResource SettingDescriptionStyle}"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,14" />
+
+                    <WrapPanel>
+                        <ui:Button Content="安装到 Chrome"
+                                   Command="{Binding BrowserIntegration.InstallChromeExtensionCommand}"
+                                   Margin="0,0,10,8" />
+                        <ui:Button Content="安装到 Edge"
+                                   Command="{Binding BrowserIntegration.InstallEdgeExtensionCommand}"
+                                   Margin="0,0,10,8" />
+                        <ui:Button Content="修复连接"
+                                   Command="{Binding BrowserIntegration.RepairBridgeCommand}"
+                                   Margin="0,0,10,8" />
+                        <ui:Button Content="打开扩展目录"
+                                   Command="{Binding BrowserIntegration.OpenExtensionFolderCommand}"
+                                   Margin="0,0,0,8" />
+                    </WrapPanel>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="浏览器自动翻译" Style="{StaticResource SectionTitleStyle}" Margin="0,24,0,10" />
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,24,0">
+                            <TextBlock Text="全自动翻译 Chrome 网页" Style="{StaticResource SettingLabelStyle}" />
+                            <TextBlock Text="网页加载后在本机判断是否需要翻译，自动处理网页文字；图片按下方策略处理。目标为中文时，中文或中英混排正文会跳过。"
+                                       TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
+                        </StackPanel>
+                        <ui:ToggleSwitch x:Name="BrowserAutoPageToggle" Grid.Column="1"
+                                         IsChecked="{Binding BrowserAutoPageTranslationEnabled}" VerticalAlignment="Top" />
+                    </Grid>
+                    <TextBlock Text="正文流式原位显示，保留链接和样式；网页浮条可切换原文、译文或双语。点击“翻译选中”后，再点击需要翻译的段落；也可手动翻译整页。需要已连接的 Chrome 扩展。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,10,0,0" />
+                    <TextBlock Text="自动语言判断全程本地运行；点击选段只发送该段文字，无需拖选高亮。整页手动翻译仍过滤无须翻译的文字块。需要处理的内容发送至所选翻译服务商。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,6,0,0" />
+                    <Grid Margin="0,16,0,0" IsEnabled="{Binding BrowserAutoPageTranslationEnabled}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="150" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="页面语言判断" VerticalAlignment="Center" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock x:Name="BrowserPageJudgementLabel" Grid.Column="1" Text="程序规则（固定）" VerticalAlignment="Center" />
+                    </Grid>
+                    <TextBlock Text="根据可读正文、文字脚本和常用词判断，持续观察动态加载。无需语言模型。中文及有可读中文段落的双语页面保留原页；少量中文名称或导航标签不阻止外语正文翻译。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                    <Grid Margin="0,14,0,0" IsEnabled="{Binding BrowserAutoPageTranslationEnabled}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="150" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="并发翻译任务" VerticalAlignment="Center" Style="{StaticResource SettingLabelStyle}" />
+                        <ComboBox x:Name="BrowserPageConcurrencyCombo" Grid.Column="1"
+                                  ItemsSource="{Binding BrowserPageTranslationConcurrencies}" SelectedItem="{Binding BrowserPageTranslationConcurrency}" />
+                    </Grid>
+                    <TextBlock Text="默认同时处理 10 个任务，可调为 1–10 个。调高会增加同时发送的 API 请求。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="网站自动翻译规则" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="白名单在自动模式开启时跳过整页语言判断；黑名单阻止该站文字和图片自动翻译。域名覆盖子域名，可在网页浮条的展开菜单快速设置当前站点。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,12" />
+                    <TextBlock Text="白名单" Margin="0,0,0,6" />
+                    <TextBox x:Name="BrowserSiteWhitelistBox" Text="{Binding BrowserTranslationWhitelistText, UpdateSourceTrigger=LostFocus}" AcceptsReturn="True" MinHeight="82" MaxHeight="150" VerticalScrollBarVisibility="Auto" />
+                    <TextBlock Text="黑名单" Margin="0,12,0,6" />
+                    <TextBox x:Name="BrowserSiteBlacklistBox" Text="{Binding BrowserTranslationBlacklistText, UpdateSourceTrigger=LostFocus}" AcceptsReturn="True" MinHeight="82" MaxHeight="150" VerticalScrollBarVisibility="Auto" />
+                    <TextBlock Text="{Binding BrowserSiteRulesValidation}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,10,0,16" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <CheckBox x:Name="TranslationAnimationsToggle" Content="轻量翻译动效" IsChecked="{Binding TranslationAnimationsEnabled}" Margin="0,0,0,8" />
+                    <TextBlock Text="文字柔和出现，图片轻量提示；遵循系统减少动画设置。" Style="{StaticResource SettingDescriptionStyle}" Margin="0,0,0,16" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <CheckBox x:Name="BrowserPageCacheToggle" Content="保存已完成的网页译文" IsChecked="{Binding BrowserPageCacheEnabled}" />
+                    <TextBlock Text="译文在本机加密缓存，切回页面或相同段落再次显示时复用；原文、术语上下文或翻译配置变化后重新处理。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="140" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock Text="磁盘缓存上限（MB）" VerticalAlignment="Center" />
+                        <ComboBox x:Name="BrowserPageCacheSizeCombo" Grid.Column="1" ItemsSource="{Binding BrowserPageCacheSizes}"
+                                  SelectedItem="{Binding BrowserPageCacheMegabytes}" IsEnabled="{Binding BrowserPageCacheEnabled}" Margin="0,0,12,0" />
+                        <ui:Button x:Name="ClearBrowserPageCacheButton" Grid.Column="2" Content="清空缓存" Command="{Binding ClearPageCacheCommand}" />
+                    </Grid>
+                    <TextBlock Text="{Binding BrowserPageCacheStatus}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                        <TextBlock Text="自动图片翻译策略"
+                                   Style="{StaticResource SettingLabelStyle}" />
+                        <ComboBox x:Name="BrowserAutoImageModeCombo" ItemsSource="{Binding BrowserAutoImageModes}"
+                                  SelectedIndex="{Binding BrowserAutoImageModeIndex}" Margin="0,12,0,8" />
+                        <TextBlock Text="默认不自动翻译图片。选择大图模式后，根据图片实际显示面积和视口占比跳过小图；点开放大或展开查看时自动重新检查。"
+                                   Style="{StaticResource SettingDescriptionStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="大图先在本机判断外语文字，确需翻译时才发送完整图片至所选服务商。需要已连接的 Chrome 扩展；本地判断无需额外显卡。"
+                                   Style="{StaticResource SettingDescriptionStyle}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,6,0,0" />
+                        <TextBlock Text="该策略独立于网页文字自动翻译；关闭自动翻译后，仍可用快捷键点击任意图片手动翻译。"
+                                   Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

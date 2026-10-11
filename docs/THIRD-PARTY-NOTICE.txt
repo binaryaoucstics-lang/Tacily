@@ -1,0 +1,40 @@
+全局 AI 翻译器 — 第三方声明
+
+基于 ScreenTranslator（MIT），Copyright ScreenTranslator contributors。
+https://github.com/NiniTakukon/ScreenTranslator
+本衍生项目采用 Apache License 2.0，见 LICENSE 和 NOTICE。
+原始 ScreenTranslator 的 MIT 版权及许可全文见 docs/licenses/ScreenTranslator-MIT.txt（发布包内为 licenses/ScreenTranslator-MIT.txt）。第三方组件分别按其许可提供。
+
+Microsoft .NET 8 Windows Desktop、WPF-UI、CommunityToolkit.Mvvm 及其依赖：
+发行包 licenses 内提供可获得的许可；对应 NuGet 包的许可和通知为准。
+RapidOcrNet（Apache-2.0）：https://github.com/BobLd/RapidOcrNet
+PaddleOCR / RapidAI PP-OCRv5 检测、识读模型和字典（Apache-2.0）：
+https://github.com/PaddlePaddle/PaddleOCR
+https://www.modelscope.cn/models/RapidAI/RapidOCR/files?Revision=v3.9.2
+轻量检测资源由 RapidOcrNet 包提供；本软件使用轻量中文识读及字典。
+ONNX Runtime（MIT）：https://github.com/microsoft/onnxruntime
+SkiaSharp（MIT）：https://github.com/mono/SkiaSharp
+Vortice（MIT）：https://github.com/amerkoleci/Vortice.Windows
+OpenCV / OpenCvSharp（Apache-2.0）：https://github.com/shimat/opencvsharp
+YamlDotNet 18.1.0（MIT）：https://github.com/aaubry/YamlDotNet
+用于在本机读取 Clash 节点配置，随包提供 LICENSE。
+
+可选集成 Clash Verge Rev / Mihomo（GPL-3.0）：
+https://github.com/clash-verge-rev/clash-verge-rev
+https://github.com/MetaCubeX/mihomo
+未随包分发其内核。指定节点功能通过标准输入与代理端口调用用户已安装的独立进程。
+
+字体：Noto Sans/Serif CJK SC、LXGW WenKai、Ma Shan Zheng、ZCOOL KuaiLe。
+SIL Open Font License 1.1；完整许可随 fonts 目录提供。
+https://github.com/notofonts/noto-cjk
+https://github.com/lxgw/LxgwWenKai
+https://github.com/google/fonts
+字体未作修改。下载固定版本及 SHA-256 见 eng/assets.json。
+
+中文分词词表：由 Jieba 词典派生，MIT；派生说明和许可见 words。
+https://github.com/fxsjy/jieba
+
+网页语言判断使用 Unicode、正文与常用词程序规则，不含语言识别权重。
+
+本版本不包含 CRAFT、Comic Text Detector、JMdict、OvisOCR2、Manga OCR、
+TrOCR 或 D1 模型、Python 环境及其实验代码。

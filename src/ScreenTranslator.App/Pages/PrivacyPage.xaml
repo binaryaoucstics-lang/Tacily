@@ -1,0 +1,51 @@
+<Page x:Class="ScreenTranslator.App.Pages.PrivacyPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      Background="Transparent"
+      FontFamily="{DynamicResource AppFontFamily}"
+      FontSize="14">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="32,28,36,36"
+                    MaxWidth="760"
+                    HorizontalAlignment="Left">
+            <TextBlock Text="隐私" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="了解当前翻译方式发送的内容与本机保存的设置。"
+                       Style="{StaticResource PageSubtitleStyle}" />
+
+            <ui:InfoBar Title="按翻译模式处理内容"
+                        Message="手动翻译发送选中的文本或图片；启用浏览器自动翻译后，判断通过的网页正文和图片会发送给所选服务商。浏览器可读取原图时使用完整原图。整屏截图用于本地选区，不会整屏上传。"
+                        Severity="Success"
+                        IsOpen="True"
+                        Margin="0,0,0,18" />
+
+            <TextBlock Text="数据使用" Style="{StaticResource SectionTitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="网页译文缓存" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="默认在本机加密保存已完成的网页译文和确定的页面判断，磁盘上限 256 MB，可在常规设置调整、关闭或清空。缓存不保存原文、网址、图片或 API Key。图片嵌字缓存只保留在内存。"
+                               Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="安全说明" Style="{StaticResource SectionTitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="API Key" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="密钥由 Windows 当前用户范围的安全存储保护；日志会隐藏密钥、认证头和完整请求正文。"
+                               Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="远程处理" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="选区文字、网页正文或图片会发送至所选服务商的接口地址；默认使用官方 HTTPS，本机兼容服务可使用 HTTP。OpenAI 请求设置 store=false。各服务商密钥分开加密保存；完整网页译文默认在本机加密缓存，可在常规设置关闭或清空。缓存不存原文、网址或 API Key。"
+                               Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -1,0 +1,79 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>ScreenTranslator</AssemblyName>
+    <RootNamespace>ScreenTranslator.App</RootNamespace>
+    <Product>全局 AI 翻译器</Product>
+    <Description>点击选段、截图直译 · DeepSeek / OpenAI Responses / Claude Messages</Description>
+    <Version>0.14.5</Version>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\ScreenTranslator.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="WPF-UI" />
+    <PackageReference Include="YamlDotNet" />
+    <PackageReference Include="RapidOcrNet" GeneratePathProperty="true" />
+    <PackageReference Include="Vortice.Direct3D11" />
+    <PackageReference Include="OpenCvSharp4" ExcludeAssets="analyzers" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ScreenTranslator.Core\ScreenTranslator.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="$(PkgRapidOcrNet)\models\v5\ch_PP-OCRv5_mobile_det.onnx">
+      <Link>models\v5\ch_PP-OCRv5_mobile_det.onnx</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="Assets\Words\*">
+      <Link>words\%(Filename)%(Extension)</Link><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory><ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="Assets\Fonts\*">
+      <Link>fonts\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\models\v5\ch_PP-OCRv5_rec_mobile.onnx;..\..\models\v5\ppocrv5_dict.txt;..\..\models\v5\LICENSE-APACHE-2.0.txt">
+      <Link>models\v5\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\browser-extension\**\*"
+             Exclude="..\..\browser-extension\tests\**\*">
+      <Link>browser-extension\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+  <!-- Image repair uses OpenCV core/imgproc/photo. Video codecs are unused. -->
+  <Target Name="RemoveUnusedVideoCodecs" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([System.String]::Copy('%(Filename)').StartsWith('opencv_videoio_ffmpeg'))" />
+    </ItemGroup>
+  </Target>
+
+  <!-- RapidOcrNet copies its Models list after Build/Publish. Only its detector
+       is used; the pinned Chinese recognizer and dictionary are our Content. -->
+  <Target Name="SelectRapidOcrResources" BeforeTargets="CopyModelsBuild;CopyModelsPublish">
+    <ItemGroup><Models Remove="@(Models)" Condition="'%(Filename)' != 'ch_PP-OCRv5_mobile_det'" /></ItemGroup>
+  </Target>
+
+</Project>
+
+

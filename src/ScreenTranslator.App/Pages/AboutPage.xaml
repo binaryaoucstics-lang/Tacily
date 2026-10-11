@@ -1,0 +1,80 @@
+<Page x:Class="ScreenTranslator.App.Pages.AboutPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      Background="Transparent"
+      FontFamily="{DynamicResource AppFontFamily}"
+      FontSize="14">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="32,28,36,36"
+                    MaxWidth="760"
+                    HorizontalAlignment="Left">
+            <TextBlock Text="关于" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="轻量、克制，专注把屏幕上的文字变成你能顺畅阅读的语言。"
+                       Style="{StaticResource PageSubtitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}" Padding="24">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="72" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Width="56"
+                            Height="56"
+                            CornerRadius="14"
+                            Background="{DynamicResource AccentFillColorDefaultBrush}"
+                            VerticalAlignment="Top">
+                        <TextBlock Text="译"
+                                   Foreground="White"
+                                   FontSize="24"
+                                   FontWeight="SemiBold"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="全局 AI 翻译器" FontSize="22" FontWeight="SemiBold" />
+                        <TextBlock Text="版本 0.10.0 · Windows x64"
+                                   Style="{StaticResource SettingDescriptionStyle}"
+                                   Margin="0,4,0,12" />
+                        <TextBlock Text="按下 Alt + Shift + T，点击或拖框，或直接翻译鼠标位置。图片中的文字可在原位擦除并流式嵌入译文；按住 Alt 查看原图，Esc 关闭。"
+                                   TextWrapping="Wrap"
+                                   LineHeight="22" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <TextBlock Text="组件" Style="{StaticResource SectionTitleStyle}" />
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="基于 ScreenTranslator 二次开发 · MIT License" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="上游项目：github.com/NiniTakukon/ScreenTranslator。保留上游框选、浮窗、快捷键和密钥存储能力。" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text=".NET 8 · WPF · WPF UI" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="界面遵循 Windows 11 Fluent Design，并支持系统浅色、深色和高对比度设置。"
+                               Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="反馈与诊断" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="诊断日志不会记录 API Key、Authorization 请求头、截图或完整翻译正文。"
+                               Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="字体、文字模型与词典" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="Noto Sans/Serif CJK、霞鹜文楷、马善政楷书、站酷快乐体：SIL OFL。轻量 PaddleOCR：Apache-2.0。网页语言使用程序规则；图片判断、字形检测与字体匹配在本机运行。来源与许可见程序目录 NOTICE.txt、licenses、fonts 和 models。" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>
+
+
+

@@ -1,0 +1,377 @@
+<Page x:Class="ScreenTranslator.App.Pages.TranslationPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      Background="Transparent"
+      FontFamily="{DynamicResource AppFontFamily}"
+      FontSize="14">
+    <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </Page.Resources>
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="32,28,36,36"
+                    MaxWidth="760"
+                    HorizontalAlignment="Left">
+            <TextBlock Text="翻译" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="保存多个服务商预设，选择接口协议、模型与思考等级。"
+                       Style="{StaticResource PageSubtitleStyle}" />
+
+            <ui:InfoBar Title="按选区翻译"
+                        Message="图片发送给所选服务商，按完整对白返回擦字和排版位置，再流式输出译文。本地同步检测字形和气泡边缘。各服务商 API Key 分开在本机加密保存。"
+                        Severity="Informational"
+                        IsOpen="True"
+                        Margin="0,0,0,18" />
+
+            <TextBlock Text="模型连接" Style="{StaticResource SectionTitleStyle}" />
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="服务商预设" Style="{StaticResource SettingLabelStyle}" />
+                            <TextBlock Text="未选择预设时使用默认配置" Style="{StaticResource SettingDescriptionStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="TranslationPresetCombo" Grid.Column="1" ItemsSource="{Binding Presets}" DisplayMemberPath="Name"
+                                  SelectedItem="{Binding SelectedPreset}" IsEnabled="{Binding CanEditProvider}" MinWidth="260" />
+                    </Grid>
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <TextBlock Text="预设名称" Style="{StaticResource SettingLabelStyle}" VerticalAlignment="Center" />
+                        <TextBox x:Name="TranslationPresetNameBox" Grid.Column="1" Text="{Binding PresetName, UpdateSourceTrigger=PropertyChanged}"
+                                 IsEnabled="{Binding CanEditPreset}" Padding="10,7" />
+                    </Grid>
+                    <WrapPanel Margin="180,12,0,0" IsEnabled="{Binding CanEditProvider}">
+                        <ui:Button Content="新增" Command="{Binding AddPresetCommand}" Padding="12,6" />
+                        <ui:Button Content="复制当前配置" Command="{Binding CopyPresetCommand}" Margin="8,0,0,0" Padding="12,6" />
+                        <ui:Button Content="默认配置" Command="{Binding DefaultPresetCommand}" Margin="8,0,0,0" Padding="12,6" />
+                        <ui:Button Content="删除" Command="{Binding DeletePresetCommand}" IsEnabled="{Binding CanEditPreset}" Margin="8,0,0,0" Padding="12,6" />
+                    </WrapPanel>
+                    <TextBlock Text="预设分别保存地址、模型、思考等级、网络方式和加密密钥。新增后填写连接信息并点击保存；复制会一并复制已保存的密钥。"
+                               Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" Margin="0,12,0,0" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="接口协议" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="{Binding ProviderDescription}" Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ComboBox x:Name="TranslationProviderCombo" Grid.Column="1" ItemsSource="{Binding Protocols}" SelectedItem="{Binding SelectedProtocol}"
+                              IsEnabled="{Binding CanEditProvider}" MinWidth="260" />
+                </Grid>
+            </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <CheckBox Content="图片译文原位显示" IsChecked="{Binding InPlaceTranslationEnabled}" />
+                    <TextBlock Text="收到译文后在原位置擦字并流式嵌字，浮窗保持折叠。按住 Alt 查看原图，Esc 关闭。无法定位的段落可展开浮窗查看。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="快捷键触发方式" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="浮窗默认折叠，收到译文后展开。" Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1" ItemsSource="{Binding TriggerModes}" SelectedItem="{Binding TriggerMode}" MinWidth="260" />
+                </Grid>
+            </Border>
+
+            <Border x:Name="ApiNetworkCard" Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="API 网络连接" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="随当前预设保存" Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <ComboBox x:Name="ApiNetworkModeCombo" ItemsSource="{Binding NetworkModes}" SelectedItem="{Binding NetworkMode}"
+                                  IsEnabled="{Binding CanEditProvider}" MinWidth="260" />
+                        <TextBlock Text="{Binding NetworkDescription}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                        <ComboBox x:Name="ClashNodeCombo" ItemsSource="{Binding ClashNodeChoices}" SelectedValuePath="Name" SelectedValue="{Binding SelectedClashNode, Mode=TwoWay}"
+                                  IsEditable="False" IsTextSearchEnabled="True" TextSearch.TextPath="Name" MaxDropDownHeight="300"
+                                  IsEnabled="{Binding CanEditProvider}" Margin="0,10,0,0" MinWidth="260"
+                                  Visibility="{Binding ShowClashNode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid MinWidth="340">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="70" /><ColumnDefinition Width="65" /></Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" Margin="0,0,8,0" />
+                                        <TextBlock Grid.Column="1" Text="{Binding DelayText}" HorizontalAlignment="Right" Margin="0,0,8,0" />
+                                        <TextBlock Grid.Column="2" Text="{Binding StateText}" Foreground="{Binding StateColor}" FontSize="12" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                        <StackPanel Visibility="{Binding ShowClashNode, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,10,0,0">
+                            <WrapPanel>
+                                <ui:Button Content="测选中节点" Command="{Binding TestSelectedClashNodeCommand}" Padding="10,6" Margin="0,0,6,6" />
+                                <ui:Button Content="测速全部" Command="{Binding TestAllClashNodesCommand}" Padding="10,6" Margin="0,0,6,6" />
+                                <ui:Button Content="停止" Command="{Binding CancelClashNodeTestsCommand}" Padding="10,6" Margin="0,0,6,6"
+                                           Visibility="{Binding IsTestingClashNodes, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            </WrapPanel>
+                            <CheckBox Content="按延迟排序，可用节点优先" IsChecked="{Binding SortClashNodesByDelay}" Margin="0,2,0,4" />
+                            <TextBlock Text="{Binding ClashProbeStatus}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
+                            <TextBlock Text="测速检测通用 HTTPS 连通性；选择节点后，可用下方“翻译测速”检测当前 API。"
+                                       TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,6,0,0" />
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding ShowClashDiscovery, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <ui:Button x:Name="ReadClashNodesButton" Content="{Binding ClashReadButtonText}" Command="{Binding ReadClashNodesCommand}"
+                                       Padding="12,6" Margin="0,10,0,0" HorizontalAlignment="Left" />
+                            <TextBlock Text="{Binding ClashStatus}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                        </StackPanel>
+                        <TextBox x:Name="CustomProxyUrlBox" Text="{Binding ProxyUrl, UpdateSourceTrigger=PropertyChanged}"
+                                 Padding="10,7" Margin="0,10,0,0" IsEnabled="{Binding CanEditProvider}"
+                                 Visibility="{Binding ShowProxyUrl, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        <StackPanel x:Name="ClashDownloadPanel" Margin="0,10,0,0"
+                                    Visibility="{Binding ShowClashDownload, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <TextBlock Text="未检测到 Clash Verge。如需此功能，请从官方 GitHub 下载并安装。"
+                                       TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
+                            <ui:Button Content="前往 GitHub 下载" Command="{Binding OpenClashDownloadCommand}"
+                                       Padding="12,6" Margin="0,8,0,0" HorizontalAlignment="Left" />
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="API Key" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="当前配置的访问密钥，本机加密保存"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <Grid Grid.Column="1" MinWidth="300">
+                        <Grid Visibility="{Binding ShowSavedApiKey,
+                                                   Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox Text="{Binding SavedApiKeyMask, Mode=OneWay}"
+                                     IsReadOnly="True"
+                                     IsTabStop="False"
+                                     Padding="10,7" />
+                            <ui:Button Grid.Column="1"
+                                       Content="更换"
+                                       Command="{Binding BeginApiKeyEditCommand}"
+                                       Margin="8,0,0,0"
+                                       Padding="14,7" />
+                        </Grid>
+
+                        <Grid Visibility="{Binding ShowApiKeyEditor,
+                                                   Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <PasswordBox x:Name="ApiKeyBox" IsEnabled="{Binding CanEditProvider}"
+                                         Padding="10,7"
+                                         PasswordChanged="ApiKeyBox_OnPasswordChanged" />
+                            <ui:Button Grid.Column="1"
+                                       Content="取消"
+                                       Command="{Binding CancelApiKeyEditCommand}"
+                                       Visibility="{Binding HasSavedApiKey,
+                                                            Converter={StaticResource BooleanToVisibilityConverter}}"
+                                       Margin="8,0,0,0"
+                                       Padding="14,7" />
+                        </Grid>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="模型" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="可选择预设或输入完整模型 ID"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <ComboBox x:Name="TranslationModelCombo"
+                                      ItemsSource="{Binding Models}"
+                                      IsEditable="True" IsReadOnly="False" IsEnabled="{Binding CanEditModel}"
+                                      IsTextSearchEnabled="True" MaxDropDownHeight="280"
+                                      IsDropDownOpen="{Binding IsModelListOpen, Mode=TwoWay}"
+                                      Text="{Binding SelectedModel, UpdateSourceTrigger=PropertyChanged}"
+                                      MinWidth="240" />
+                            <ui:Button x:Name="ReadModelsButton" Grid.Column="1" Margin="8,0,0,0" Padding="12,7"
+                                       Content="{Binding ModelListButtonText}" Command="{Binding LoadModelsCommand}"
+                                       Visibility="{Binding SupportsModelListing, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        </Grid>
+                        <DockPanel Margin="0,6,0,0">
+                            <ui:Button x:Name="CancelReadModelsButton" DockPanel.Dock="Right" Content="取消" Margin="8,0,0,0" Padding="10,4"
+                                       Command="{Binding CancelLoadModelsCommand}"
+                                       Visibility="{Binding IsLoadingModels, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            <TextBlock Text="{Binding ModelListStatus}" TextWrapping="Wrap" VerticalAlignment="Center"
+                                       Style="{StaticResource SettingDescriptionStyle}" />
+                        </DockPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}"
+                        Margin="0,8,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="180" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Base URL" Style="{StaticResource SettingLabelStyle}" />
+                            <TextBlock Text="支持兼容服务商与本机 HTTP 服务。"
+                                       Style="{StaticResource SettingDescriptionStyle}" />
+                        </StackPanel>
+                        <TextBox x:Name="TranslationBaseUrlBox" Grid.Column="1"
+                                 Text="{Binding BaseUrl, UpdateSourceTrigger=PropertyChanged}"
+                                 IsEnabled="{Binding CanEditEndpoint}"
+                                 MinWidth="300" />
+                    </Grid>
+                </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="思考等级" Style="{StaticResource SettingLabelStyle}" />
+                            <TextBlock Text="速度优先建议关闭；复杂对白可选低。" Style="{StaticResource SettingDescriptionStyle}" />
+                        </StackPanel>
+                        <ComboBox Grid.Column="1" ItemsSource="{Binding ThinkingLevels}" SelectedItem="{Binding ThinkingLevel}" MinWidth="260" />
+                    </Grid>
+                    <TextBlock Text="{Binding ThinkingDescription}"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                    <CheckBox Content="限制低思考等待时间" IsChecked="{Binding BoundedLowThinkingEnabled}"
+                              IsEnabled="{Binding CanBoundLowThinkingWait}" Margin="0,12,0,0" />
+                    <TextBlock Text="仅 DeepSeek：低思考 12 秒仍未返回内容时，以关闭思考重试一次，可能多一次请求。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="翻译方式" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="整图 VLM 翻译，本地并行检测位置。" Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1" ItemsSource="{Binding InputModes}" SelectedItem="{Binding InputMode}" MinWidth="260" />
+                </Grid>
+            </Border>
+
+                
+
+            <Grid Margin="0,0,0,18">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding ConnectionStatus}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           VerticalAlignment="Center" TextWrapping="Wrap" />
+                <ui:Button Grid.Column="1"
+                           x:Name="TranslationBenchmarkButton" Content="翻译测速"
+                           Command="{Binding TestConnectionCommand}"
+                           Margin="8,0" />
+                <ui:Button Grid.Column="2"
+                           Appearance="Primary"
+                           Command="{Binding SaveCommand}">
+                    <TextBlock x:Name="SaveButtonText"
+                               Text="保存"
+                               Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}" />
+                </ui:Button>
+            </Grid>
+
+            <Border x:Name="ApiBenchmarkCard" Style="{StaticResource SettingCardStyle}"
+                    Visibility="{Binding ShowConnectionDetails, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock Text="真实翻译测速" Style="{StaticResource SettingLabelStyle}" />
+                        <ui:Button Grid.Column="1" Content="取消" Command="{Binding CancelConnectionTestCommand}" Padding="10,5"
+                                   Visibility="{Binding IsTesting, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                    </Grid>
+                    <TextBlock Text="{Binding ConnectionSource}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,10,0,0" />
+                    <TextBlock Text="{Binding ConnectionTranslation}" TextWrapping="Wrap" Margin="0,10,0,12" FontSize="15" />
+                    <WrapPanel>
+                        <TextBlock Text="{Binding FirstCharacterMetric}" Margin="0,0,22,8" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding ThroughputMetric}" Margin="0,0,22,8" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding TotalTimeMetric}" Margin="0,0,0,8" FontWeight="SemiBold" />
+                    </WrapPanel>
+                    <TextBlock Text="{Binding ThroughputNote}" TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="语言与风格" Style="{StaticResource SectionTitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="20" />
+                        <ColumnDefinition Width="180" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="翻译方向" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="自动检测适合大多数屏幕内容。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding SourceLanguages}"
+                              SelectedItem="{Binding SourceLanguage}" />
+                    <TextBlock Grid.Column="2"
+                               Text="→"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center" />
+                    <ComboBox Grid.Column="3"
+                              ItemsSource="{Binding TargetLanguages}"
+                              SelectedItem="{Binding TargetLanguage}" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="翻译风格" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="自然、直译或附带解释的学习模式。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding TranslationStyles}"
+                              SelectedItem="{Binding TranslationStyle}" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="上下文与术语" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="可填写专业领域、术语或固定译法，帮助模型理解当前内容。"
+                               Style="{StaticResource SettingDescriptionStyle}"
+                               Margin="0,3,0,10" />
+                    <TextBox Text="{Binding CustomContext, UpdateSourceTrigger=PropertyChanged}"
+                             AcceptsReturn="True"
+                             TextWrapping="Wrap"
+                             MinHeight="86"
+                             VerticalScrollBarVisibility="Auto" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

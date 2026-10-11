@@ -1,0 +1,142 @@
+{
+  "Fixture": "colour-real-ja-vertical",
+  "Blocks": [
+    {
+      "Id": "p1",
+      "SourceText": "明日は一緒に行こう。",
+      "Translation": "明天一起走吧。",
+      "Bounds": {
+        "X": 0,
+        "Y": 0,
+        "Width": 0,
+        "Height": 0,
+        "Right": 0,
+        "Bottom": 0,
+        "IsEmpty": true,
+        "IsUsable": false,
+        "Center": {
+          "X": 0,
+          "Y": 0
+        }
+      },
+      "TextBounds": [],
+      "SourceIds": [],
+      "IsVertical": false,
+      "IsComplete": true,
+      "HasVisionPlacement": false,
+      "LayoutBounds": {
+        "X": 0,
+        "Y": 0,
+        "Width": 0,
+        "Height": 0,
+        "Right": 0,
+        "Bottom": 0,
+        "IsEmpty": true,
+        "IsUsable": false,
+        "Center": {
+          "X": 0,
+          "Y": 0
+        }
+      },
+      "PreciseWords": false,
+      "GlyphSizeHint": 0,
+      "VisionInkBounds": {
+        "X": 0,
+        "Y": 0,
+        "Width": 0,
+        "Height": 0,
+        "Right": 0,
+        "Bottom": 0,
+        "IsEmpty": true,
+        "IsUsable": false,
+        "Center": {
+          "X": 0,
+          "Y": 0
+        }
+      },
+      "SourceAnchorTail": "明日は一緒に行こう。",
+      "TypographyHint": null
+    },
+    {
+      "Id": "p2",
+      "SourceText": "駅で待っているよ。",
+      "Translation": "我会在车站等你哦。",
+      "Bounds": {
+        "X": 144,
+        "Y": 68,
+        "Width": 208,
+        "Height": 459,
+        "Right": 352,
+        "Bottom": 527,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 248,
+          "Y": 297
+        }
+      },
+      "TextBounds": [
+        {
+          "X": 135,
+          "Y": 75,
+          "Width": 55,
+          "Height": 430,
+          "Right": 190,
+          "Bottom": 505,
+          "IsEmpty": false,
+          "IsUsable": true,
+          "Center": {
+            "X": 162,
+            "Y": 290
+          }
+        }
+      ],
+      "SourceIds": [],
+      "IsVertical": true,
+      "IsComplete": true,
+      "HasVisionPlacement": true,
+      "LayoutBounds": {
+        "X": 190,
+        "Y": 110,
+        "Width": 72,
+        "Height": 350,
+        "Right": 262,
+        "Bottom": 460,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 226,
+          "Y": 285
+        }
+      },
+      "PreciseWords": false,
+      "GlyphSizeHint": 0,
+      "VisionInkBounds": {
+        "X": 144,
+        "Y": 68,
+        "Width": 208,
+        "Height": 459,
+        "Right": 352,
+        "Bottom": 527,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 248,
+          "Y": 297
+        }
+      },
+      "SourceAnchorTail": "駅で待っているよ。",
+      "TypographyHint": {
+        "Family": 2,
+        "Bold": false,
+        "Angle": 0,
+        "Skew": 0,
+        "Outline": 0,
+        "Hollow": false,
+        "ColorHex": "#000000",
+        "OutlineColorHex": null,
+        "Vertical": null
+      }
+    }
+  ]
+}

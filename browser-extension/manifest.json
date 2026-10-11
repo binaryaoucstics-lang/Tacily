@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "全局 AI 翻译器 · 网页与图片",
+  "version": "0.9.3",
+  "description": "智能判断当前网页语言，分段并发流式翻译正文与图片，保留页面结构并跟随滚动。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApy4FPRsCWmLezOby6qFw+3sMzE0telN7PAE9KrO8Gyy90O1v3EdX2io1qLiwB+aK4r1LH9IEkgvThsOhPZt/l4kMGPEs8LyqhkgS3Nx3nzxFT6kRQYX4JOKohjtKUomK6KOx5GcfLJFX7sF38A2d8UDeRD1KXEO92kn68w66Pl8XNFERtpTtzfjHdLJugHcN/CrXlR/dk0XLp/EVLmzVJA803HmQE2WwghEk3bMXTjrtzIglygJbkrC8NkYxQN1VMNeWhUN5HtOqWo2Vqly8Nm1lsMl/YgI7XSZ6IR+Y+N0yV92aRbDjCbG7T64ElNU19XMRQz4PPxjXyuxMVsO7fQIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "declarativeNetRequestWithHostAccess"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*",
+        "file:///*"
+      ],
+      "js": [
+        "scroll-accumulator.js",
+        "translation-motion.js",
+        "content.js",
+        "image-geometry.js",
+        "image-overlay.js",
+        "image-auto-policy.js",
+        "image-content.js",
+        "page-auto-policy.js",
+        "page-auto-content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "path": "src/ScreenTranslator.App/Assets/Fonts/NotoSansCJKsc-Regular.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+      "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+      "bytes": 16437364
+    },
+    {
+      "path": "src/ScreenTranslator.App/Assets/Fonts/NotoSansCJKsc-Bold.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf",
+      "sha256": "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a",
+      "bytes": 17002248
+    },
+    {
+      "path": "src/ScreenTranslator.App/Assets/Fonts/NotoSerifCJKsc-Regular.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Serif2.003/Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Regular.otf",
+      "sha256": "2a2eae2628df83556c54018c41e20fa532c1b862c5256ae8b3f23feb918d12ca",
+      "bytes": 24543080
+    },
+    {
+      "path": "src/ScreenTranslator.App/Assets/Fonts/NotoSerifCJKsc-Bold.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Serif2.003/Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Bold.otf",
+      "sha256": "8af07d4b6c2e82bcc72a30e066eaf295f11b9424f4aad2eaa9fe0e9c3b38fc73",
+      "bytes": 25521460
+    },
+    {
+      "path": "src/ScreenTranslator.App/Assets/Fonts/LXGWWenKai-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/lxgw/LxgwWenKai/e8b5b48b79f19f29aa68b0a178eab3472ea9f7e8/fonts/TTF/LXGWWenKai-Regular.ttf",
+      "sha256": "39ad71264b588165b469e35e6afb162a378dacd1f95348160240ba9038ac3009",
+      "bytes": 25575676
+    },
+    {
+      "path": "src/ScreenTranslator.App/Assets/Fonts/MaShanZheng-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/google/fonts/406197b91ff39a93061c2c2eeaee67ddf2ae1f0d/ofl/mashanzheng/MaShanZheng-Regular.ttf",
+      "sha256": "6d2546bb189c732a8ca29af9e22457b152387d158aa459e4ac2ce1e51788b7fb",
+      "bytes": 5857936
+    },
+    {
+      "path": "src/ScreenTranslator.App/Assets/Fonts/ZCOOLKuaiLe-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/google/fonts/6d49995f5d8f1c7d476760a580ffb89ce1e52c5d/ofl/zcoolkuaile/ZCOOLKuaiLe-Regular.ttf",
+      "sha256": "812a6fc1fe54b6d73a419245c32dfeba8aa33104d5be90d1cf6af082007cb71d",
+      "bytes": 1514968
+    },
+    {
+      "path": "models/v5/ch_PP-OCRv5_rec_mobile.onnx",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
+      "bytes": 16631306
+    }
+  ]
+}

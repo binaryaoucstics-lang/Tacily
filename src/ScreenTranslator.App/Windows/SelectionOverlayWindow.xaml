@@ -1,0 +1,65 @@
+<Window x:Class="ScreenTranslator.App.Windows.SelectionOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="全局 AI 翻译器 · 选择区域"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="True"
+        Topmost="True"
+        Background="Black"
+        Cursor="Cross"
+        PreviewKeyDown="Window_OnKeyDown"
+        MouseLeftButtonDown="Window_OnMouseLeftButtonDown"
+        MouseMove="Window_OnMouseMove"
+        MouseLeftButtonUp="Window_OnMouseLeftButtonUp"
+        MouseRightButtonUp="Window_OnMouseRightButtonUp">
+    <Grid ClipToBounds="True">
+        <Image Source="{Binding Screenshot}"
+               Stretch="Fill"
+               SnapsToDevicePixels="True" />
+
+        <Canvas x:Name="OverlayCanvas">
+            <Rectangle x:Name="DimTop" Fill="#8C000000" />
+            <Rectangle x:Name="DimLeft" Fill="#8C000000" />
+            <Rectangle x:Name="DimRight" Fill="#8C000000" />
+            <Rectangle x:Name="DimBottom" Fill="#8C000000" />
+
+            <Border x:Name="SelectionBorder"
+                    Visibility="Collapsed"
+                    BorderBrush="{DynamicResource AccentFillColorDefaultBrush}"
+                    BorderThickness="2"
+                    CornerRadius="2">
+                <Border.Effect>
+                    <DropShadowEffect Color="Black"
+                                      Opacity="0.55"
+                                      BlurRadius="8"
+                                      ShadowDepth="0" />
+                </Border.Effect>
+            </Border>
+
+            <Border x:Name="SizeBadge"
+                    Visibility="Collapsed"
+                    Background="#E61F1F1F"
+                    CornerRadius="5"
+                    Padding="8,4">
+                <TextBlock Text="{Binding SelectionSizeText}"
+                           Foreground="White"
+                           FontFamily="Segoe UI Variable, Microsoft YaHei UI"
+                           FontSize="12"
+                           FontWeight="SemiBold" />
+            </Border>
+        </Canvas>
+
+        <Border HorizontalAlignment="Center"
+                VerticalAlignment="Top"
+                Margin="0,28,0,0"
+                Padding="14,8"
+                CornerRadius="8"
+                Background="#D91F1F1F">
+            <TextBlock x:Name="InstructionText" Text="{Binding ModeState.InstructionText}"
+                       Foreground="White"
+                       FontFamily="Segoe UI Variable, Microsoft YaHei UI"
+                       FontWeight="SemiBold" />
+        </Border>
+    </Grid>
+</Window>

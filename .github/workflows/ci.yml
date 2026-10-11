@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore ScreenTranslator.sln --configfile NuGet.Config
+
+      - name: Fetch pinned resources
+        shell: pwsh
+        run: ./eng/fetch-assets.ps1
+
+      - name: Build
+        run: dotnet build ScreenTranslator.sln -c Release --no-restore
+
+      - name: Test .NET
+        run: dotnet test ScreenTranslator.sln -c Release --no-build
+
+      - name: Test browser extension
+        run: node --test (Get-ChildItem ./browser-extension/tests -Filter *.test.js).FullName
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build distributable packages
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content "./src/ScreenTranslator.App/ScreenTranslator.App.csproj"
+          $version = ($project.Project.PropertyGroup.Version | Select-Object -First 1)
+          ./eng/build-release.ps1 -Version $version
+          $root = (Resolve-Path "./artifacts/release/v$version").Path
+          $env:SCREEN_TRANSLATOR_VERSION = $version
+          $env:SCREEN_TRANSLATOR_PUBLISH_DIR = Join-Path $root "publish"
+          $env:SCREEN_TRANSLATOR_ARTIFACT_DIR = Join-Path $root "artifacts"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "./installer/ScreenTranslator.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./eng/write-checksums.ps1 -ArtifactDirectory $env:SCREEN_TRANSLATOR_ARTIFACT_DIR
+          ./eng/test-installer.ps1 -InstallerPath (
+            Join-Path $env:SCREEN_TRANSLATOR_ARTIFACT_DIR "ScreenTranslator-Setup-x64.exe")
+
+      - name: Upload distributable packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenTranslator-main
+          path: artifacts/release/v*/artifacts/*
+          if-no-files-found: error

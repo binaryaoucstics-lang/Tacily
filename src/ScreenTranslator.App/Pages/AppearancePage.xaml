@@ -1,0 +1,130 @@
+<Page x:Class="ScreenTranslator.App.Pages.AppearancePage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      Background="Transparent"
+      FontFamily="{DynamicResource AppFontFamily}"
+      FontSize="14">
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="32,28,36,36"
+                    MaxWidth="760"
+                    HorizontalAlignment="Left">
+            <TextBlock Text="外观" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="保持 Windows 11 的清爽观感，同时让译文在复杂背景上清晰可读。"
+                       Style="{StaticResource PageSubtitleStyle}" />
+
+            <TextBlock Text="应用主题" Style="{StaticResource SectionTitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="颜色模式" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="默认跟随 Windows 的浅色或深色设置。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding Themes}"
+                              SelectedItem="{Binding Theme}" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="界面动画" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="系统启用减少动画时会自动停用。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1"
+                                     IsChecked="{Binding UseAnimations}"
+                                     VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <TextBlock Text="译文显示" Style="{StaticResource SectionTitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="默认显示方式" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="先折叠等待，首段译文返回后展开并流式显示。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding DisplayModes}"
+                              SelectedItem="{Binding DisplayMode}" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="220" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="面板不透明度" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="背景越复杂，建议使用更高的不透明度。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding PanelOpacity, StringFormat={}{0:F0}%}"
+                               HorizontalAlignment="Right"
+                               FontWeight="SemiBold" />
+                    <Slider Grid.Row="1"
+                            Grid.ColumnSpan="2"
+                            Minimum="72"
+                            Maximum="100"
+                            TickFrequency="2"
+                            Value="{Binding PanelOpacity}"
+                            Margin="0,14,0,0" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}" Padding="20">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="译文预览" FontWeight="SemiBold" />
+                        <TextBlock Text="A clear translation should feel native to your desktop."
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Margin="0,6,0,12" />
+                        <TextBlock Text="清晰的译文，应该自然融入你的桌面。"
+                                   FontSize="16"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Border Grid.Column="1"
+                            Style="{StaticResource CompactBadgeStyle}"
+                            Height="28"
+                            VerticalAlignment="Top">
+                        <TextBlock x:Name="PreviewBadgeText"
+                                   Text="旁显"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}" />
+                    </Border>
+                </Grid>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

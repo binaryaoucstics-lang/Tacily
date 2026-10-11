@@ -1,0 +1,185 @@
+{
+  "Fixture": "colour-real-en-comic",
+  "Blocks": [
+    {
+      "Id": "p1",
+      "SourceText": "WE NEED TO LEAVE\nBEFORE SUNRISE.",
+      "Translation": "我们需要在日出前离开。",
+      "Bounds": {
+        "X": 75,
+        "Y": 56,
+        "Width": 590,
+        "Height": 252,
+        "Right": 665,
+        "Bottom": 308,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 370,
+          "Y": 182
+        }
+      },
+      "TextBounds": [
+        {
+          "X": 78,
+          "Y": 111,
+          "Width": 546,
+          "Height": 55,
+          "Right": 624,
+          "Bottom": 166,
+          "IsEmpty": false,
+          "IsUsable": true,
+          "Center": {
+            "X": 351,
+            "Y": 138
+          }
+        },
+        {
+          "X": 106,
+          "Y": 190,
+          "Width": 486,
+          "Height": 46,
+          "Right": 592,
+          "Bottom": 236,
+          "IsEmpty": false,
+          "IsUsable": true,
+          "Center": {
+            "X": 349,
+            "Y": 213
+          }
+        }
+      ],
+      "SourceIds": [],
+      "IsVertical": false,
+      "IsComplete": true,
+      "HasVisionPlacement": true,
+      "LayoutBounds": {
+        "X": 160,
+        "Y": 81,
+        "Width": 423,
+        "Height": 202,
+        "Right": 583,
+        "Bottom": 283,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 371,
+          "Y": 182
+        }
+      },
+      "PreciseWords": false,
+      "GlyphSizeHint": 0,
+      "VisionInkBounds": {
+        "X": 75,
+        "Y": 56,
+        "Width": 590,
+        "Height": 252,
+        "Right": 665,
+        "Bottom": 308,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 370,
+          "Y": 182
+        }
+      },
+      "SourceAnchorTail": "ORE SUNRISE.",
+      "TypographyHint": {
+        "Family": 2,
+        "Bold": true,
+        "Angle": 0,
+        "Skew": 0,
+        "Outline": 0,
+        "Hollow": false,
+        "ColorHex": "#000000",
+        "OutlineColorHex": null,
+        "Vertical": null
+      }
+    },
+    {
+      "Id": "p2",
+      "SourceText": "THEN LET USPACK TONIGHT.",
+      "Translation": "那我们今晚就打包吧。",
+      "Bounds": {
+        "X": 743,
+        "Y": 101,
+        "Width": 438,
+        "Height": 157,
+        "Right": 1181,
+        "Bottom": 258,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 962,
+          "Y": 179
+        }
+      },
+      "TextBounds": [
+        {
+          "X": 773,
+          "Y": 101,
+          "Width": 386,
+          "Height": 92,
+          "Right": 1159,
+          "Bottom": 193,
+          "IsEmpty": false,
+          "IsUsable": true,
+          "Center": {
+            "X": 966,
+            "Y": 147
+          }
+        },
+        {
+          "X": 743,
+          "Y": 176,
+          "Width": 438,
+          "Height": 82,
+          "Right": 1181,
+          "Bottom": 258,
+          "IsEmpty": false,
+          "IsUsable": true,
+          "Center": {
+            "X": 962,
+            "Y": 217
+          }
+        }
+      ],
+      "SourceIds": [],
+      "IsVertical": false,
+      "IsComplete": true,
+      "HasVisionPlacement": false,
+      "LayoutBounds": {
+        "X": 743,
+        "Y": 101,
+        "Width": 438,
+        "Height": 157,
+        "Right": 1181,
+        "Bottom": 258,
+        "IsEmpty": false,
+        "IsUsable": true,
+        "Center": {
+          "X": 962,
+          "Y": 179
+        }
+      },
+      "PreciseWords": false,
+      "GlyphSizeHint": 0,
+      "VisionInkBounds": {
+        "X": 0,
+        "Y": 0,
+        "Width": 0,
+        "Height": 0,
+        "Right": 0,
+        "Bottom": 0,
+        "IsEmpty": true,
+        "IsUsable": false,
+        "Center": {
+          "X": 0,
+          "Y": 0
+        }
+      },
+      "SourceAnchorTail": "ACK TONIGHT.",
+      "TypographyHint": null
+    }
+  ]
+}

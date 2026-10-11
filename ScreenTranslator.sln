@@ -1,0 +1,50 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{DDC847AA-C403-40A8-B68C-EA90AF270EC7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScreenTranslator.Core", "src\ScreenTranslator.Core\ScreenTranslator.Core.csproj", "{B6BA4BF2-EC6D-4996-B64B-EA79EAB5FF5A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScreenTranslator.App", "src\ScreenTranslator.App\ScreenTranslator.App.csproj", "{46E85F9F-43E0-4C63-A2A3-0D04B1DB4E83}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{6836F853-A5E6-41D1-AD4F-138204A27AE4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScreenTranslator.Core.Tests", "tests\ScreenTranslator.Core.Tests\ScreenTranslator.Core.Tests.csproj", "{0F7B0145-C12C-41E0-B1BB-FA7C9A03FB1F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScreenTranslator.IntegrationTests", "tests\ScreenTranslator.IntegrationTests\ScreenTranslator.IntegrationTests.csproj", "{4FE7EB18-ACF8-4CE5-BE31-503B44156802}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B6BA4BF2-EC6D-4996-B64B-EA79EAB5FF5A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6BA4BF2-EC6D-4996-B64B-EA79EAB5FF5A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6BA4BF2-EC6D-4996-B64B-EA79EAB5FF5A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6BA4BF2-EC6D-4996-B64B-EA79EAB5FF5A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{46E85F9F-43E0-4C63-A2A3-0D04B1DB4E83}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{46E85F9F-43E0-4C63-A2A3-0D04B1DB4E83}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{46E85F9F-43E0-4C63-A2A3-0D04B1DB4E83}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{46E85F9F-43E0-4C63-A2A3-0D04B1DB4E83}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0F7B0145-C12C-41E0-B1BB-FA7C9A03FB1F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0F7B0145-C12C-41E0-B1BB-FA7C9A03FB1F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0F7B0145-C12C-41E0-B1BB-FA7C9A03FB1F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0F7B0145-C12C-41E0-B1BB-FA7C9A03FB1F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4FE7EB18-ACF8-4CE5-BE31-503B44156802}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4FE7EB18-ACF8-4CE5-BE31-503B44156802}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4FE7EB18-ACF8-4CE5-BE31-503B44156802}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4FE7EB18-ACF8-4CE5-BE31-503B44156802}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{B6BA4BF2-EC6D-4996-B64B-EA79EAB5FF5A} = {DDC847AA-C403-40A8-B68C-EA90AF270EC7}
+		{46E85F9F-43E0-4C63-A2A3-0D04B1DB4E83} = {DDC847AA-C403-40A8-B68C-EA90AF270EC7}
+		{0F7B0145-C12C-41E0-B1BB-FA7C9A03FB1F} = {6836F853-A5E6-41D1-AD4F-138204A27AE4}
+		{4FE7EB18-ACF8-4CE5-BE31-503B44156802} = {6836F853-A5E6-41D1-AD4F-138204A27AE4}
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,218 @@
+<Window x:Class="ScreenTranslator.App.Windows.SidePanelWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        xmlns:behaviors="clr-namespace:ScreenTranslator.App.Behaviors"
+        Title="全局 AI 翻译器 · 译文"
+        Width="320"
+        Height="88"
+        MinWidth="260"
+        MinHeight="64"
+        MaxWidth="520"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="CanResizeWithGrip"
+        ShowInTaskbar="True"
+        ShowActivated="False"
+        Topmost="True">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </Window.Resources>
+
+    <Border x:Name="RootCard"
+            behaviors:MouseWheelRouter.IsEnabled="True"
+            Margin="14"
+            Background="{DynamicResource TranslationSurfaceBrush}"
+            BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+            BorderThickness="1"
+            CornerRadius="12"
+            Opacity="1">
+        <Border.Effect>
+            <DropShadowEffect Color="Black"
+                              BlurRadius="24"
+                              ShadowDepth="6"
+                              Opacity="0.28" />
+        </Border.Effect>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid x:Name="HeaderArea"
+                  Margin="18,15,12,10"
+                  Background="Transparent"
+                  Cursor="SizeAll"
+                  MouseLeftButtonDown="Header_OnMouseLeftButtonDown">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                            Visibility="{Binding IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Border x:Name="AiTranslationBadge"
+                            Background="{DynamicResource AccentFillColorSecondaryBrush}"
+                            CornerRadius="5"
+                            Padding="9,3">
+                        <TextBlock Text="AI 翻译"
+                                   FontSize="12"
+                                   FontWeight="SemiBold" />
+                    </Border>
+                    <TextBlock Text="{Binding SourceLanguageLabel}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="12"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center" />
+                    <TextBlock Text=" → "
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="12"
+                               VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding TargetLanguageLabel}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="12"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+                <Button Content="{Binding StatusText}" Command="{Binding ToggleExpandedCommand}"
+                        ToolTip="{Binding StatusText}" HorizontalContentAlignment="Left" BorderThickness="0"
+                        Background="Transparent" Padding="0" FontSize="13" Cursor="Hand" Margin="0,0,8,0"
+                        Visibility="{Binding IsCollapsed, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <ToggleButton Content="原位" Padding="6,4" Margin="0,0,4,0"
+                                  IsChecked="{Binding IsInPlaceEnabled, Mode=OneWay}" Command="{Binding ToggleInPlaceCommand}"
+                                  ToolTip="切换原位译文；按住 Alt 查看原图，Esc 关闭"
+                                  Visibility="{Binding CanRenderInPlace, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                    <ui:Button Content="⌃" ToolTip="折叠" Cursor="Arrow" Padding="6,5"
+                               Command="{Binding ToggleExpandedCommand}"
+                               Visibility="{Binding IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                    <ui:Button ToolTip="关闭或取消" Cursor="Arrow" Padding="8,5" Command="{Binding CloseCommand}">
+                        <ui:SymbolIcon Symbol="Dismiss20" />
+                    </ui:Button>
+                </StackPanel>
+            </Grid>
+
+            <Border x:Name="MotionTrack" Grid.Row="1" Height="2" Background="#14689ADB"
+                    ClipToBounds="True" IsHitTestVisible="False"
+                    Visibility="{Binding IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <Rectangle x:Name="MotionRibbon" Width="110" Height="2" HorizontalAlignment="Left">
+                    <Rectangle.Fill>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                            <GradientStop Color="#006B9DDA" Offset="0" />
+                            <GradientStop Color="#A16B9DDA" Offset="0.45" />
+                            <GradientStop Color="#88988ADB" Offset="0.7" />
+                            <GradientStop Color="#00988ADB" Offset="1" />
+                        </LinearGradientBrush>
+                    </Rectangle.Fill>
+                    <Rectangle.RenderTransform><TranslateTransform x:Name="MotionRibbonOffset" X="-110" /></Rectangle.RenderTransform>
+                </Rectangle>
+            </Border>
+
+            <ScrollViewer x:Name="ContentScrollViewer"
+                          Grid.Row="2"
+                          Visibility="{Binding IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Margin="18,10,18,14">
+                    <Border Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                            CornerRadius="6"
+                            Padding="12,10"
+                            Margin="0,0,0,12"
+                            Visibility="{Binding IsSourceVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <StackPanel>
+                            <TextBlock Text="{Binding SourceDisplayLabel}"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       Margin="0,0,0,5" />
+                            <Grid Margin="0,0,0,8">
+                                <Image x:Name="SourcePreviewImage" Source="{Binding SourceImage}" MaxHeight="180" Stretch="Uniform"
+                                       MouseMove="SourcePreview_OnMouseMove" MouseLeave="Segment_OnMouseLeave" SizeChanged="SourcePreview_OnSizeChanged" />
+                                <Canvas x:Name="PreviewHighlights" IsHitTestVisible="False" ClipToBounds="True" />
+                            </Grid>
+                            <TextBlock Text="{Binding SourceText}"
+                                       Visibility="{Binding IsFlatTranslation, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                       TextWrapping="Wrap"
+                                       LineHeight="21" />
+                            <ui:Button Content="复制原文" Command="{Binding CopySourceCommand}" HorizontalAlignment="Left" Margin="0,8,0,0"
+                                       Visibility="{Binding HasSourceText, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="{Binding TranslatedText}"
+                               Visibility="{Binding IsFlatTranslation, Converter={StaticResource BooleanToVisibilityConverter}}"
+                               FontSize="16"
+                               LineHeight="25"
+                               TextWrapping="Wrap" />
+
+                    <TextBlock Text="按住 Alt 查看原图；未定位的段落可在这里查看"
+                               FontSize="12" Margin="0,0,0,8" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               Visibility="{Binding HasSegments, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                    <ItemsControl x:Name="TranslationSegmentsList" ItemsSource="{Binding Segments}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Padding="10,8" Margin="0,0,0,8" CornerRadius="6" BorderThickness="1"
+                                        ToolTip="{Binding SourceText}" MouseEnter="Segment_OnMouseEnter" MouseLeave="Segment_OnMouseLeave">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="Transparent" />
+                                            <Setter Property="BorderBrush" Value="Transparent" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                    <Setter Property="Background" Value="#144187F5" />
+                                                    <Setter Property="BorderBrush" Value="#FF4187F5" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel>
+                                        <StackPanel Visibility="{Binding DataContext.IsSourceVisible, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                            <TextBlock Text="{Binding SourceText}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,5"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Visibility="{Binding HasSourceText, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding Translation}" FontSize="16" LineHeight="25" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding StreamingTail}" FontSize="16" LineHeight="25" TextWrapping="Wrap" />
+
+                    <TextBlock Text="{Binding ErrorMessage}"
+                               Foreground="{DynamicResource SystemFillColorCriticalBrush}"
+                               TextWrapping="Wrap"
+                               Margin="0,10,0,0" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <Border Grid.Row="3"
+                    Visibility="{Binding IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}"
+                    BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}"
+                    BorderThickness="0,1,0,0"
+                    Padding="10,9">
+                <WrapPanel>
+                        <ui:Button Content="{Binding SourceDisplayLabel}"
+                                   ToolTip="显示或隐藏原图 / 原文"
+                                   Command="{Binding ToggleSourceCommand}"
+                                   Margin="0,3,6,3" />
+                        <ui:Button Content="复制译文"
+                                   Command="{Binding CopyCommand}"
+                                   Margin="0,3,6,3" />
+                        <ui:Button Content="重译"
+                                   Command="{Binding RetryCommand}"
+                                   Margin="0,3,6,3" />
+                        <ui:Button Content="重选"
+                                   ToolTip="重新点击或拖框选择"
+                                   Command="{Binding ReselectCommand}" Margin="0,3,6,3" />
+                    <ui:Button
+                               Content="设置"
+                               Command="{Binding SettingsCommand}"
+                               Margin="0,3,0,3" />
+                </WrapPanel>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

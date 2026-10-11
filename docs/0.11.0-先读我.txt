@@ -1,0 +1,17 @@
+全局 AI 翻译器 0.11.0 / Chrome 扩展 0.6.0
+
+退出旧程序后启动 ScreenTranslator.exe。旧版配置与加密密钥继续可用。
+
+翻译设置新增“服务商预设”：
+1. 点击新增，填写预设名称。
+2. 选择协议：OpenAI 兼容 Chat Completions、OpenAI Responses、Anthropic Messages，或 DeepSeek 官方。
+3. 填写模型 ID、Base URL 与 API Key，再点击保存并测试连接。
+4. 从预设列表切换，网页与图片翻译都会使用当前预设。
+
+每个预设有独立加密密钥；名称、地址、模型和思考等级保存在本机配置。
+“复制当前配置”会复制当前参数和已保存密钥，之后独立修改。
+支持 HTTPS 服务与 localhost / 127.0.0.1 的 HTTP 本机服务。
+通用 Chat Completions 使用服务端默认思考设置，不发送 DeepSeek 专有参数。
+图片翻译需要服务商模型支持视觉输入。
+
+运行包与源码包不含个人配置、密钥、日志或缓存。

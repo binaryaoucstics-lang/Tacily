@@ -1,0 +1,98 @@
+<Page x:Class="ScreenTranslator.App.Pages.HotkeyPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      Background="Transparent"
+      FontFamily="{DynamicResource AppFontFamily}"
+      FontSize="14"
+      PreviewKeyDown="Page_OnPreviewKeyDown">
+    <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </Page.Resources>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="32,28,36,36"
+                    MaxWidth="760"
+                    HorizontalAlignment="Left">
+            <TextBlock Text="快捷键" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Text="在任何应用中唤起框选翻译，不需要先切换到屏译。"
+                       Style="{StaticResource PageSubtitleStyle}" />
+
+            <Border Style="{StaticResource SettingCardStyle}" Padding="22">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="框选翻译" FontSize="17" FontWeight="SemiBold" />
+                        <Border Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Padding="16,10"
+                                Margin="0,14,0,8"
+                                HorizontalAlignment="Left">
+                            <TextBlock Text="{Binding HotkeyText}"
+                                       FontSize="16"
+                                       FontWeight="SemiBold" />
+                        </Border>
+                        <TextBlock Text="{Binding StatusText}"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:Button Grid.Column="1"
+                               Content="{Binding RecordButtonText}"
+                               Command="{Binding BeginRecordingCommand}"
+                               Focusable="True"
+                               VerticalAlignment="Center"
+                               Margin="20,0,0,0" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}"
+                    Visibility="{Binding IsRecording, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="正在等待键盘输入" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="组合键必须包含 Ctrl、Alt、Shift 或 Windows 中至少一个修饰键。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:Button Grid.Column="1"
+                               Content="使用默认"
+                               Command="{Binding UseDefaultCommand}"
+                               Margin="12,0,6,0" />
+                    <ui:Button Grid.Column="2"
+                               Content="取消"
+                               Command="{Binding CancelRecordingCommand}" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource SettingCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="启用全局快捷键" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="暂停时仍可从托盘菜单开始翻译。"
+                                   Style="{StaticResource SettingDescriptionStyle}" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1"
+                                     IsChecked="{Binding IsEnabled}"
+                                     VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <ui:InfoBar Title="修改会立即生效"
+                        Message="新组合若已被其他程序占用，屏译会自动恢复上一个可用快捷键。"
+                        Severity="Informational"
+                        IsOpen="True"
+                        Margin="0,10,0,0" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

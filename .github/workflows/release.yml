@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore ScreenTranslator.sln --configfile NuGet.Config
+
+      - name: Fetch pinned resources
+        shell: pwsh
+        run: ./eng/fetch-assets.ps1
+
+      - name: Build
+        run: dotnet build ScreenTranslator.sln -c Release --no-restore
+
+      - name: Test .NET
+        run: dotnet test ScreenTranslator.sln -c Release --no-build
+
+      - name: Test browser extension
+        run: node --test (Get-ChildItem ./browser-extension/tests -Filter *.test.js).FullName
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build release payload
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          ./eng/build-release.ps1 -Version $version
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $root = (Resolve-Path "./artifacts/release/v$version").Path
+          $env:SCREEN_TRANSLATOR_VERSION = $version
+          $env:SCREEN_TRANSLATOR_PUBLISH_DIR = Join-Path $root "publish"
+          $env:SCREEN_TRANSLATOR_ARTIFACT_DIR = Join-Path $root "artifacts"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "./installer/ScreenTranslator.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./eng/write-checksums.ps1 -ArtifactDirectory $env:SCREEN_TRANSLATOR_ARTIFACT_DIR
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          ./eng/test-installer.ps1 -InstallerPath "./artifacts/release/v$version/artifacts/ScreenTranslator-Setup-x64.exe"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenTranslator-${{ github.ref_name }}
+          path: artifacts/release/${{ github.ref_name }}/artifacts/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            推荐下载 `ScreenTranslator-Setup-x64.exe`。首次安装未签名版本时，
+            Windows SmartScreen 可能显示“未知发布者”，请核对本页 SHA-256 后再运行。
+
+            Chrome/Edge 扩展需要在软件“常规”页按引导确认加载一次；
+            桌面连接组件会自动安装和重连。
+          files: |
+            artifacts/release/${{ github.ref_name }}/artifacts/ScreenTranslator-Setup-x64.exe
+            artifacts/release/${{ github.ref_name }}/artifacts/ScreenTranslator-Portable-x64.zip
+            artifacts/release/${{ github.ref_name }}/artifacts/ScreenTranslator-Browser-Extension.zip
+            artifacts/release/${{ github.ref_name }}/artifacts/SHA256SUMS.txt
