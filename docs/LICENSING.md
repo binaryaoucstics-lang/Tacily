@@ -16,7 +16,7 @@
 
 ## 此前公开的 Apache 2.0 版本
 
-[提交 2d1d607](https://github.com/binaryaoucstics-lang/global-ai-translator/tree/2d1d6074da5a8912800824c4abf9e7ea3e03d64a)已按 Apache License 2.0 发布。该许可包含不可撤销的版权授权，本次变更不能追溯撤销先前对该版本作出的授权，也不能阻止他人在遵守原许可的前提下继续使用该版本。
+[提交 2d1d607](https://github.com/binaryaoucstics-lang/Tacily/tree/2d1d6074da5a8912800824c4abf9e7ea3e03d64a)已按 Apache License 2.0 发布。该许可包含不可撤销的版权授权，本次变更不能追溯撤销先前对该版本作出的授权，也不能阻止他人在遵守原许可的前提下继续使用该版本。
 
 该版本的许可全文保存在 [Apache-2.0-previous.txt](licenses/Apache-2.0-previous.txt)。本次变更后新发布的 Tacily 专有改动及品牌素材按当前非商业许可提供。
 

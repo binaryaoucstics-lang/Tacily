@@ -26,7 +26,7 @@
 
 ## 使用
 
-下载 [Windows 最新发布包](https://github.com/binaryaoucstics-lang/global-ai-translator/releases/latest)。提供安装版和解压即用版，均包含 Chrome 扩展，无需另装 .NET。
+下载 [Windows 最新发布包](https://github.com/binaryaoucstics-lang/Tacily/releases/latest)。提供安装版和解压即用版，均包含 Chrome 扩展，无需另装 .NET。
 
 ### 使用 ChatGPT 订阅额度
 
