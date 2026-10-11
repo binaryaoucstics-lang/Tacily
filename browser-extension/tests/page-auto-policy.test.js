@@ -161,6 +161,80 @@ test("Han-only target text is skipped unless the original group is known to be J
     assert.equal(policy.skipTranslationText(source), "", source);
 });
 
+// Public development examples only; kept identical to the Core fixtures.
+test("readable Chinese with short abbreviations is skipped only for Chinese targets", () => {
+  for (const source of [
+    "WTT中国大满贯赛：王曼昱女单卫冕",
+    "“张雪机车”德比斯获WSBK葡萄牙站次回合第三",
+    "新华社权威AI时政资讯智能体“新华语典”",
+    "APEC“中国年”",
+    "AI时代需要更多数控铣技术人才",
+    "智界R7焕新上市 售价23.98万-31.98万元",
+    "新华网B站号",
+    "A股三季报披露将启幕 业绩预告勾勒盈利图景",
+    "ＡＰＥＣ“中国年”", "𠀀𠀋𠮷AI", "中文技术支持说明方案AI CPU"
+  ]) {
+    for (const targetLanguage of ["简体中文", "zh-CN", "zh-Hans", "zh-Hant", "Chinese", "繁体中文"]) {
+      assert.equal(policy.skipTranslationText(source, { targetLanguage }), "already_target_language", source);
+      assert.equal(policy.skipTranslationText(source, { targetLanguage, explicitSelection: true }), "already_target_language", source);
+      assert.equal(policy.skipTranslationText(source, { targetLanguage, foreignHanContext: true }), "", source);
+      assert.equal(policy.skipTranslationText(source, { targetLanguage, foreignHanContext: "true" }), "already_target_language", source);
+    }
+    for (const targetLanguage of ["English", "en-US", "ja-JP", "ko-KR", "fr-FR"])
+      assert.equal(policy.skipTranslationText(source, { targetLanguage }), "", source);
+  }
+});
+
+test("per-node Unicode trim distinguishes edge and internal whitespace without changing page counts", () => {
+  for (const [source, needsTranslation] of [
+    ["\u0085APEC中国年", false], ["APEC中国年\u0085", false],
+    ["\ufeffAPEC中国年", false], ["APEC中国年\ufeff", false],
+    ["\ufeff \u0085APEC中国年\u0085 \ufeff", false], ["APEC\u0085中国年", true],
+    ["APEC\ufeff中国年", false], ["AP\ufeffEC中国年", true]
+  ]) {
+    assert.equal(policy.skipTranslationText(source), needsTranslation ? "" : "already_target_language", source);
+    assert.equal(policy.alreadyTargetText(source), !needsTranslation, source);
+    assert.equal(policy.skipTranslationText(source, { foreignHanContext: true }), "", source);
+    assert.equal(policy.skipTranslationText(source, { targetLanguage: "English" }), "", source);
+  }
+  // Keep the existing page-wide script accounting, including JS whitespace semantics.
+  assert.equal(policy.languageCounts("\u0085").totalCharacters, 1);
+  assert.equal(policy.languageCounts("\ufeff").totalCharacters, 0);
+});
+
+test("Unicode edge trim preserves noise and metadata boundaries", () => {
+  for (const source of [
+    "\u0085", "\ufeff", "\ufeff \u0085 \ufeff", "\u0085100 USD\u0085", "\ufeff100 USD\ufeff",
+    "\u0085https://example.com\u0085", "\ufeffhttps://example.com\ufeff"
+  ]) {
+    assert.ok(policy.skipTranslationText(source), source);
+    assert.ok(policy.skipTranslationText(source, { targetLanguage: "English", explicitSelection: true }), source);
+  }
+});
+
+test("ordinary uppercase commands and phrases remain eligible regardless of Han share", () => {
+  for (const source of [
+    "全世界的人民大声疾呼 NO WAR", "请大家帮助这个受困的人 HELP", "请大家帮助这个受困的人HELP",
+    "请大家帮助这个受困的人 HELP NOW", "中文说明文章A B", "中文技术支持说明方案AI GO",
+    "这是一个包含多个普通大写英文单词的很长中文说明 NO WAR"
+  ]) {
+    assert.equal(policy.skipTranslationText(source), "", source);
+    assert.equal(policy.skipTranslationText(source, { explicitSelection: true }), "", source);
+    assert.equal(policy.skipTranslationText(source, { foreignHanContext: true }), "", source);
+    assert.equal(policy.skipTranslationText(source, { targetLanguage: "English" }), "", source);
+  }
+});
+
+test("foreign prose, scripts and insufficient Chinese evidence remain eligible", () => {
+  for (const source of [
+    "Wang defeated 王曼昱 in the WTT final.", "AI NEWS FROM 王曼昱", "STOP 王曼昱!", "GO 王曼昱", "AI 中国年", "AI\u0085中国年",
+    "English 中文说明", "你好 Hello",
+    "AI李明", "APEC中国", "中文说明ABCDE", "中文说明AB12CDE", "中文说明文A B", "中文技术支持说明方AI CPU",
+    "123456789 AI李明 😀😀😀", "这是中文标题包含api", "这是中文标题包含éAI", "这是中文标题包含АI",
+    "这是中文标题包含ΩAI", "中文说明々AI", "这是中文标题AI\u0307", "AI中国年のニュース", "AI中国年ﾆｭｰｽ", "AI中国年한"
+  ]) assert.equal(policy.skipTranslationText(source), "", source);
+});
+
 test("explicit selection preserves navigation wording and credited names but still skips pure noise", () => {
   for (const kind of ["form", "editable", "code"]) {
     assert.equal(policy.skipTranslationText("Alice", { kind }), "navigation", kind);

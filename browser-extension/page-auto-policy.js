@@ -69,16 +69,56 @@
     return /^(?:(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?)?|\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?)\s*(?:[ap]\.?m\.?|(?:utc|gmt)(?:[+-]\d{1,2}(?::?\d{2})?)?|z)?$/iu.test(String(text || "").trim());
   }
   function hasLanguageText(text) { return /\p{L}/u.test(String(text || "")) && !isTimestamp(text); }
+  // Same scalar ranges as Core IsHan; leave page-wide script counts unchanged.
+  const perNodeHan = /^[\u3400-\u9fff\u{20000}-\u{323af}\uf900-\ufaff]$/u;
+  // Unicode White_Space plus the edge BOM, matching Core's per-node trim.
+  // Internal NEL remains whitespace; internal FEFF is not removed.
+  function trimEligibilityText(text) {
+    return String(text ?? "").replace(/^[\p{White_Space}\ufeff]+|[\p{White_Space}\ufeff]+$/gu, "");
+  }
+  const technicalAbbreviations = new Set(["AI", "CPU", "WTT", "WSBK", "APEC"]);
   function alreadyTargetText(text, targetLanguage = "简体中文") {
     if (!/中文|Chinese|zh(?:-|$)/i.test(targetLanguage)) return false;
-    // Han-only labels are already readable for a Chinese target. Keep their DOM
-    // values untouched; Japanese kana and other foreign scripts remain eligible.
-    let found = false;
-    for (const character of String(text)) {
-      if (!letter.test(character)) continue;
-      found = true; if (!han.test(character)) return false;
+    // Match Core PageTextEligibility's per-node rules after NFKC. Only ASCII
+    // uppercase runs of 1..4 letters (optionally with digits, e.g. R7) are
+    // candidates. Multi-letter runs must be known acronyms, keeping HELP and
+    // NO WAR eligible regardless of Han share. Space-separated runs must both
+    // be known acronyms (AI CPU), not generic single-letter labels such as A B.
+    // Other letters/combining marks keep mixed text eligible.
+    // One abbreviation in a compact label needs >=3 Han (APEC中国年); spaced
+    // labels/multiple abbreviations need >=6 Han and >=2 Han per Latin letter.
+    // This retains "STOP 王曼昱!". Digits/punctuation/emoji do not inflate the share.
+    const source = trimEligibilityText(text).normalize("NFKC");
+    // Same Unicode whitespace set as Rune.IsWhiteSpace (including NEL).
+    const hasWhitespace = /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u.test(source);
+    let hanCount = 0, latinCount = 0, abbreviations = 0, runLetters = 0, hasCombiningMark = false;
+    for (const character of source) {
+      if (letter.test(character)) {
+        if (perNodeHan.test(character)) { hanCount++; runLetters = 0; }
+        else if (/^[A-Z]$/u.test(character)) {
+          latinCount++;
+          if (runLetters === 0) abbreviations++;
+          if (++runLetters > 4) return false;
+        } else return false;
+      } else {
+        if (!/^[0-9]$/u.test(character)) runLetters = 0;
+        if (/\p{M}/u.test(character)) hasCombiningMark = true;
+      }
     }
-    return found;
+    if (latinCount === 0) return hanCount > 0;
+    let previous = null;
+    for (const run of source.matchAll(/[A-Z][A-Z0-9]*/gu)) {
+      const letters = run[0].replace(/[0-9]/gu, "");
+      if (letters.length > 1 && !technicalAbbreviations.has(letters)) return false;
+      if (previous) {
+        const gap = source.slice(previous.index + previous[0].length, run.index);
+        if (/^\p{White_Space}+$/u.test(gap)
+            && (!technicalAbbreviations.has(previous[0]) || !technicalAbbreviations.has(run[0]))) return false;
+      }
+      previous = run;
+    }
+    return !hasCombiningMark && (abbreviations === 1 && hanCount >= 3 && !hasWhitespace
+      || hanCount >= 6 && hanCount >= latinCount * 2);
   }
   const monthName = "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
   const calendarMonth = "(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)";
@@ -135,7 +175,7 @@
       || !!prefix && parts.length === 1 && (person.test(rest) || agency.test(rest));
   }
   function skipTranslationText(text, options = {}) {
-    const source = String(text ?? "").trim().normalize("NFKC");
+    const source = trimEligibilityText(text).normalize("NFKC");
     if (!source) return "empty_text";
     const targetLanguage = options?.targetLanguage || "简体中文";
     if (options?.foreignHanContext !== true && alreadyTargetText(source, targetLanguage)) return "already_target_language";

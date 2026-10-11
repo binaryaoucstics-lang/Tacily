@@ -17,17 +17,15 @@ public static partial class PageTextEligibility
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         string source;
-        try { source = text.Trim().Normalize(NormalizationForm.FormKC); }
-        catch (ArgumentException) { source = text.Trim(); }
+        try { source = TrimEligibilityText(text).Normalize(NormalizationForm.FormKC); }
+        catch (ArgumentException) { source = TrimEligibilityText(text); }
         if (source.Length == 0) return false;
 
-        // Han-only text is readable for the Chinese target. In a Japanese page
-        // or semantic group, it can be a name/caption and must remain eligible.
-        // Shared Latin scripts do not establish a matching language.
+        // Readable Chinese can contain short technical abbreviations. In a
+        // foreign semantic group it can still be a name/caption to translate.
         if (!foreignHanContext && PageTranslationDecision.NormalizeLanguage(targetLanguage) == "zh")
         {
-            var letters = source.EnumerateRunes().Where(Rune.IsLetter).ToArray();
-            if (letters.Length > 0 && letters.All(IsHan)) return false;
+            if (IsReadableChinese(source)) return false;
         }
 
         if (Url().IsMatch(source) || Email().IsMatch(source) || Path().IsMatch(source)
@@ -49,6 +47,86 @@ public static partial class PageTextEligibility
 
     private static bool IsHan(Rune rune) => rune.Value is >= 0x3400 and <= 0x9fff
         or >= 0x20000 and <= 0x323af or >= 0xf900 and <= 0xfaff;
+
+    // Unicode White_Space plus the edge BOM, matching the extension's per-node
+    // trim. Internal NEL remains whitespace; internal FEFF is not removed.
+    private static string TrimEligibilityText(string text)
+    {
+        var start = 0;
+        var end = text.Length;
+        while (start < end && (char.IsWhiteSpace(text[start]) || text[start] == '\ufeff')) start++;
+        while (end > start && (char.IsWhiteSpace(text[end - 1]) || text[end - 1] == '\ufeff')) end--;
+        return text[start..end];
+    }
+
+    private static readonly HashSet<string> TechnicalAbbreviations = new(StringComparer.Ordinal)
+        { "AI", "CPU", "WTT", "WSBK", "APEC" };
+
+    // Keep these per-node rules in sync with page-auto-policy.js. Count Unicode
+    // letters after NFKC, not digits, punctuation or emoji. Only ASCII uppercase
+    // runs of 1..4 letters (optionally with digits, e.g. R7) are candidates.
+    // Multi-letter runs must be known acronyms, so HELP and NO WAR remain eligible
+    // regardless of Han share. Space-separated runs must both be known acronyms
+    // (AI CPU); generic single-letter labels such as A B are not that evidence.
+    // Lowercase, accented/other scripts and combining marks keep mixed text eligible.
+    // A compact label needs >=3 Han and one abbreviation (APEC中国年). Spaced
+    // labels/multiple abbreviations need >=6 Han and >=2 Han per Latin letter,
+    // preserving short foreign commands such as "STOP 王曼昱!". Han-only is unchanged.
+    private static bool IsReadableChinese(string source)
+    {
+        var hanCount = 0;
+        var latinCount = 0;
+        var abbreviations = 0;
+        var runLetters = 0;
+        var hasCombiningMark = false;
+        var hasWhitespace = false;
+        foreach (var rune in source.EnumerateRunes())
+        {
+            if (Rune.IsLetter(rune))
+            {
+                if (IsHan(rune))
+                {
+                    hanCount++;
+                    runLetters = 0;
+                }
+                else if (rune.Value is >= 'A' and <= 'Z')
+                {
+                    latinCount++;
+                    if (runLetters == 0) abbreviations++;
+                    if (++runLetters > 4) return false;
+                }
+                else return false;
+            }
+            else
+            {
+                if (Rune.IsWhiteSpace(rune)) hasWhitespace = true;
+                if (rune.Value is not (>= '0' and <= '9')) runLetters = 0;
+                if (Rune.GetUnicodeCategory(rune) is System.Globalization.UnicodeCategory.NonSpacingMark
+                    or System.Globalization.UnicodeCategory.SpacingCombiningMark
+                    or System.Globalization.UnicodeCategory.EnclosingMark) hasCombiningMark = true;
+            }
+        }
+        if (latinCount == 0) return hanCount > 0;
+        Match? previous = null;
+        foreach (Match run in AbbreviationRuns().Matches(source))
+        {
+            var letters = string.Concat(run.Value.Where(character => character is >= 'A' and <= 'Z'));
+            if (letters.Length > 1 && !TechnicalAbbreviations.Contains(letters)) return false;
+            if (previous is not null)
+            {
+                var gap = source[(previous.Index + previous.Length)..run.Index];
+                if (gap.Length > 0 && gap.All(char.IsWhiteSpace)
+                    && (!TechnicalAbbreviations.Contains(previous.Value) || !TechnicalAbbreviations.Contains(run.Value)))
+                    return false;
+            }
+            previous = run;
+        }
+        return !hasCombiningMark && (abbreviations == 1 && hanCount >= 3 && !hasWhitespace
+            || hanCount >= 6 && hanCount >= latinCount * 2);
+    }
+
+    [GeneratedRegex(@"[A-Z][A-Z0-9]*", RegexOptions.CultureInvariant)]
+    private static partial Regex AbbreviationRuns();
 
     private static bool IsFormula(string source)
     {
