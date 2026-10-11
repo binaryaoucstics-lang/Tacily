@@ -24,7 +24,7 @@ try {
     $reviewDir = Join-Path $attempt ('review-' + [guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($reviewDir) | Out-Null
     $reportPath = Join-Path $reviewDir 'report.json'
-    if ($task.status -notin @('completed', 'needs_rework')) { throw "Task must be completed before review; status=$($task.status)." }
+    if ($task.status -notin @('completed', 'needs_rework', 'validation_resolved')) { throw "Task must be completed or have a verified controller resolution before review; status=$($task.status)." }
     Assert-ParallelTaskWorktree $state $task
     if ($task.expectedHead -ne $state.baseline) { throw 'Unreviewed task HEAD must equal the pinned baseline.' }
     $process = Read-ParallelJson (Join-Path $attempt 'process.json')
@@ -33,8 +33,28 @@ try {
     foreach ($key in @('taskId', 'status', 'summary', 'changedFiles', 'tests', 'risks', 'permissionRequests')) {
         if (-not $result.ContainsKey($key)) { throw "Task result missing field: $key" }
     }
-    if ($result.taskId -cne $TaskId -or $result.status -ne 'completed') { throw 'Task result id/status does not match completed task.' }
-    if (@($result.permissionRequests).Count) { throw 'Task has unresolved permission requests.' }
+    if ($result.taskId -cne $TaskId) { throw 'Task result id does not match task.' }
+    if ($task.ContainsKey('blockResolutionPath')) {
+        $resolutionPath = Assert-ParallelChildPath $attempt $task.blockResolutionPath
+        $resolution = Read-ParallelJson $resolutionPath
+        if ($resolution.status -ne 'passed' -or $resolution.taskId -cne $TaskId -or $resolution.head -ne $task.expectedHead -or
+            $resolution.originalStatus -cne $result.status -or $result.status -notin @('completed','blocked') -or
+            $resolution.resultHash -ne (Get-FileHash -LiteralPath (Join-Path $attempt 'result.json') -Algorithm SHA256).Hash -or
+            $resolution.processHash -ne (Get-FileHash -LiteralPath (Join-Path $attempt 'process.json') -Algorithm SHA256).Hash -or
+            $resolution.contentSnapshot -cne (Get-ReviewSnapshot $task.worktree $state.baseline -ContentOnly) -or
+            @($resolution.commands).Count -ne @($task.validation).Count -or -not $resolution.resolutionNotes) { throw 'Controller resolution is stale or does not match original worker evidence.' }
+        for ($i = 0; $i -lt @($task.validation).Count; $i++) {
+            $verified = $resolution.commands[$i]; $required = $task.validation[$i]
+            if ($verified.exitCode -ne 0 -or $verified.timedOut -or $verified.filePath -cne $required.filePath -or
+                ($verified.arguments | ConvertTo-Json -Compress) -cne ($required.arguments | ConvertTo-Json -Compress)) { throw 'Controller resolution does not validate the original acceptance commands.' }
+            Assert-ParallelChildPath $attempt $verified.logPath | Out-Null
+            if (-not (Test-Path -LiteralPath $verified.logPath -PathType Leaf)) { throw 'Controller validation log is missing.' }
+        }
+        $report.blockResolutionPath = $resolutionPath; $report.controllerRef = $resolution.controllerRef
+    } else {
+        if ($result.status -ne 'completed') { throw 'Task result status does not match completed task.' }
+        if (@($result.permissionRequests).Count) { throw 'Task has unresolved permission requests.' }
+    }
     $files = @(Get-ParallelChangedFiles $task.worktree $state.baseline)
     if (-not $files.Count) { throw 'Task has no changes to review or commit.' }
     foreach ($path in @($result.changedFiles)) {
@@ -99,7 +119,7 @@ try {
     if (-not $Approve) { Write-Output 'Validation passed. Explicit -Approve is required to create a task commit.' }
 } catch {
     $report.error = $_.Exception.Message
-    if ($task -and $task.status -in @('completed','needs_rework')) {
+    if ($task -and $task.status -in @('completed','needs_rework','validation_resolved')) {
         $task.status = 'needs_rework'; $task.error = $report.error
         Write-ParallelJson $statePath $state
     }

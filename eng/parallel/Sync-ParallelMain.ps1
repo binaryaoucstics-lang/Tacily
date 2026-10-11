@@ -31,7 +31,8 @@ try {
     $sharedCommit = $null
     if ($ControllerRef) {
         if ($ControllerRef.StartsWith('-')) { throw 'Invalid controller ref.' }
-        Assert-ParallelClean $state.repoRoot
+        # Only the resolved committed ref is read. Uncommitted controller edits are never
+        # copied or overwritten, and do not affect this immutable commit's integration.
         $sharedCommit = Invoke-ParallelGit $state.repoRoot @('rev-parse', '--verify', "$ControllerRef^{commit}")
         Invoke-ParallelGit $state.repoRoot @('merge-base', '--is-ancestor', $state.baseline, $sharedCommit) | Out-Null
         # Shared controller changes must not replace any independently owned task output.

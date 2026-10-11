@@ -125,5 +125,10 @@ main 新增提交后，核对干净 main、原 mainHead 的后代、已审查任
 把固定的新 main 提交合入 integration；可纳入与任务归属不重叠的已提交主控基础变更。
 记录原/新 SHA 的重规划审计，取消旧验证，Complete 必须重新运行完整门禁；不修改 main。
 发生冲突或 main 再次移动时保留 integration 和证据，拒绝提升。
+主控可通过 Resolve-ParallelTaskBlock.ps1(RunPath,TaskId,ResolutionNotes,ControllerRef 可选)
+解决已经明确处理的开发阻塞：保留原始 worker blocked 结果、重跑全部原验收命令、固定证据与
+源文件哈希，成功后记 validation_resolved。Review 校验该解析报告并再次执行正常验收与审查；
+不会修改 worker 沙盒或授权新权限。ControllerRef 必须是与所有任务归属不重叠的主控已提交修复，
+main 提升额外要求该固定提交已包含在完全验证的 integration 中。
 基础验收：pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1
 -PlanPath .parallel/plan.json -TaskId <id>，各任务再自行增加有意义的本地验证。

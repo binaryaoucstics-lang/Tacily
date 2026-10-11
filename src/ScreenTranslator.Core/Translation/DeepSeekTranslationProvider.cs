@@ -208,7 +208,7 @@ public sealed class DeepSeekTranslationProvider : ITranslationProvider, IStreami
         try
         {
             metrics.MarkSent();
-            if ((request.ThinkingOverride ?? _options.ThinkingLevel) != ThinkingLevel.None && _options.FirstContentTimeout is { } contentBudget)
+            if (EffectiveThinking(request) != ThinkingLevel.None && _options.FirstContentTimeout is { } contentBudget)
                 firstContentTimeout.CancelAfter(contentBudget);
             using var response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, operation.Token).ConfigureAwait(false);
             metrics.ResponseHeadersMilliseconds = metrics.Clock.ElapsedMilliseconds;
@@ -272,7 +272,7 @@ public sealed class DeepSeekTranslationProvider : ITranslationProvider, IStreami
 
     private object CreatePayload(TranslationRequest request, bool stream = false)
     {
-        var thinking = request.ThinkingOverride ?? _options.ThinkingLevel;
+        var thinking = EffectiveThinking(request);
         var prompt = TranslationPromptBuilder.Create(request, UsesBriefGuidance(request, thinking));
         object userContent = request.ImagePng is { Length: > 0 }
             ? prompt.Parts.Select(part => part.ImageBase64 is { } image
@@ -303,6 +303,14 @@ public sealed class DeepSeekTranslationProvider : ITranslationProvider, IStreami
     private bool UsesBriefGuidance(TranslationRequest request, ThinkingLevel thinking) =>
         _options.UseBriefTranslationGuidance && thinking == ThinkingLevel.Low && request.ImagePng is { Length: > 0 };
 
+    private ThinkingLevel EffectiveThinking(TranslationRequest request)
+    {
+        var requested = request.ThinkingOverride ?? _options.ThinkingLevel;
+        if (!Enum.IsDefined(requested)) throw new ArgumentOutOfRangeException(nameof(request), "Invalid thinking override.");
+        return _options.GenericChatCompletions ? requested : TranslationThinkingCatalog.Normalize(requested,
+            TranslationThinkingCatalog.SupportedLevels(TranslationProviderKind.DeepSeek, _options.Model));
+    }
+
     private static int OutputTokenBudget(TranslationRequest request, ThinkingLevel thinking) => TranslationPromptBuilder.OutputTokenBudget(request, thinking);
 
     private async Task<string> MeasureAsync(TranslationRequest request, bool stream, CancellationToken token,
@@ -315,7 +323,7 @@ public sealed class DeepSeekTranslationProvider : ITranslationProvider, IStreami
             || request.VisionTask != VisionRequestTask.Default || request.VisionRegions.Count > 0
             || request.VisionReadingDetailPng is not null || request.VisionReadingSheets.Count > 0))
             throw new ArgumentException("Page text requests must contain text blocks only.", nameof(request));
-        var thinking = request.ThinkingOverride ?? _options.ThinkingLevel;
+        var thinking = EffectiveThinking(request);
         if (!Enum.IsDefined(thinking)) throw new ArgumentOutOfRangeException(nameof(request), "Invalid thinking override.");
         var metrics = new RequestMetricsState(_options.Model, thinking, OutputTokenBudget(request, thinking),
             request.IsPageText ? "page-text" : request.VisionTask == VisionRequestTask.Translation ? "vision-translation" : request.VisionTask == VisionRequestTask.Placement ? "vision-placement"

@@ -56,6 +56,13 @@ try {
     foreach ($task in $state.tasks) {
         if ($task.status -ne 'integrated' -or $task.verifiedCommit -notmatch '^[0-9a-f]{40}$') { throw "Task not integrated: $($task.id)" }
         Invoke-ParallelGit $root @('merge-base', '--is-ancestor', $task.verifiedCommit, $sha) | Out-Null
+        if ($task.ContainsKey('blockResolutionPath')) {
+            $resolution = Read-ParallelJson (Assert-ParallelChildPath $RunPath $task.blockResolutionPath)
+            if ($resolution.status -ne 'passed') { throw 'Controller block resolution no longer passes.' }
+            if ($resolution.controllerRef) {
+                Invoke-ParallelGit $root @('merge-base', '--is-ancestor', $resolution.controllerRef, $sha) | Out-Null
+            }
+        }
     }
     $MainWorktree = [IO.Path]::GetFullPath($MainWorktree)
     $actual = [IO.Path]::GetFullPath((Invoke-ParallelGit $MainWorktree @('rev-parse', '--show-toplevel')))

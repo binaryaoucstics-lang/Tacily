@@ -17,6 +17,7 @@ try {
         if (@($script:WorkflowResults | Where-Object outcome -eq 'failed').Count -eq 0) {
             . (Join-Path $PSScriptRoot 'tests/Runtime.Tests.ps1')
             . (Join-Path $PSScriptRoot 'tests/Gates.Tests.ps1')
+            . (Join-Path $PSScriptRoot 'tests/Resolution.Tests.ps1')
         }
     }
 } catch {
