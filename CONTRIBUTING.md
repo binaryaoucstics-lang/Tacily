@@ -1,6 +1,6 @@
 # 参与贡献
 
-感谢你愿意改进屏幕翻译。欢迎提交错误报告、功能建议和代码贡献。
+欢迎改进默译 · Tacily，提交错误报告、功能建议和代码贡献。
 
 ## 提交问题
 
@@ -33,4 +33,4 @@ node --test (Get-ChildItem ./browser-extension/tests -Filter *.test.js).FullName
 3. 提交前运行完整构建和测试。
 4. 在 Pull Request 中说明问题、解决方式和验证结果。
 
-提交贡献即表示你同意贡献内容按仓库的 Apache License 2.0 发布。第三方代码和资源需保留原有版权及许可声明。
+提交贡献即表示你同意贡献内容按仓库的 PolyForm Noncommercial License 1.0.0 发布。你需有权提供这些内容；第三方代码和资源需保留原有版权及许可声明。许可范围与历史授权见 [许可说明](docs/LICENSING.md)。

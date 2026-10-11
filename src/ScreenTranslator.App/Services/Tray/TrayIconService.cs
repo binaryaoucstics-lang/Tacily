@@ -66,7 +66,7 @@ public sealed class TrayIconService : IDisposable
             : null;
         _notifyIcon = new Forms.NotifyIcon
         {
-            Text = "全局 AI 翻译器",
+            Text = "默译 · Tacily",
             Icon = _applicationIcon ?? SystemIcons.Application,
             ContextMenuStrip = _menu,
             Visible = true

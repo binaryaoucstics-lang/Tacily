@@ -7,7 +7,7 @@
                  xmlns:pages="clr-namespace:ScreenTranslator.App.Pages"
                  xmlns:behaviors="clr-namespace:ScreenTranslator.App.Behaviors"
                  mc:Ignorable="d"
-                 Title="全局 AI 翻译器 · Windows 测试版"
+                 Title="默译 · Tacily · Windows 测试版"
                  Width="1080"
                  Height="720"
                  MinWidth="840"
@@ -22,7 +22,7 @@
         </Grid.RowDefinitions>
 
         <ui:TitleBar Grid.Row="0"
-                     Title="全局 AI 翻译器" />
+                     Title="默译 · Tacily" />
 
         <ui:NavigationView x:Name="NavigationRoot"
                            Grid.Row="1"

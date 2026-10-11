@@ -4,7 +4,7 @@
     <OutputType>WinExe</OutputType>
     <AssemblyName>ScreenTranslator</AssemblyName>
     <RootNamespace>ScreenTranslator.App</RootNamespace>
-    <Product>全局 AI 翻译器</Product>
+    <Product>默译 · Tacily</Product>
     <Description>点击选段、截图直译 · DeepSeek / OpenAI Responses / Claude Messages</Description>
     <Version>0.14.5</Version>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
@@ -32,6 +32,21 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="..\..\assets\branding\tacily.svg">
+      <Link>assets\branding\tacily.svg</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\docs\LICENSING.md;..\..\docs\THIRD-PARTY-NOTICE.txt">
+      <Link>docs\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\docs\licenses\*.txt">
+      <Link>docs\licenses\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <Content Include="$(PkgRapidOcrNet)\models\v5\ch_PP-OCRv5_mobile_det.onnx">
       <Link>models\v5\ch_PP-OCRv5_mobile_det.onnx</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

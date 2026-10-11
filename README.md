@@ -1,6 +1,16 @@
-# 全局 AI 翻译器
+<p align="center">
+  <img src="assets/branding/tacily.svg" width="144" height="144" alt="默译 · Tacily Logo" />
+</p>
 
-Windows 桌面与 Chrome 网页翻译软件，基于 [ScreenTranslator](https://github.com/NiniTakukon/ScreenTranslator)（MIT）扩展开发。
+# 默译 · Tacily
+
+**让理解自然发生。**
+
+自动识别需要翻译的内容，在原位置流式呈现译文。面向全局、自动、无感的翻译体验，当前支持 Windows 桌面与 Chrome 网页。
+
+本项目以 [PolyForm Noncommercial 1.0.0](LICENSE) 公开源码，仅允许该协议规定的非商业用途。许可范围、第三方组件与历史版本授权见 [许可说明](docs/LICENSING.md)。
+
+基于 [ScreenTranslator](https://github.com/NiniTakukon/ScreenTranslator)（MIT）扩展开发。
 
 ## 功能
 
@@ -51,4 +61,16 @@ node --test (Get-ChildItem ./browser-extension/tests -Filter *.test.js).FullName
 
 网页只处理可读、非编辑的公开 DOM 文本；输入框、编辑区、代码与隐藏内容不进入自动翻译。手动选段只发送点击处的段落。图片自动翻译需独立开启；经本地判断确需翻译的大图，以及手动选择的图片，会将整图发给配置的服务商。磁盘译文缓存包含来源文本与译文，可在设置中关闭或清空。
 
-请勿提交 API Key、用户配置、浏览器资料、日志、缓存或个人截图。见 [贡献说明](CONTRIBUTING.md)、[安全说明](SECURITY.md) 与 [第三方声明](docs/THIRD-PARTY-NOTICE.txt)。本衍生项目采用 [Apache License 2.0](LICENSE)，保留 [ScreenTranslator 原始 MIT 声明](docs/licenses/ScreenTranslator-MIT.txt)；第三方资源遵循各自许可，详见 [NOTICE](NOTICE)。
+请勿提交 API Key、用户配置、浏览器资料、日志、缓存或个人截图。见 [贡献说明](CONTRIBUTING.md)、[安全说明](SECURITY.md) 与 [第三方声明](docs/THIRD-PARTY-NOTICE.txt)。
+
+## 许可
+
+当前 Tacily 衍生项目及新增代码、文档和品牌素材采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。允许按协议进行非商业使用、修改与分享；商业用途需要权利人的另行书面许可。允许用途以英文许可全文为准，包括其中的非商业组织条款。
+
+这是提供源码的非商业许可，不属于 OSI 定义的开源许可。原项目 [MIT 声明](docs/licenses/ScreenTranslator-MIT.txt) 和第三方资源许可继续保留；此前已按 Apache 2.0 发布的版本仍受其原授权保护，详见 [许可说明](docs/LICENSING.md) 与 [NOTICE](NOTICE)。
+
+## 后续方向
+
+Android、同声传译和实时字幕为后续规划，尚未在当前版本发布。
+
+标准 Logo 使用最新接缝对齐版的 [SVG 源文件](assets/branding/tacily.svg)，采用标准饱和度的蓝绿配色。

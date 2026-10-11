@@ -1,5 +1,5 @@
-#define AppName "全局 AI 翻译器"
-#define AppPublisher "ScreenTranslator contributors"
+#define AppName "默译 · Tacily"
+#define AppPublisher "Tacily contributors"
 #define AppURL GetEnv("SCREEN_TRANSLATOR_REPOSITORY_URL")
 #define AppExeName "ScreenTranslator.exe"
 #define AppVersion GetEnv("SCREEN_TRANSLATOR_VERSION")
@@ -28,7 +28,7 @@ AppSupportURL={#AppURL}/issues
 AppUpdatesURL={#AppURL}/releases
 #endif
 DefaultDirName={localappdata}\Programs\ScreenTranslator
-DefaultGroupName=全局 AI 翻译器
+DefaultGroupName=默译 · Tacily
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible

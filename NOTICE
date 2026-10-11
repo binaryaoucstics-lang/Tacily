@@ -1,7 +1,9 @@
-Global AI Translator / 全局 AI 翻译器
-Copyright 2026 Global AI Translator contributors
+Tacily / 默译
+Required Notice: Copyright 2026 Tacily contributors (https://github.com/binaryaoucstics-lang/global-ai-translator)
 
-This derivative project is licensed under the Apache License, Version 2.0.
+This derivative project is offered under the PolyForm Noncommercial License 1.0.0.
+Tacily-specific additions, modifications, documentation and visual identity
+are covered by that license unless a file states otherwise.
 It includes and extends ScreenTranslator:
 https://github.com/NiniTakukon/ScreenTranslator
 Copyright (c) 2026 ScreenTranslator contributors
@@ -10,3 +12,9 @@ The original ScreenTranslator code remains subject to its MIT notice,
 reproduced in docs/licenses/ScreenTranslator-MIT.txt. Third-party components,
 fonts, dictionaries and model assets retain their respective licenses;
 see docs/THIRD-PARTY-NOTICE.txt and the license files beside those resources.
+
+Commit 2d1d6074da5a8912800824c4abf9e7ea3e03d64a was previously published
+under the Apache License, Version 2.0. Grants for that published snapshot
+are not withdrawn by this license change. The historical Apache license
+is preserved in docs/licenses/Apache-2.0-previous.txt.
+See docs/LICENSING.md for scope and version history.

@@ -1,7 +1,7 @@
 <Window x:Class="ScreenTranslator.App.Windows.SelectionOverlayWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="全局 AI 翻译器 · 选择区域"
+        Title="默译 · Tacily · 选择区域"
         WindowStyle="None"
         ResizeMode="NoResize"
         ShowInTaskbar="True"
