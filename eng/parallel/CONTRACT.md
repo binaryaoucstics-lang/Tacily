@@ -57,6 +57,8 @@ Start-CodexTask.ps1 参数：Worktree、PromptPath、AttemptPath、CodexPath='co
 提示经 UTF-8 stdin 传入；日志由外层 worker 捕获；CLI 不获得其他 Worktree 写权限。
 明确清空额外 writable_roots 并禁止沙盒内网络访问；依赖和资源由主控预备。
 默认使用现有 Codex 登录与模型设置；无需复制认证文件或覆盖用户配置。
+CLI 启用 prefer_mxc：设备支持时使用官方推荐的原生 MXC，保留配置中的旧式沙盒回退；
+若旧式沙盒初始化失败，报告日志原因，不降低沙盒或自动申请管理员权限。
 不接受降低沙盒的参数。非交互审批不能取得授权时，返回 blocked 和权限原因交主控。
 
 ## 公共 PowerShell 函数（dot source Common.ps1）

@@ -17,7 +17,7 @@ try {
     Assert-ParallelChildPath $Worktree $PromptPath | Out-Null
     [IO.Directory]::CreateDirectory($AttemptPath) | Out-Null
     # The output directory is prepared by the controller; only the assigned checkout is writable to the model.
-    $arguments = @('--ask-for-approval', 'on-request', 'exec', '--sandbox', 'workspace-write',
+    $arguments = @('--enable', 'prefer_mxc', '--ask-for-approval', 'on-request', 'exec', '--sandbox', 'workspace-write',
         '-c', 'sandbox_workspace_write.writable_roots=[]', '-c', 'sandbox_workspace_write.network_access=false',
         '--cd', $Worktree, '--json', '--color', 'never', '--output-schema',
         (Join-Path $Worktree '.parallel/result.schema.json'), '--output-last-message', $resultPath, '-')
@@ -29,8 +29,8 @@ try {
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $info
     $process.Start() | Out-Null
     $record.codexPid = $process.Id; $record.status = 'running'; Write-ParallelJson $processPath $record
-    $outputStream = [IO.File]::Create((Join-Path $AttemptPath 'events.jsonl'))
-    $errorStream = [IO.File]::Create((Join-Path $AttemptPath 'stderr.log'))
+    $outputStream = [IO.FileStream]::new((Join-Path $AttemptPath 'events.jsonl'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+    $errorStream = [IO.FileStream]::new((Join-Path $AttemptPath 'stderr.log'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
     $stdout = $process.StandardOutput.BaseStream.CopyToAsync($outputStream)
     $stderr = $process.StandardError.BaseStream.CopyToAsync($errorStream)
     $process.StandardInput.Write([IO.File]::ReadAllText($PromptPath, [Text.Encoding]::UTF8)); $process.StandardInput.Close()
