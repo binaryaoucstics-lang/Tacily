@@ -37,7 +37,7 @@ public sealed class ChatGptFastModeRequestTests
     [InlineData("image", true)]
     [InlineData("page", false)]
     [InlineData("page", true)]
-    public async Task OAuth_Fast_Uses_Real_Tier_For_All_Inputs_And_Preserves_Protocol(string input, bool progress)
+    public async Task OAuth_Priority_Completes_First_Request_When_Server_Rejects_Fast_For_All_Inputs(string input, bool progress)
     {
         var answer = input == "image"
             ? """{"blocks":[{"id":"p1","box":[100,100,300,400],"translation":"你好"}]}""" : Answer;
@@ -47,7 +47,7 @@ public sealed class ChatGptFastModeRequestTests
             "page" => Request() with { IsPageText = true },
             _ => Request(),
         };
-        var handler = new Handler(Completed("\"fast\"", answer));
+        var handler = new Handler(Completed("\"fast\"", answer), requirePriority: true);
         var secrets = new Secrets();
         var provider = Provider(handler, fast: true, secrets: secrets);
         ApiTranslationRequestMetrics? metrics = null;
@@ -55,7 +55,7 @@ public sealed class ChatGptFastModeRequestTests
         Assert.Equal(answer, await Translate(provider, request, progress));
         using var json = JsonDocument.Parse(handler.Body!);
         var body = json.RootElement;
-        Assert.Equal("fast", body.GetProperty("service_tier").GetString());
+        Assert.Equal("priority", body.GetProperty("service_tier").GetString());
         Assert.True(body.GetProperty("stream").GetBoolean());
         Assert.False(body.GetProperty("store").GetBoolean());
         Assert.False(body.TryGetProperty("max_output_tokens", out _));
@@ -68,7 +68,7 @@ public sealed class ChatGptFastModeRequestTests
         Assert.Equal("Bearer oauth-test", handler.Authorization);
         Assert.Equal("text/event-stream", handler.Accept);
         Assert.False(secrets.Read);
-        Assert.Equal("fast", metrics!.RequestedServiceTier);
+        Assert.Equal("priority", metrics!.RequestedServiceTier);
         Assert.Equal("fast", metrics.EffectiveServiceTier);
         Assert.Equal(DeepSeekRequestOutcome.Success, metrics.Outcome);
         Assert.Equal(1, handler.Calls);
@@ -116,7 +116,7 @@ public sealed class ChatGptFastModeRequestTests
         ApiTranslationRequestMetrics? metrics = null;
         provider.RequestCompleted += value => metrics = value;
         Assert.Equal(Answer, await provider.TranslateRawAsync(Request(), default));
-        Assert.Equal("fast", metrics!.RequestedServiceTier);
+        Assert.Equal("priority", metrics!.RequestedServiceTier);
         Assert.Equal(expected, metrics.EffectiveServiceTier);
         Assert.Equal(DeepSeekRequestOutcome.Success, metrics.Outcome);
     }
@@ -174,7 +174,7 @@ public sealed class ChatGptFastModeRequestTests
     [InlineData("failed")]
     public async Task Tier_Rejection_Retains_Diagnostics_Without_Retry_Or_Returning_Partial_Translation(string failure)
     {
-        var error = new { code = "unsupported_value", type = "invalid_request_error", param = "service_tier", message = "service_tier fast is unavailable for this model" };
+        var error = new { code = "unsupported_value", type = "invalid_request_error", param = "service_tier", message = "service_tier priority is unavailable for this model" };
         var partial = Event(new { type = "response.output_text.delta", delta = Answer });
         var response = failure switch
         {
@@ -199,7 +199,7 @@ public sealed class ChatGptFastModeRequestTests
         Assert.Equal("fast-test-request", exception.RequestId);
         Assert.Equal(failure == "http" ? HttpStatusCode.BadRequest : HttpStatusCode.OK, exception.StatusCode);
         Assert.Same(exception, tokens.Failure);
-        Assert.Equal("fast", metrics!.RequestedServiceTier);
+        Assert.Equal("priority", metrics!.RequestedServiceTier);
         Assert.Null(metrics.EffectiveServiceTier);
         Assert.Equal(failure == "http" ? DeepSeekRequestOutcome.HttpError : DeepSeekRequestOutcome.Interrupted, metrics.Outcome);
         Assert.Equal(1, handler.Calls);
@@ -241,7 +241,7 @@ public sealed class ChatGptFastModeRequestTests
         const string answer = """{"blocks":[{"id":"benchmark","translation":"打开新页面时会识别并翻译文字。"}]}""";
         var handler = new Handler(Completed(tierJson, answer));
         var result = await TranslationBenchmark.RunAsync(Provider(handler, fast: fast), ThinkingLevel.None, default);
-        Assert.Equal(fast ? "fast" : null, result.RequestedServiceTier);
+        Assert.Equal(fast ? "priority" : null, result.RequestedServiceTier);
         Assert.Equal(expected, result.EffectiveServiceTier);
         Assert.Equal("打开新页面时会识别并翻译文字。", result.Translation);
         Assert.Equal(1, handler.Calls);
@@ -295,7 +295,7 @@ public sealed class ChatGptFastModeRequestTests
         public Task SetAsync(string name, string value, CancellationToken token = default) => Task.CompletedTask;
         public Task DeleteAsync(string name, CancellationToken token = default) => Task.CompletedTask;
     }
-    private sealed class Handler(string response, HttpStatusCode status = HttpStatusCode.OK) : HttpMessageHandler
+    private sealed class Handler(string response, HttpStatusCode status = HttpStatusCode.OK, bool requirePriority = false) : HttpMessageHandler
     {
         internal string Response = response;
         internal string? Body, Authorization, Accept;
@@ -306,7 +306,29 @@ public sealed class ChatGptFastModeRequestTests
             Calls++; Uri = request.RequestUri; Authorization = request.Headers.Authorization?.ToString();
             Accept = request.Headers.Accept.SingleOrDefault()?.MediaType;
             Body = await request.Content!.ReadAsStringAsync(token);
-            var result = new HttpResponseMessage(status) { Content = new StringContent(Response, Encoding.UTF8, "text/event-stream") };
+            var responseStatus = status;
+            var responseBody = Response;
+            var mediaType = "text/event-stream";
+            if (requirePriority)
+            {
+                using var json = JsonDocument.Parse(Body);
+                var tier = json.RootElement.TryGetProperty("service_tier", out var value) ? value.GetString() : null;
+                // Reproduce the OAuth route that rejects fast; only priority can complete.
+                if (tier != "priority")
+                {
+                    responseStatus = HttpStatusCode.BadRequest;
+                    responseBody = JsonSerializer.Serialize(new
+                    {
+                        error = new
+                        {
+                            code = "unsupported_value", type = "invalid_request_error", param = "service_tier",
+                            message = $"Unsupported service tier: {tier ?? "default"}",
+                        },
+                    });
+                    mediaType = "application/json";
+                }
+            }
+            var result = new HttpResponseMessage(responseStatus) { Content = new StringContent(responseBody, Encoding.UTF8, mediaType) };
             result.Headers.Add("x-request-id", "fast-test-request");
             return result;
         }
