@@ -18,6 +18,8 @@ public sealed record ApiTranslationRequestMetrics(TranslationProviderKind Provid
 {
     public int? ReasoningTokens { get; init; }
     public long? LastContentMilliseconds { get; init; }
+    public string? RequestedServiceTier { get; init; }
+    public string? EffectiveServiceTier { get; init; }
 }
 
 public sealed class OpenAiResponsesTranslationProvider : ApiTranslationProvider

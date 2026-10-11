@@ -22,7 +22,7 @@ public enum ThemePreference
 
 public sealed record AppSettings
 {
-    public const int CurrentVersion = 15;
+    public const int CurrentVersion = 16;
 
     public int Version { get; init; } = CurrentVersion;
 
@@ -46,6 +46,7 @@ public sealed record AppSettings
     public string OpenAiBaseUrl { get; init; } = TranslationProviderConfiguration.DefaultOpenAiBaseUrl;
     public TranslationAuthenticationMode OpenAiAuthenticationMode { get; init; }
     public string ChatGptAccountId { get; init; } = "";
+    public bool ChatGptFastModeEnabled { get; init; }
     public string ClaudeModel { get; init; } = TranslationProviderConfiguration.DefaultClaudeModel;
     public string ClaudeBaseUrl { get; init; } = TranslationProviderConfiguration.DefaultClaudeBaseUrl;
 

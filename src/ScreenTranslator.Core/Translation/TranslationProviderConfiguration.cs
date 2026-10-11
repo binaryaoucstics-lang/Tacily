@@ -17,6 +17,7 @@ public static class TranslationProviderConfiguration
     public const string DefaultClaudeModel = "claude-sonnet-5-5";
     public const string DefaultOpenAiBaseUrl = "https://api.openai.com/v1";
     public const string DefaultClaudeBaseUrl = "https://api.anthropic.com/v1";
+    public const string ChatGptFastServiceTier = "fast";
 
     public static IReadOnlyList<string> Models(TranslationProviderKind provider) => provider switch
     {
@@ -36,6 +37,8 @@ public static class TranslationProviderConfiguration
     public static bool UsesChatGptPlan(AppSettings settings) => Provider(settings) == TranslationProviderKind.OpenAI
         && (ActivePreset(settings)?.AuthenticationMode ?? settings.OpenAiAuthenticationMode) == TranslationAuthenticationMode.ChatGptOAuth;
     public static string ChatGptAccountId(AppSettings settings) => ActivePreset(settings)?.ChatGptAccountId ?? settings.ChatGptAccountId;
+    public static bool ChatGptFastModeEnabled(AppSettings settings) => UsesChatGptPlan(settings)
+        && (ActivePreset(settings)?.ChatGptFastModeEnabled ?? settings.ChatGptFastModeEnabled);
     public static ApiNetworkOptions Network(AppSettings settings) => ActivePreset(settings)?.Network ?? settings.ApiNetwork ?? new();
     public static string SecretName(AppSettings settings) => ActivePreset(settings) is { } preset
         ? PresetSecretName(preset.Id) : SecretName(settings.TranslationProvider);
@@ -146,7 +149,8 @@ public static class TranslationProviderConfiguration
     }
 
     // Network changes reconfigure live jobs, but do not invalidate translated content.
-    public static string ConnectionIdentity(AppSettings settings) => TransportIdentity(settings) + "\nnetwork:" + Network(settings).Identity;
+    public static string ConnectionIdentity(AppSettings settings) => TransportIdentity(settings) + "\nnetwork:" + Network(settings).Identity
+        + (ChatGptFastModeEnabled(settings) ? "\nservice_tier:" + ChatGptFastServiceTier : "");
 }
 
 public sealed record ApiThinkingConfiguration(string Mode, string? Effort, ThinkingLevel EffectiveLevel);
@@ -161,6 +165,7 @@ public sealed record TranslationApiOptions
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(90);
     public bool UseBriefTranslationGuidance { get; init; } = true;
     public bool UseChatGptPlan { get; init; }
+    public bool ChatGptFastModeEnabled { get; init; }
     public string ChatGptAccountId { get; init; } = "";
     public IChatGptTokenProvider? ChatGptTokens { get; init; }
 }
@@ -200,6 +205,7 @@ public static class TranslationProviderFactory
             BaseUrl = TranslationProviderConfiguration.BaseUrl(settings), ThinkingLevel = thinking, Timeout = duration,
             UseBriefTranslationGuidance = settings.BriefThinkingGuidanceEnabled,
             UseChatGptPlan = TranslationProviderConfiguration.UsesChatGptPlan(settings),
+            ChatGptFastModeEnabled = TranslationProviderConfiguration.ChatGptFastModeEnabled(settings),
             ChatGptAccountId = TranslationProviderConfiguration.ChatGptAccountId(settings), ChatGptTokens = chatGptTokens,
         };
         return kind == TranslationProviderKind.OpenAI

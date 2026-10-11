@@ -108,7 +108,7 @@ public sealed partial class TranslationSettingsViewModel
     {
         foreach (var name in new[] { nameof(IsOpenAi), nameof(UsesChatGptPlan), nameof(UsesApiKey), nameof(CanUseChatGptPlan), nameof(CanEditEndpoint),
             nameof(CanEditModel), nameof(ChatGptPlanStatus), nameof(IsChatGptUsagePaused), nameof(ShowChatGptConsent),
-            nameof(ModelSelectionDescription), nameof(ProviderDescription), nameof(PresetDescription) }) OnPropertyChanged(name);
+            nameof(ModelSelectionDescription), nameof(ProviderDescription), nameof(PresetDescription), nameof(CanEditChatGptFastMode) }) OnPropertyChanged(name);
         SignInChatGptCommand?.NotifyCanExecuteChanged(); AddChatGptAccountCommand?.NotifyCanExecuteChanged();
         AuthorizeChatGptPlanCommand?.NotifyCanExecuteChanged(); SignOutChatGptCommand?.NotifyCanExecuteChanged();
         CancelChatGptSignInCommand?.NotifyCanExecuteChanged(); ResumeChatGptUsageCommand?.NotifyCanExecuteChanged();

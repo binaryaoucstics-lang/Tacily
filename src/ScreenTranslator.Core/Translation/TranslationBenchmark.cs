@@ -7,7 +7,11 @@ namespace ScreenTranslator.Core.Translation;
 public enum BenchmarkRateKind { Unavailable, ContentGeneration, OverallOutput }
 
 public sealed record TranslationBenchmarkResult(string Source, string Translation, TimeSpan Elapsed,
-    TimeSpan? FirstCharacterLatency, double? TokensPerSecond, int? OutputTokens, int? ReasoningTokens, BenchmarkRateKind RateKind);
+    TimeSpan? FirstCharacterLatency, double? TokensPerSecond, int? OutputTokens, int? ReasoningTokens, BenchmarkRateKind RateKind)
+{
+    public string? RequestedServiceTier { get; init; }
+    public string? EffectiveServiceTier { get; init; }
+}
 
 /// <summary>One real streaming translation, no format retries, cached answers or character-to-token estimates.</summary>
 public static class TranslationBenchmark
@@ -50,7 +54,8 @@ public static class TranslationBenchmark
                 || apiMetrics?.EffectiveThinkingMode is "disabled" or "unsupported" or "between_tools"
                 || apiMetrics is { EffectiveThinkingMode: "reasoning", Effort: "none" };
             var rate = CalculateRate(tokens, reasoning, noReasoning, start, last, clock.Elapsed);
-            return new(SourceSentence, translation, clock.Elapsed, first, rate.Tps, tokens, reasoning, rate.Kind);
+            return new(SourceSentence, translation, clock.Elapsed, first, rate.Tps, tokens, reasoning, rate.Kind)
+            { RequestedServiceTier = apiMetrics?.RequestedServiceTier, EffectiveServiceTier = apiMetrics?.EffectiveServiceTier };
         }
         finally
         {

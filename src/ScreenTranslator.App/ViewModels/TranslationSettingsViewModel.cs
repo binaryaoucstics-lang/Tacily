@@ -41,6 +41,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                 _defaultNetwork = CollectNetwork();
                 _defaultOpenAiAuthenticationMode = _authenticationMode;
                 _defaultChatGptAccountId = _chatGptAccountId;
+                _defaultChatGptFastModeEnabled = _chatGptFastModeEnabled;
             }
             CapturePreset();
             PendingCopySecretName = null;
@@ -59,6 +60,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                     ApplyNetwork(config.Network);
                     _authenticationMode = config.AuthenticationMode;
                     _chatGptAccountId = config.ChatGptAccountId;
+                    _chatGptFastModeEnabled = config.ChatGptFastModeEnabled;
                 }
                 else
                 {
@@ -69,6 +71,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                     ApplyNetwork(_defaultNetwork);
                     _authenticationMode = _defaultOpenAiAuthenticationMode;
                     _chatGptAccountId = _defaultChatGptAccountId;
+                    _chatGptFastModeEnabled = _defaultChatGptFastModeEnabled;
                 }
                 LoadProviderKeyMask();
                 InvalidateConnection();
@@ -79,6 +82,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             OnPropertyChanged(nameof(ActiveSecretName));
             OnPropertyChanged(nameof(SelectedAuthentication)); OnPropertyChanged(nameof(SelectedChatGptAccount));
             OnPropertyChanged(nameof(ChatGptAccountId)); NotifyChatGptState();
+            OnPropertyChanged(nameof(ChatGptFastModeEnabled));
             InvalidateModelList(); QueueChatGptModelRefresh();
         }
     }
@@ -108,6 +112,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             Network = CollectNetwork(),
             AuthenticationMode = UsesChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
             ChatGptAccountId = _chatGptAccountId,
+            ChatGptFastModeEnabled = _chatGptFastModeEnabled,
         };
     }
 
@@ -126,6 +131,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             Network = copy ? CollectNetwork() : new(),
             AuthenticationMode = copy && UsesChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
             ChatGptAccountId = copy ? _chatGptAccountId : "",
+            ChatGptFastModeEnabled = copy && _chatGptFastModeEnabled,
         };
         var preset = new ProviderPresetViewModel(config);
         Presets.Add(preset);
@@ -243,6 +249,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             _providerDrafts[TranslationProviderKind.ChatCompletions] = (settings.ChatCompletionsModel, settings.ChatCompletionsBaseUrl);
             _authenticationMode = _defaultOpenAiAuthenticationMode = settings.OpenAiAuthenticationMode;
             _chatGptAccountId = _defaultChatGptAccountId = settings.ChatGptAccountId;
+            _chatGptFastModeEnabled = _defaultChatGptFastModeEnabled = settings.ChatGptFastModeEnabled;
             _selectedPreset = null;
             _defaultNetwork = settings.ApiNetwork;
             ApplyNetwork(_defaultNetwork);
@@ -268,7 +275,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         InvalidateModelList();
         SelectedPreset = Presets.FirstOrDefault(p => p.Id == settings.SelectedTranslationPresetId);
         OnPropertyChanged(nameof(SelectedPreset)); OnPropertyChanged(nameof(PresetName)); OnPropertyChanged(nameof(CanEditPreset));
-        OnPropertyChanged(nameof(SelectedAuthentication)); OnPropertyChanged(nameof(SelectedChatGptAccount)); NotifyChatGptState();
+        OnPropertyChanged(nameof(SelectedAuthentication)); OnPropertyChanged(nameof(SelectedChatGptAccount));
+        OnPropertyChanged(nameof(ChatGptFastModeEnabled)); NotifyChatGptState();
         QueueChatGptModelRefresh();
     }
 
@@ -280,6 +288,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             _defaultNetwork = CollectNetwork();
             _defaultOpenAiAuthenticationMode = _authenticationMode;
             _defaultChatGptAccountId = _chatGptAccountId;
+            _defaultChatGptFastModeEnabled = _chatGptFastModeEnabled;
             _defaultThinking = _preferredThinkingLevel;
             _defaultBounded = BoundedLowThinkingEnabled;
         }
@@ -298,6 +307,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             SelectedTranslationPresetId = SelectedPreset?.Id ?? "",
             ApiNetwork = _defaultNetwork,
             OpenAiAuthenticationMode = _defaultOpenAiAuthenticationMode, ChatGptAccountId = _defaultChatGptAccountId,
+            ChatGptFastModeEnabled = _defaultChatGptFastModeEnabled,
             ThinkingLevel = ThinkingLevelNames.FromLabel(_defaultThinking), BoundedLowThinkingEnabled = _defaultBounded,
         };
     }
@@ -667,6 +677,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         {
             ThinkingLevel = ThinkingLevelNames.FromLabel(ThinkingLevel), Progress = stream,
             UseChatGptPlan = UsesChatGptPlan, ChatGptAccountId = _chatGptAccountId,
+            ChatGptFastModeEnabled = UsesChatGptPlan && _chatGptFastModeEnabled,
         };
         ConnectionStatus = $"正在通过 {TranslationProviderConfiguration.Label(provider)} 翻译测试句…";
 
@@ -716,6 +727,7 @@ public sealed record TranslationConnectionTestRequest(
     public ScreenTranslator.Core.Models.ThinkingLevel ThinkingLevel { get; init; }
     public IProgress<ScreenTranslator.Core.Models.TranslationStreamUpdate>? Progress { get; init; }
     public bool UseChatGptPlan { get; init; }
+    public bool ChatGptFastModeEnabled { get; init; }
     public string ChatGptAccountId { get; init; } = "";
     public override string ToString() => $"Connection test ({Provider})";
 }

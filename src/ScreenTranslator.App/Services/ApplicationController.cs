@@ -1020,6 +1020,7 @@ public sealed partial class ApplicationController : IDisposable
             ThinkingLevel = request.ThinkingLevel,
             OpenAiAuthenticationMode = request.UseChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
             ChatGptAccountId = request.ChatGptAccountId,
+            ChatGptFastModeEnabled = request.UseChatGptPlan && request.ChatGptFastModeEnabled,
         };
         try
         {
@@ -1220,6 +1221,7 @@ public sealed partial class ApplicationController : IDisposable
                 or nameof(TranslationSettings.SelectedProvider) or nameof(TranslationSettings.SelectedModel) or nameof(TranslationSettings.BaseUrl)
                 or nameof(TranslationSettings.SelectedPreset)
                 or nameof(TranslationSettings.SelectedAuthentication) or nameof(TranslationSettings.ChatGptAccountId)
+                or nameof(TranslationSettings.ChatGptFastModeEnabled)
                 or nameof(TranslationSettings.CustomContext) or nameof(TranslationSettings.ThinkingLevel) or nameof(TranslationSettings.BoundedLowThinkingEnabled)))
             SyncAutoImageConfiguration();
 
