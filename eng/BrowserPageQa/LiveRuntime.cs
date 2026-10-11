@@ -21,7 +21,7 @@ internal sealed class LiveRuntime : IDisposable
     private DpapiSecretStore? _secrets;
     private ChatGptAccountService? _accounts;
 
-    public static async Task<AppSettings> LoadSettingsAsync(bool useRunningPreset = false)
+    public static async Task<AppSettings> LoadSettingsAsync(bool useRunningPreset = false, string? snapshotPath = null)
     {
         // JsonSettingsStore.LoadAsync backs up corrupt settings. This read-only host must not use it.
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -29,7 +29,7 @@ internal sealed class LiveRuntime : IDisposable
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
             4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var settings = await ReadSettingsAsync(stream).ConfigureAwait(false);
-        if (!useRunningPreset) return settings;
+        if (!useRunningPreset && snapshotPath is null) return settings;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         await using var bridge = new BrowserBridgeClient();
         await bridge.ConnectAsync(timeout.Token).ConfigureAwait(false);
@@ -41,6 +41,12 @@ internal sealed class LiveRuntime : IDisposable
             using var frame = JsonDocument.Parse(line);
             if (frame.RootElement.GetProperty("type").GetString() != "pageAutoConfig") continue;
             var scope = frame.RootElement.GetProperty("cacheScope").GetString();
+            if (snapshotPath is not null)
+            {
+                using var snapshot = JsonDocument.Parse(await File.ReadAllTextAsync(snapshotPath).ConfigureAwait(false));
+                return ReadVerifiedSnapshot(snapshot.RootElement, scope,
+                    frame.RootElement.GetProperty("targetLanguage").GetString());
+            }
             var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "GlobalAITranslator", "secrets");
             // Enumerate names only. Credential contents remain lazy in CreateProvider.
@@ -48,6 +54,22 @@ internal sealed class LiveRuntime : IDisposable
                 .Select(path => Path.GetFileNameWithoutExtension(path)["translation-preset-".Length..]).ToArray() : [];
             return ResolveRunningPreset(settings, scope, ids);
         }
+    }
+
+    internal static AppSettings ReadVerifiedSnapshot(JsonElement snapshot, string? runningScope, string? target)
+    {
+        if (snapshot.GetProperty("schemaVersion").GetInt32() != 1
+            || runningScope is not { Length: 64 } || !runningScope.All(Uri.IsHexDigit)
+            || snapshot.GetProperty("runningCacheScope").GetString() != runningScope)
+            throw new InvalidDataException("running_snapshot_stale");
+        var settings = snapshot.GetProperty("settings").Deserialize<AppSettings>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!
+            .Migrate(out _);
+        if (settings.TargetLanguage != target || TranslationProviderConfiguration.Provider(settings) != TranslationProviderKind.DeepSeek
+            || TranslationProviderConfiguration.Model(settings) != "deepseek-flash"
+            || TranslationProviderConfiguration.BaseUrl(settings).TrimEnd('/') != "https://api.deepseek.com"
+            || TranslationProviderConfiguration.ActivePreset(settings) is null)
+            throw new InvalidDataException("running_snapshot_unsupported");
+        return settings;
     }
 
     internal static string CacheScope(AppSettings settings) => (string)(typeof(ApplicationController)

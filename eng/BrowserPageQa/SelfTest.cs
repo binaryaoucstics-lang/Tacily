@@ -27,6 +27,7 @@ internal static class SelfTest
             ("live-factory-failure-never-falls-back", NoFallbackAsync),
             ("read-only-settings-migration-and-corruption", SettingsAsync),
             ("running-preset-scope-resolution", RunningPresetAsync),
+            ("verified-running-snapshot-rejects-drift", SnapshotAsync),
             ("continuation-reuses-document-assessment", ContinuationAsync),
             ("bounded-jsonl-and-eof-drain", InputAsync),
             ("broken-output-cannot-exit-successfully", TransportAsync),
@@ -256,6 +257,28 @@ internal static class SelfTest
         follow["message"]!["documentToken"] = "new-document-without-assessment";
         await host.HandleAsync(follow.ToJsonString()); await host.DrainAsync();
         Check(!Terminal(output, "unknown-document").GetProperty("success").GetBoolean());
+    }
+
+    private static Task SnapshotAsync()
+    {
+        var id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var settings = new AppSettings { SelectedTranslationPresetId = id, TranslationProviderPresets = [new()
+            { Id = id, Provider = TranslationProviderKind.DeepSeek, Model = "deepseek-flash", BaseUrl = "https://api.deepseek.com" }] };
+        var scope = new string('a', 64);
+        var snapshot = JsonSerializer.SerializeToElement(new { schemaVersion = 1, runningCacheScope = scope, settings });
+        Check(LiveRuntime.ReadVerifiedSnapshot(snapshot, scope, settings.TargetLanguage).SelectedTranslationPresetId == id);
+        foreach (var (actualScope, target) in new[] { (new string('b', 64), settings.TargetLanguage), (scope, "ja") })
+        {
+            var threw = false;
+            try { LiveRuntime.ReadVerifiedSnapshot(snapshot, actualScope, target); } catch (InvalidDataException) { threw = true; }
+            Check(threw);
+        }
+        var unsupported = JsonSerializer.SerializeToElement(new { schemaVersion = 1, runningCacheScope = scope,
+            settings = settings with { SelectedTranslationPresetId = "", TranslationProvider = TranslationProviderKind.OpenAI } });
+        var rejected = false;
+        try { LiveRuntime.ReadVerifiedSnapshot(unsupported, scope, settings.TargetLanguage); } catch (InvalidDataException) { rejected = true; }
+        Check(rejected);
+        return Task.CompletedTask;
     }
 
     private static async Task InputAsync()

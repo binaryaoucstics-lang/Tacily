@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "sourceUrl": "https://en.wikipedia.org/wiki/Machine_translation",
+  "split": "development",
+  "description": "Observed transferred date across inline DOM boundaries, not an authorization failure.",
+  "blocks": [
+    {
+      "text": "Yehoshua Bar-Hillel",
+      "context": "Yehoshua Bar-Hillel, began his research at MIT (1951). A Georgetown University MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its Georgetown-IBM experiment system in 1954. MT research programs popped up in Japan and Russia (1955), and the first MT conference was held in London (1956).",
+      "contextKind": "source",
+      "sourceGroupHash": "681cf5abb0c965fbeac98d6103f647cbfce81ae473899067523653c810a0e334",
+      "sourceGroupLength": 339,
+      "sourceStart": 0,
+      "sourceLength": 19,
+      "id": "inline-1",
+      "groupId": "wikipedia-1950s",
+      "observedTranslation": "耶霍舒亚·巴尔-希勒尔"
+    },
+    {
+      "text": ", began his research at MIT (1951). A",
+      "context": "Yehoshua Bar-Hillel, began his research at MIT (1951). A Georgetown University MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its Georgetown-IBM experiment system in 1954. MT research programs popped up in Japan and Russia (1955), and the first MT conference was held in London (1956).",
+      "contextKind": "source",
+      "sourceGroupHash": "681cf5abb0c965fbeac98d6103f647cbfce81ae473899067523653c810a0e334",
+      "sourceGroupLength": 339,
+      "sourceStart": 19,
+      "sourceLength": 37,
+      "id": "inline-2",
+      "groupId": "wikipedia-1950s",
+      "observedTranslation": "，于1951年在麻省理工学院开始他的研究。随后，"
+    },
+    {
+      "text": "Georgetown University",
+      "context": "Yehoshua Bar-Hillel, began his research at MIT (1951). A Georgetown University MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its Georgetown-IBM experiment system in 1954. MT research programs popped up in Japan and Russia (1955), and the first MT conference was held in London (1956).",
+      "contextKind": "source",
+      "sourceGroupHash": "681cf5abb0c965fbeac98d6103f647cbfce81ae473899067523653c810a0e334",
+      "sourceGroupLength": 339,
+      "sourceStart": 57,
+      "sourceLength": 21,
+      "id": "inline-3",
+      "groupId": "wikipedia-1950s",
+      "observedTranslation": "乔治城大学"
+    },
+    {
+      "text": "MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its",
+      "context": "Yehoshua Bar-Hillel, began his research at MIT (1951). A Georgetown University MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its Georgetown-IBM experiment system in 1954. MT research programs popped up in Japan and Russia (1955), and the first MT conference was held in London (1956).",
+      "contextKind": "source",
+      "sourceGroupHash": "681cf5abb0c965fbeac98d6103f647cbfce81ae473899067523653c810a0e334",
+      "sourceGroupLength": 339,
+      "sourceStart": 79,
+      "sourceLength": 104,
+      "id": "inline-4",
+      "groupId": "wikipedia-1950s",
+      "observedTranslation": "由迈克尔·扎列奇纳克教授领导的机器翻译研究团队于1951年跟进，并于1954年公开展示了其"
+    },
+    {
+      "text": "Georgetown-IBM experiment",
+      "context": "Yehoshua Bar-Hillel, began his research at MIT (1951). A Georgetown University MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its Georgetown-IBM experiment system in 1954. MT research programs popped up in Japan and Russia (1955), and the first MT conference was held in London (1956).",
+      "contextKind": "source",
+      "sourceGroupHash": "681cf5abb0c965fbeac98d6103f647cbfce81ae473899067523653c810a0e334",
+      "sourceGroupLength": 339,
+      "sourceStart": 184,
+      "sourceLength": 25,
+      "id": "inline-5",
+      "groupId": "wikipedia-1950s",
+      "observedTranslation": "乔治城-IBM实验"
+    },
+    {
+      "text": "system in 1954. MT research programs popped up in Japan",
+      "context": "Yehoshua Bar-Hillel, began his research at MIT (1951). A Georgetown University MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its Georgetown-IBM experiment system in 1954. MT research programs popped up in Japan and Russia (1955), and the first MT conference was held in London (1956).",
+      "contextKind": "source",
+      "sourceGroupHash": "681cf5abb0c965fbeac98d6103f647cbfce81ae473899067523653c810a0e334",
+      "sourceGroupLength": 339,
+      "sourceStart": 210,
+      "sourceLength": 55,
+      "id": "inline-6",
+      "groupId": "wikipedia-1950s",
+      "observedTranslation": "系统。机器翻译研究项目在日本"
+    },
+    {
+      "text": "and Russia (1955), and the first MT conference was held in London (1956).",
+      "context": "Yehoshua Bar-Hillel, began his research at MIT (1951). A Georgetown University MT research team, led by Professor Michael Zarechnak, followed (1951) with a public demonstration of its Georgetown-IBM experiment system in 1954. MT research programs popped up in Japan and Russia (1955), and the first MT conference was held in London (1956).",
+      "contextKind": "source",
+      "sourceGroupHash": "681cf5abb0c965fbeac98d6103f647cbfce81ae473899067523653c810a0e334",
+      "sourceGroupLength": 339,
+      "sourceStart": 266,
+      "sourceLength": 73,
+      "id": "inline-7",
+      "groupId": "wikipedia-1950s",
+      "observedTranslation": "和俄罗斯（1955年）纷纷涌现，首届机器翻译会议于1956年在伦敦举行。"
+    }
+  ]
+}
