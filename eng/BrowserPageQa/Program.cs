@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.IO;
 
 namespace BrowserPageQa;
 
@@ -19,9 +20,13 @@ internal static class Program
         }
         using var runtime = new LiveRuntime();
         await using var host = new JsonlHost(true, () => LiveRuntime.LoadSettingsAsync(useRunningPreset), runtime.CreateProvider, Console.Out);
+        // Console.In wraps a synchronous reader. Once an async continuation owns
+        // its thread, waiting for the next line can delay queued translation work
+        // until another input arrives. Use the underlying UTF-8 stream directly.
+        using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false, true));
         ConsoleCancelEventHandler stop = (_, e) => { e.Cancel = true; host.CancelAll(); };
         Console.CancelKeyPress += stop;
-        try { await host.RunAsync(Console.In); return 0; }
+        try { await host.RunAsync(input); return 0; }
         catch (Exception)
         {
             // Never write exception messages, paths, response bodies or configuration to either stream.
