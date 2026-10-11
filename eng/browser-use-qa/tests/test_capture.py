@@ -283,6 +283,162 @@ class CliTests(Fixture):
         with self.assertRaisesRegex(capture.CaptureError, "timeout"):
             capture.BrowserCli("test", self.journal, timeout).state()
 
+    def test_full_screenshot_uses_same_wrapper_and_missing_file_check(self):
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            self.assertEqual(argv[-3:], ["screenshot", str(self.root / "full.png"), "--full"])
+            return subprocess.CompletedProcess(argv, 0, '{"success":true,"data":{}}', "")
+        cli = capture.BrowserCli("full-test", self.journal, runner)
+        with self.assertRaisesRegex(capture.CaptureError, "screenshot_missing"):
+            cli.screenshot(self.root / "full.png", full=True)
+        (self.root / "full.png").write_bytes(b"OFFLINE FULL SCREENSHOT")
+        cli.screenshot(self.root / "full.png", full=True)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(Path(argv[1]) == capture.WRAPPER and kwargs["shell"] is False
+                            for argv, kwargs in calls))
+
+
+class BatchDeliveryTests(Fixture):
+    def collecting_cli(self, result=True):
+        expressions = []
+        def runner(argv, **kwargs):
+            self.assertEqual(Path(argv[1]), capture.WRAPPER)
+            self.assertEqual(argv[-2], "eval")
+            self.assertIs(kwargs["shell"], False)
+            expressions.append(argv[-1])
+            return subprocess.CompletedProcess(argv, 0, capture.encode({"data": {"result": result}}), "")
+        return capture.BrowserCli("batch-test", self.journal, runner), expressions
+
+    def execute_expressions(self, expressions, fail_packet=None):
+        # Execute the actual transport expressions in an offline JS context;
+        # no DOM, browser, provider or network is involved.
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node is required for offline batch expression checks")
+        script = """
+const vm = require('node:vm');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const calls = [];
+const context = vm.createContext({__websiteQa: {
+  acknowledge: (rpcId, response) => { calls.push(['acknowledge', rpcId, response]); return true; },
+  deliver: (rpcId, packet) => {
+    calls.push(['deliver', rpcId, packet]);
+    if (packet === input.failPacket) throw new Error('synthetic_delivery_failure');
+    return false;
+  }
+}});
+let error = null;
+for (const expression of input.expressions) {
+  try { vm.runInContext(expression, context); }
+  catch (failure) { error = failure.message; break; }
+}
+process.stdout.write(JSON.stringify({calls, error,
+  stored: Object.hasOwn(context, '__qaFrameBatch'),
+  chunks: Object.hasOwn(context, '__qaSourceChunks'), injected: context.injected === true}));
+"""
+        result = subprocess.run([node, "-e", script], shell=False, capture_output=True,
+                                input=capture.encode({"expressions": expressions, "failPacket": fail_packet}),
+                                text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_synchronous_batch_preserves_identity_order_and_original_frame_strings(self):
+        cli, expressions = self.collecting_cli()
+        raw = ' { "type": "pageAutoTranslations", "text": "中文😀\\\\\\\"" }\n'
+        frames = [["rpc-1", raw, True], ["rpc-2", {"type": "pageAutoAccepted"}, True],
+                  ["rpc-1", '{"type":"pageAutoTranslations","finished":true}', False]]
+        cli.deliver_batch(frames)
+        self.assertEqual(len(expressions), 1)
+        result = self.execute_expressions(expressions)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["calls"], [["acknowledge", "rpc-1", {"accepted": True}],
+            ["deliver", "rpc-1", raw], ["acknowledge", "rpc-2", {"accepted": True}],
+            ["deliver", "rpc-2", frames[1][1]], ["deliver", "rpc-1", frames[2][1]]])
+
+    def test_full_wrapper_utf16_boundary_and_bounded_count(self):
+        cli, expressions = self.collecting_cli()
+        overhead = len(capture.delivery_expression([["rpc", "", True]]).encode("utf-16-le"))
+        packet = "x" * ((capture.EVAL_LIMIT_BYTES - overhead) // 2)
+        cli.deliver_batch([["rpc", packet, True]])
+        self.assertEqual(len(expressions[0].encode("utf-16-le")), capture.EVAL_LIMIT_BYTES)
+        self.assertEqual(len(expressions), 1)
+        expressions.clear()
+        cli.deliver_batch([["rpc", packet + "😀", False]])
+        self.assertGreater(len(expressions), 1)
+        self.assertTrue(all(len(expression.encode("utf-16-le")) <= capture.EVAL_LIMIT_BYTES for expression in expressions))
+        self.assertEqual(self.execute_expressions(expressions)["calls"], [["deliver", "rpc", packet + "😀"]])
+        expressions.clear()
+        cli.deliver_batch([])
+        with self.assertRaisesRegex(capture.CaptureError, "delivery_batch_too_many_packets"):
+            cli.deliver_batch([["r", "{}", True]] * (capture.DELIVERY_BATCH_PACKETS + 1))
+        with self.assertRaisesRegex(capture.CaptureError, "delivery_batch_too_large"):
+            cli.deliver_batch([["r", "😀" * 5000, True]] * 2)
+        self.assertEqual(expressions, [])
+
+    def test_oversize_data_uses_safe_chunks_without_frame_rewriting(self):
+        cli, expressions = self.collecting_cli()
+        packet = json.dumps({"type": "pageAutoTranslations", "text":
+                            ('中文😀𠮷"\\\n\r\t\x00' * 4000) + '";globalThis.injected=true;//'},
+                            ensure_ascii=False, indent=2) + "\n"
+        cli.deliver_batch([["rpc-oversize", packet, True]])
+        pushes = [expression for expression in expressions if expression.startswith("globalThis.__qaSourceChunks.push(")]
+        self.assertGreater(len(pushes), 1)
+        self.assertTrue(all(len(expression.encode("utf-16-le")) <= capture.EVAL_LIMIT_BYTES for expression in expressions))
+        result = self.execute_expressions(expressions)
+        self.assertEqual(result["calls"], [["acknowledge", "rpc-oversize", {"accepted": True}],
+                                           ["deliver", "rpc-oversize", packet]])
+        self.assertIsNone(result["error"])
+        self.assertFalse(result["stored"])
+        self.assertFalse(result["chunks"])
+        self.assertFalse(result["injected"])
+        # A failed receive still cleans stored oversize data and is not retried.
+        failed = self.execute_expressions(expressions, fail_packet=packet)
+        self.assertEqual(failed["error"], "synthetic_delivery_failure")
+        self.assertEqual(failed["calls"], result["calls"])
+        self.assertFalse(failed["stored"])
+
+    def test_batch_receive_exception_stops_later_frames_and_eval_errors_fail(self):
+        cli, expressions = self.collecting_cli()
+        frames = [["r", "first", True], ["r", "bad", False], ["r", "later", False]]
+        cli.deliver_batch(frames)
+        result = self.execute_expressions(expressions, fail_packet="bad")
+        self.assertEqual(result["error"], "synthetic_delivery_failure")
+        self.assertEqual([row[2] for row in result["calls"] if row[0] == "deliver"], ["first", "bad"])
+        for value in ({}, False, None):
+            cli, _ = self.collecting_cli(result=value)
+            with self.subTest(value=value), self.assertRaisesRegex(capture.CaptureError, "delivery_invalid_result"):
+                cli.deliver_batch(frames)
+
+    def test_cli_timeout_is_bounded_by_case_deadline_and_late_results_fail(self):
+        clock, timeouts = [10.0], []
+        def runner(argv, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            clock[0] += .6
+            return subprocess.CompletedProcess(argv, 0, '{"data":{"result":true}}', "")
+        cli = capture.BrowserCli("deadline-test", self.journal, runner)
+        cli.deadline = 10.5
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+            with self.assertRaisesRegex(capture.CaptureError, "case_timeout_without_settlement"):
+                cli.deliver_batch([["r", "{}", True]])
+            with self.assertRaisesRegex(capture.CaptureError, "case_timeout_without_settlement"):
+                cli.deliver_batch([["r", "{}", True]])
+        self.assertEqual(timeouts, [.5])
+        self.assertIn('"kind":"cli"', self.journal.path.read_text(encoding="utf-8"))
+
+    def test_oversize_chunk_delivery_stops_at_deadline(self):
+        clock, expressions = [0.0], []
+        def runner(argv, **kwargs):
+            expressions.append(argv[-1])
+            clock[0] += .1
+            return subprocess.CompletedProcess(argv, 0, '{"data":{"result":true}}', "")
+        cli = capture.BrowserCli("deadline-chunks", self.journal, runner)
+        cli.deadline = .35
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+            with self.assertRaisesRegex(capture.CaptureError, "case_timeout_without_settlement"):
+                cli.deliver_batch([["r", "😀" * 50000, True]])
+        self.assertEqual(len(expressions), 4)
+        self.assertFalse(any(expression.startswith("(()=>") for expression in expressions))
+
 
 class ManifestAndResumeTests(Fixture):
     def manifest(self, sites):
@@ -347,6 +503,37 @@ class CompletionTests(Fixture):
         case = self.valid(False)
         self.assertTrue(capture.completion_gate(case, self.root)[1])
         self.assertFalse(capture.completion_gate({**case, "requestIds": ["unnecessary"]}, self.root)[1])
+
+    def test_full_phases_require_files_hashes_and_independent_review(self):
+        case = self.valid()
+        case["fullScreenshots"] = True
+        self.assertIn("screenshots_incomplete", capture.completion_gate(case, self.root)[2])
+        for phase in ("before-full", "after-full", "stable-full"):
+            image = self.root / (phase + ".png")
+            image.write_bytes(b"OFFLINE FULL PAGE FIXTURE")
+            case["screenshots"].append({"phase": phase, "path": image.name, "fullPage": True})
+        ready, complete, reasons = capture.completion_gate(case, self.root)
+        self.assertTrue(ready)
+        self.assertFalse(complete)
+        self.assertIn("screenshot_review_pending", reasons)
+        for shot in case["screenshots"]:
+            shot["sha256"] = capture.hashlib.sha256((self.root / shot["path"]).read_bytes()).hexdigest()
+        case_path = self.root / "case.json"
+        capture.atomic_json(case_path, case)
+        original = case_path.read_bytes()
+        review_path = self.root / "review.json"
+        independent = {"caseSha256": capture.hashlib.sha256(original).hexdigest(),
+                       "screenshots": {shot["phase"]: True for shot in case["screenshots"]}, "annotations": []}
+        # Viewport-only votes cannot authorize the additional full-page phases.
+        capture.atomic_json(review_path, {**independent, "screenshots": case["screenshotReview"]})
+        with self.assertRaisesRegex(capture.CaptureError, "all_screenshot_votes"):
+            review.apply_review(case_path, review_path, self.root / "missing-votes.json")
+        capture.atomic_json(review_path, independent)
+        self.assertTrue(review.apply_review(case_path, review_path, self.root / "reviewed-full.json")["completed"])
+        self.assertEqual(case_path.read_bytes(), original)
+        (self.root / "stable-full.png").write_bytes(b"tampered")
+        with self.assertRaisesRegex(capture.CaptureError, "screenshot_hash"):
+            review.apply_review(case_path, review_path, self.root / "tampered-full.json")
 
     def test_predictions_without_independent_source_evidence_cannot_complete(self):
         case = self.valid()
@@ -460,6 +647,7 @@ class WorkflowTests(Fixture):
     def browser(self, failure=None, skipped=False, probe_states=None):
         class MockBrowser:
             probe = capture.BrowserCli.probe
+            deliver_batch = capture.BrowserCli.deliver_batch
             def __init__(self):
                 self.configured = False
                 self.outgoing = []
@@ -479,11 +667,19 @@ class WorkflowTests(Fixture):
                 self.calls.append(("inject", len(source)))
             def evaluate(self, expression):
                 self.calls.append(("eval", expression))
+                if expression.startswith("(()=>{const q=globalThis.__websiteQa;for(const [rpcId,packet,ack] of "):
+                    prefix = "(()=>{const q=globalThis.__websiteQa;for(const [rpcId,packet,ack] of "
+                    frames = json.loads(expression[len(prefix):expression.rindex("){if(ack)")])
+                    for rpc_id, packet, ack in frames:
+                        if ack:
+                            self.qa("acknowledge", rpc_id, {"accepted": True})
+                        self.qa("deliver", rpc_id, packet)
+                    return True
                 if "chrome?.runtime" in expression or "querySelector('details" in expression:
                     return False
                 return True
-            def screenshot(self, path):
-                self.calls.append(("screenshot", Path(path).name))
+            def screenshot(self, path, full=False):
+                self.calls.append(("screenshot", Path(path).name, full))
                 Path(path).write_bytes(b"SYNTHETIC OFFLINE SCREENSHOT FIXTURE")
             def qa(self, method, *args):
                 self.calls.append((method, *args))
@@ -522,6 +718,494 @@ class WorkflowTests(Fixture):
                     return True
                 return True
         return MockBrowser()
+
+    def scripted_case(self, events_for_request, browser=None, run_id="scripted", poll_hook=None, case_timeout=5,
+                      stable_seconds=.001, site=None, full_screenshots=False):
+        class ScriptedHost:
+            def __init__(self):
+                self.events, self.requests = [], []
+                self.polls = 0
+                self.journal = None
+            def capabilities(self, case_id, timeout=15):
+                return {"type": "capabilities", "id": "synthetic-capabilities", "caseId": case_id,
+                        "live": False, "targetLanguage": "zh-CN"}
+            def send(self, request):
+                self.requests.append(copy.deepcopy(request))
+                self.journal.append({"kind": "host_request", "request": request})
+                self.events.extend(events_for_request(request, self.requests))
+            def poll(self, timeout=0):
+                self.polls += 1
+                if poll_hook:
+                    poll_hook(self)
+                return self.events.pop(0) if self.events else None
+        host = ScriptedHost()
+        browser = browser or self.browser()
+        run = capture.EvidenceRun(self.root, run_id, {"sourceHead": "a" * 40})
+        result = capture.CaseCapture(browser, host, run, HERE.parents[2], case_timeout=case_timeout,
+                                     stable_seconds=stable_seconds, poll_seconds=.002,
+                                     full_screenshots=full_screenshots).capture(site or SITE)
+        log = next(run.path.glob("*/attempt-*/events.jsonl"))
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        return result, browser, host, rows
+
+    @staticmethod
+    def packet_event(request, packet):
+        return {"type": "packet", "id": request["id"], "caseId": request["caseId"], "packet": packet}
+
+    @staticmethod
+    def terminal_event(request, **extra):
+        return {"type": "terminal", "id": request["id"], "caseId": request["caseId"],
+                "success": True, "requestCount": 0, "failedCount": 0, **extra}
+
+    def moving_browser(self, skipped=False, replace_sources=False, change=None, unresolved=None,
+                       skipped_candidates=0):
+        """Synthetic motion only; never represents a real browser/model result."""
+        browser = self.browser(skipped=skipped, probe_states=[{
+            "id": "probe-1", "stage": "completed", "result": {"samples": [], "statistics": {}}}])
+        original_qa = browser.qa
+        browser.motion_samples = 0
+        def qa(method, *args):
+            value = original_qa(method, *args)
+            if method != "sample":
+                return value
+            browser.motion_samples += 1
+            tick = browser.motion_samples
+            rows = []
+            for index in range(max(2, skipped_candidates)):
+                source_id = f"replacement-{tick}-{index}" if replace_sources else f"s{index + 1}"
+                rows.append({"id": source_id, "sourceText": f"Synthetic source {index}",
+                             "displayedText": f"Synthetic source {index}" if skipped else "合成显示文本",
+                             "tag": "P", "role": "article", "locator": f"moving/{tick}/{index}",
+                             "firstSeen": f"time-{tick}", "phase": args[0],
+                             "rects": [{"x": tick * -100, "y": 700 + index * 20,
+                                        "width": 80, "height": 16}],
+                             "rendered": True, "ancestorsVisible": True, "inViewport": False})
+            if browser.configured and change:
+                if change == "multiplicity":
+                    rows.extend(copy.deepcopy(rows) * (tick % 2))
+                else:
+                    rows[0][change] += str(tick)
+            if tick % 2:
+                rows.reverse()
+            value["nodes"] = rows
+            value["sourceNodes"] = copy.deepcopy(rows)
+            if browser.configured and skipped and skipped_candidates:
+                # Production may retain eligible untranslated blocks after a
+                # negative page decision. Keep their actual flags and identities.
+                value["predictions"] = [
+                    {"id": f"negative-piece-{tick}-{index}", "sourceId": row["id"],
+                     "sourceText": row["sourceText"], "text": row["sourceText"],
+                     "eligible": True, "completed": False, "failed": False,
+                     "sourceEvidence": "matched", "auditIssue": None}
+                    for index, row in enumerate(rows)]
+            # Prediction IDs/grouping are bookkeeping and may churn independently.
+            for prediction in ([] if skipped_candidates else value["predictions"]):
+                prediction.update(id=f"piece-{tick}", groupId=f"group-{tick}", sourceId="s1",
+                                  sourceText="Synthetic source 0", text="Synthetic source 0")
+            if browser.configured and unresolved:
+                if unresolved in ("jobs", "pending", "scanning", "rpcPending"):
+                    value[unresolved] = 1
+                elif unresolved == "status":
+                    value["status"] = {"state": "assessing"}
+                elif unresolved == "pageDecision":
+                    value["pageDecision"] = None
+                elif unresolved == "failed":
+                    value["predictions"][0]["failed"] = True
+                elif unresolved == "completed":
+                    value["predictions"][0]["completed"] = False
+            value["at"] = f"sample-time-{tick}"
+            return value
+        browser.qa = qa
+        return browser
+
+    def motion_events(self, request, requests):
+        if request["action"] == "assess":
+            return [{"type": "assessment", "id": request["id"], "caseId": request["caseId"],
+                     "needsTranslation": False}]
+        return [self.packet_event(request, '{"type":"pageAutoTranslations","finished":true}'),
+                self.terminal_event(request)]
+
+    def test_perpetual_geometry_locator_order_motion_settles_semantically(self):
+        for skipped in (False, True):
+            with self.subTest(skipped=skipped):
+                clock = [1.0]
+                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                    result, _, _, rows = self.scripted_case(
+                        self.motion_events, browser=self.moving_browser(skipped=skipped),
+                        run_id=f"motion-{skipped}", case_timeout=.3, stable_seconds=.01,
+                        site={**SITE, "expectedPageTranslation": not skipped})
+                self.assertEqual(result["errors"], [])
+                self.assertTrue(result["settled"])
+                self.assertTrue(result["semanticStable"])
+                self.assertEqual(result["settlementKind"], "semantic")
+                self.assertTrue(result["layoutReviewRequired"])
+                for observation in result["stability"].values():
+                    self.assertTrue(observation["semanticStable"])
+                    self.assertTrue(observation["geometryVaried"])
+                    self.assertGreaterEqual(observation["stableForSeconds"], .01)
+                    self.assertNotIn("layoutStable", observation)
+                samples = [row["value"] for row in rows if row["kind"] == "sample" and row["phase"] == "after"]
+                self.assertGreater(len(samples), 4)
+                self.assertNotEqual(samples[0]["nodes"], samples[1]["nodes"])
+                self.assertTrue(any(row.get("semanticStable") and row.get("geometryChanged")
+                                    for row in rows if row["kind"] == "stability"))
+                self.assertTrue(result["simulation"])
+                self.assertFalse(result["completed"])
+
+    def test_identical_replacement_content_keeps_every_source_and_unknown_annotation(self):
+        clock = [1.0]
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result, _, _, rows = self.scripted_case(
+                self.motion_events, browser=self.moving_browser(skipped=True, replace_sources=True),
+                run_id="replaced-sources", case_timeout=.3, stable_seconds=.01,
+                site={**SITE, "expectedPageTranslation": False})
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["settled"])
+        raw_sources = {source["id"]: source for row in rows if row["kind"] == "sample"
+                       for source in row["value"]["sourceNodes"]}
+        self.assertGreater(len(raw_sources), 30)
+        self.assertEqual({row["id"]: row for row in result["sourceNodes"]}, raw_sources)
+        self.assertEqual({row["sourceId"] for row in result["annotations"]}, set(raw_sources))
+        self.assertTrue(all(row["needTranslation"] == "unknown" for row in result["annotations"]))
+
+    def test_skipped_page_retains_13_untranslated_candidates_and_captures_all_phases(self):
+        clock = [1.0]
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result, browser, host, rows = self.scripted_case(
+                self.motion_events,
+                browser=self.moving_browser(skipped=True, replace_sources=True, skipped_candidates=13),
+                run_id="negative-untranslated", case_timeout=.3, stable_seconds=.01,
+                site={**SITE, "expectedPageTranslation": False}, full_screenshots=True)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["settled"])
+        self.assertTrue(result["semanticStable"])
+        self.assertIs(result["pageDecision"], False)
+        self.assertEqual(result["requestIds"], [])
+        self.assertEqual(result["terminals"], [])
+        self.assertEqual([request["action"] for request in host.requests], ["assess"])
+        self.assertFalse(any(call[0] in ("acknowledge", "deliver") for call in browser.calls))
+        samples = [row["value"] for row in rows if row["kind"] == "sample"]
+        after_samples = [row["value"] for row in rows if row["kind"] == "sample" and row["phase"] == "after"]
+        self.assertGreater(len(after_samples), 4)
+        self.assertTrue(all(len(value["predictions"]) == 13 for value in after_samples))
+        for prediction in result["predictions"]:
+            self.assertIs(prediction["eligible"], True)
+            self.assertIs(prediction["completed"], False)
+            self.assertIs(prediction["failed"], False)
+        raw_predictions = {p["id"]: p for value in samples for p in value["predictions"]}
+        raw_sources = {s["id"]: s for value in samples for s in value["sourceNodes"]}
+        self.assertEqual({p["id"]: p for p in result["predictions"]}, raw_predictions)
+        self.assertEqual({s["id"]: s for s in result["sourceNodes"]}, raw_sources)
+        self.assertGreater(len(raw_sources), 13)
+        self.assertEqual(result["annotations"], [{"sourceId": s["id"], "needTranslation": "unknown"}
+                                               for s in result["sourceNodes"]])
+        self.assertEqual([shot["phase"] for shot in result["screenshots"]],
+                         ["before", "before-full", "after", "after-full", "scroll-before", "scroll-after",
+                          "return-after", "reflow-after", "stable", "stable-full"])
+        attempt = next((self.root / "negative-untranslated").glob("*/attempt-*"))
+        for shot in result["screenshots"]:
+            self.assertEqual(shot["sha256"], capture.hashlib.sha256((attempt / shot["path"]).read_bytes()).hexdigest())
+        for observation in result["stability"].values():
+            self.assertTrue(observation["semanticStable"])
+            self.assertTrue(observation["geometryVaried"])
+            self.assertGreaterEqual(observation["stableForSeconds"], .01)
+        self.assertTrue(result["simulation"])
+        self.assertFalse(result["completed"])
+        self.assertEqual(result["screenshotReview"], {})
+        # Test the unchanged negative gate without pretending the fixture is live.
+        self.assertNotIn("node_completion_missing", result["blockedReason"])
+        self.assertIn("simulation_not_real_case", result["blockedReason"])
+
+    def test_skipped_candidates_still_block_for_changed_text_or_unresolved_work(self):
+        checks = [("change", "sourceText"), ("change", "displayedText")]
+        checks += [("unresolved", key) for key in
+                   ("jobs", "pending", "scanning", "rpcPending", "status", "pageDecision", "failed")]
+        for kind, key in checks:
+            with self.subTest(kind=kind, key=key):
+                clock = [1.0]
+                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                    result, _, host, rows = self.scripted_case(
+                        self.motion_events,
+                        browser=self.moving_browser(skipped=True, skipped_candidates=13, **{kind: key}),
+                        run_id=f"negative-unsettled-{key}", case_timeout=.04, stable_seconds=.01,
+                        site={**SITE, "expectedPageTranslation": False})
+                self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
+                self.assertFalse(result["settled"])
+                self.assertFalse(result["completed"])
+                self.assertFalse(result["evidenceReady"])
+                self.assertEqual(host.requests, [])
+                self.assertFalse(any(row["semanticStable"] for row in rows if row["kind"] == "stability"))
+
+    def test_negative_decision_does_not_bypass_missing_or_failed_request_terminal(self):
+        for name, terminal in (("missing", None), ("failed", {"success": False}), ("failed-count", {"failedCount": 1})):
+            with self.subTest(terminal=terminal):
+                browser = self.moving_browser(skipped=True, skipped_candidates=13)
+                original_qa = browser.qa
+                def qa(method, *args):
+                    value = original_qa(method, *args)
+                    if method == "configure":
+                        browser.outgoing.append({"rpcId": "rpc-negative", "message": {
+                            "type": "pageAutoCandidate", "requestId": "negative-request",
+                            "documentToken": "doc1", "generation": 1, "revision": 1,
+                            "documentLanguage": "zh-CN", "blocks": [], "samples": [], "pageSummary": {}}})
+                    return value
+                browser.qa = qa
+                def events(request, requests):
+                    packets = [self.packet_event(request, '{"type":"pageAutoAccepted"}')]
+                    # Sample the actual negative decision before a later terminal
+                    # arrives; None is a temporarily empty host queue.
+                    return packets if terminal is None else packets + [None, self.terminal_event(request, **terminal)]
+                clock = [1.0]
+                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                    result, _, _, rows = self.scripted_case(
+                        events, browser=browser, run_id="negative-terminal-" + name,
+                        case_timeout=.04, stable_seconds=.01,
+                        site={**SITE, "expectedPageTranslation": False})
+                self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement"
+                                 if terminal is None else "backend_terminal_failed")
+                self.assertIs(result["pageDecision"], False)
+                self.assertFalse(result["settled"])
+                self.assertFalse(result["evidenceReady"])
+                self.assertFalse(result["completed"])
+                self.assertIn("unnecessary_translation_request", result["blockedReason"])
+                self.assertFalse(any(row["semanticStable"] for row in rows if row["kind"] == "stability"))
+
+    def test_changed_semantics_and_unresolved_translation_do_not_settle(self):
+        checks = [("change", key) for key in ("sourceText", "displayedText", "tag", "role", "multiplicity")]
+        checks += [("unresolved", key) for key in
+                   ("jobs", "pending", "scanning", "rpcPending", "status", "pageDecision", "failed", "completed")]
+        for kind, key in checks:
+            with self.subTest(kind=kind, key=key):
+                clock = [1.0]
+                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                    result, _, _, rows = self.scripted_case(
+                        self.motion_events, browser=self.moving_browser(**{kind: key}),
+                        run_id=f"unsettled-{key}", case_timeout=.04, stable_seconds=.01)
+                self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
+                self.assertFalse(result["settled"])
+                self.assertFalse(result["semanticStable"])
+                self.assertFalse(result["completed"])
+                self.assertFalse(result["evidenceReady"])
+                self.assertFalse(any(row["semanticStable"] for row in rows if row["kind"] == "stability"))
+
+    def test_optional_full_screenshots_are_separate_hashed_unreviewed_phases(self):
+        result, browser, _, _ = self.scripted_case(self.motion_events, run_id="full-screenshots",
+                                                  full_screenshots=True)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["settled"])
+        self.assertTrue(result["fullScreenshots"])
+        full = [shot for shot in result["screenshots"] if shot["fullPage"]]
+        self.assertEqual([shot["phase"] for shot in full], ["before-full", "after-full", "stable-full"])
+        attempt = next((self.root / "full-screenshots").glob("*/attempt-*"))
+        for shot in result["screenshots"]:
+            self.assertEqual(shot["sha256"], capture.hashlib.sha256((attempt / shot["path"]).read_bytes()).hexdigest())
+        self.assertEqual([call[1] for call in browser.calls if call[0] == "screenshot" and call[2]],
+                         ["before-full.png", "after-full.png", "stable-full.png"])
+        self.assertEqual(result["screenshotReview"], {})
+        self.assertFalse(result["completed"])
+
+    def test_text_changes_are_not_reported_as_geometry_variation(self):
+        browser = self.moving_browser(change="sourceText")
+        moving_qa = browser.qa
+        def qa(method, *args):
+            value = moving_qa(method, *args)
+            if method == "sample":
+                for row in value["nodes"]:
+                    row["rects"] = [{"x": 10, "y": 700, "width": 80, "height": 16}]
+            return value
+        browser.qa = qa
+        clock = [1.0]
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result, _, _, rows = self.scripted_case(self.motion_events, browser=browser,
+                                                    run_id="text-only-changes", case_timeout=.04, stable_seconds=.01)
+        self.assertFalse(result["settled"])
+        observations = [row for row in rows if row["kind"] == "stability"]
+        self.assertGreater(len(observations), 4)
+        self.assertTrue(all(not row["semanticUnchanged"] for row in observations))
+        self.assertTrue(all(not row["geometryChanged"] and not row["geometryVaried"] for row in observations))
+
+    def test_102_frames_use_four_cli_evals_with_one_ack_and_individual_journal_events(self):
+        packets = [' { "type": "pageAutoTranslations", "index": ' + str(index) +
+                   ', "finished": ' + ("true" if index == 101 else "false") + ' }\n' for index in range(102)]
+        original_events = []
+        def events(request, requests):
+            batch = [self.packet_event(request, packet) for packet in packets] + [self.terminal_event(request)]
+            original_events.extend(copy.deepcopy(batch))
+            return batch
+        result, browser, host, rows = self.scripted_case(events)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["settled"])
+        self.assertFalse(result["completed"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertEqual(browser.delivered, packets)
+        evaluations = [call[1] for call in browser.calls if call[0] == "eval" and "for(const [rpcId,packet,ack]" in call[1]]
+        self.assertEqual(len(evaluations), 4)  # 204 previous transport calls -> 4 for this synthetic fixture.
+        self.assertTrue(all(len(expression.encode("utf-16-le")) <= capture.EVAL_LIMIT_BYTES for expression in evaluations))
+        self.assertEqual([call for call in browser.calls if call[0] == "acknowledge"],
+                         [("acknowledge", "rpc-1", {"accepted": True})])
+        self.assertLess(next(i for i, call in enumerate(browser.calls) if call[0] == "acknowledge"),
+                        next(i for i, call in enumerate(browser.calls) if call[0] == "deliver"))
+        self.assertEqual([row["event"] for row in rows if row["kind"] == "host_event"], original_events)
+        self.assertEqual(result["terminals"], [original_events[-1]])
+
+    def test_interleaved_rpcs_keep_packet_order_and_do_not_ack_twice(self):
+        browser = self.browser()
+        original_qa = browser.qa
+        def qa(method, *args):
+            value = original_qa(method, *args)
+            if method == "configure":
+                second = copy.deepcopy(browser.outgoing[0])
+                second["rpcId"] = "rpc-2"
+                second["message"]["requestId"] = "req2"
+                browser.outgoing.append(second)
+            return value
+        browser.qa = qa
+        packets = ['{"type":"pageAutoTranslations","sequence":' + str(i) +
+                   ',"finished":' + ("true" if i >= 2 else "false") + '}' for i in range(4)]
+        def events(request, requests):
+            if len(requests) == 1:
+                return []
+            first, second = requests
+            return [self.packet_event(first, packets[0]), self.packet_event(second, packets[1]),
+                    self.packet_event(first, packets[2]), self.packet_event(second, packets[3]),
+                    self.terminal_event(first), self.terminal_event(second)]
+        result, browser, _, _ = self.scripted_case(events, browser)
+        self.assertEqual(result["errors"], [])
+        transport = [call for call in browser.calls if call[0] in ("acknowledge", "deliver")]
+        self.assertEqual(transport, [("acknowledge", "rpc-1", {"accepted": True}), ("deliver", "rpc-1", packets[0]),
+            ("acknowledge", "rpc-2", {"accepted": True}), ("deliver", "rpc-2", packets[1]),
+            ("deliver", "rpc-1", packets[2]), ("deliver", "rpc-2", packets[3])])
+        self.assertEqual([event["id"] for event in result["terminals"]], ["site-001-rpc-1", "site-001-rpc-2"])
+
+    def test_serialized_frame_wrapper_budget_splits_batch_before_limit(self):
+        packets = [json.dumps({"type": "pageAutoTranslations", "text": ('中文😀"\\\n' * 350),
+                               "finished": index == 4}, ensure_ascii=False, indent=2) for index in range(5)]
+        def events(request, requests):
+            return [self.packet_event(request, packet) for packet in packets] + [self.terminal_event(request)]
+        result, browser, _, _ = self.scripted_case(events)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(browser.delivered, packets)
+        evaluations = [call[1] for call in browser.calls if call[0] == "eval" and "for(const [rpcId,packet,ack]" in call[1]]
+        self.assertGreater(len(evaluations), 1)
+        self.assertTrue(all(len(expression.encode("utf-16-le")) <= capture.EVAL_LIMIT_BYTES for expression in evaluations))
+        self.assertEqual(sum(call[0] == "acknowledge" for call in browser.calls), 1)
+
+    def test_protocol_failures_flush_prior_frames_and_preserve_failure_evidence(self):
+        first = '{"type":"pageAutoTranslations","finished":false}'
+        error_packet = '{"type":"pageAutoTranslations","error":"synthetic_failure"}'
+        scenarios = [
+            ("uncorrelated", lambda request: {"type": "packet", "id": "wrong-rpc", "caseId": SITE["id"], "packet": "{}"}, "host_uncorrelated_event"),
+            ("error", lambda request: {"type": "error", "id": request["id"], "caseId": SITE["id"], "code": "synthetic_host_failure"}, "synthetic_host_failure"),
+            ("packet-error", lambda request: self.packet_event(request, error_packet), "backend_packet_error"),
+            ("terminal-error", lambda request: self.terminal_event(request, success=False), "backend_terminal_failed"),
+            ("failed-count", lambda request: self.terminal_event(request, failedCount=1), "backend_terminal_failed"),
+            ("malformed", lambda request: self.packet_event(request, "not json"), "JSONDecodeError"),
+            ("invalid-packet", lambda request: self.packet_event(request, "[]"), "host_invalid_packet"),
+            ("eof", lambda request: {"type": "error", "code": "host_eof"}, "host_eof"),
+            ("invalid-jsonl", lambda request: {"type": "error", "code": "host_invalid_jsonl"}, "host_invalid_jsonl")]
+        for name, failure, code in scenarios:
+            def events(request, requests):
+                return [self.packet_event(request, first), failure(request)]
+            with self.subTest(name=name):
+                result, browser, _, rows = self.scripted_case(events, run_id="failure-" + name)
+                self.assertEqual(result["errors"][0]["code"], code)
+                self.assertEqual(browser.delivered, [first, error_packet] if name == "packet-error" else [first])
+                self.assertEqual(sum(call[0] == "acknowledge" for call in browser.calls), 1)
+                self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 2)
+                self.assertFalse(result["settled"])
+                self.assertFalse(result["completed"])
+                self.assertFalse(result["evidenceReady"])
+
+    def test_host_error_before_first_packet_rejects_rpc_once(self):
+        def events(request, requests):
+            return [{"type": "error", "id": request["id"], "caseId": SITE["id"], "code": "synthetic_denial"}]
+        result, browser, _, _ = self.scripted_case(events)
+        self.assertEqual(result["errors"][0]["code"], "synthetic_denial")
+        self.assertEqual(browser.delivered, [])
+        self.assertEqual([call for call in browser.calls if call[0] == "acknowledge"],
+                         [("acknowledge", "rpc-1", {"accepted": False, "reason": "synthetic_denial"})])
+
+    def test_late_other_case_events_are_journaled_without_delivery_or_completion(self):
+        packet = '{"type":"pageAutoTranslations","finished":true}'
+        stale = {"type": "terminal", "id": "prior-rpc", "caseId": "prior-site", "success": True}
+        def events(request, requests):
+            return [stale, {**stale, "type": "packet", "packet": "{}"},
+                    self.packet_event(request, packet), self.terminal_event(request)]
+        result, browser, _, rows = self.scripted_case(events)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(browser.delivered, [packet])
+        self.assertEqual(len(result["terminals"]), 1)
+        self.assertEqual(result["terminals"][0]["caseId"], SITE["id"])
+        self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 4)
+
+    def test_forward_polling_is_bounded_by_case_deadline(self):
+        clock = [0.0]
+        def events(request, requests):
+            return [self.packet_event(request, '{"type":"pageAutoTranslations","finished":false}')] * 1000
+        def poll_hook(host):
+            clock[0] += .1
+        browser = self.browser()
+        browser.deadline = 99
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+            result, browser, host, rows = self.scripted_case(events, browser=browser, poll_hook=poll_hook, case_timeout=.25)
+        self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
+        self.assertEqual(host.polls, 3)
+        self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 3)
+        self.assertEqual(browser.delivered, [])
+        self.assertEqual(browser.deadline, 99)
+        self.assertFalse(result["settled"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
+
+    def test_existing_qa_only_browser_interface_still_delivers_and_acks_once(self):
+        browser = self.browser()
+        browser.deliver_batch = None
+        packets = ['{"type":"pageAutoTranslations","finished":false}',
+                   '{"type":"pageAutoTranslations","finished":true}']
+        def events(request, requests):
+            return [self.packet_event(request, packet) for packet in packets] + [self.terminal_event(request)]
+        result, browser, _, _ = self.scripted_case(events, browser=browser)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(browser.delivered, packets)
+        self.assertEqual(sum(call[0] == "acknowledge" for call in browser.calls), 1)
+        self.assertFalse(result["completed"])
+
+    def test_rpc_acknowledgement_is_not_repeated_across_forward_passes(self):
+        packets = ['{"type":"pageAutoTranslations","index":1,"finished":false}',
+                   '{"type":"pageAutoTranslations","index":2,"finished":true}']
+        def events(request, requests):
+            # None represents a temporarily empty host queue, not an event.
+            return [self.packet_event(request, packets[0]), None,
+                    self.packet_event(request, packets[1]), self.terminal_event(request)]
+        result, browser, _, rows = self.scripted_case(events)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(browser.delivered, packets)
+        self.assertEqual(sum(call[0] == "acknowledge" for call in browser.calls), 1)
+        self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 3)
+
+    def test_finished_frame_without_host_terminal_cannot_settle_or_complete(self):
+        clock = [1.0]
+        packet = '{"type":"pageAutoTranslations","finished":true}'
+        def events(request, requests):
+            return [self.packet_event(request, packet)]
+        def sleep(seconds):
+            clock[0] += seconds
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(capture.time, "sleep", sleep):
+            result, browser, _, _ = self.scripted_case(events, case_timeout=.01)
+        self.assertEqual(browser.delivered, [packet])
+        self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
+        self.assertEqual(result["terminals"], [])
+        self.assertFalse(result["settled"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
 
     def test_skip_assess_only_after_completed_probe_and_failures_are_recoverable(self):
         evidence = {"samples": [{"text": "合成负例"}], "statistics": {"textCharacters": 4}}
