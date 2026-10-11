@@ -118,5 +118,10 @@ CLI 启用 prefer_mxc：设备支持时使用官方推荐的原生 MXC，保留�
    templates/controller-prompt.md 是复用主控指令。
 
 以上四组所有文件独占，跨组需求以结果 risks 上报。共享文件仅由主控集成后调整。
+主控额外提供 Sync-ParallelMain.ps1(RunPath,MainWorktree,ControllerRef 可选)：
+main 新增提交后，核对干净 main、原 mainHead 的后代、已审查任务与集成 HEAD，
+把固定的新 main 提交合入 integration；可纳入与任务归属不重叠的已提交主控基础变更。
+记录原/新 SHA 的重规划审计，取消旧验证，Complete 必须重新运行完整门禁；不修改 main。
+发生冲突或 main 再次移动时保留 integration 和证据，拒绝提升。
 基础验收：pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1
 -PlanPath .parallel/plan.json -TaskId <id>，各任务再自行增加有意义的本地验证。
