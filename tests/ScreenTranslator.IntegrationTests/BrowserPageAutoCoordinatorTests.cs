@@ -767,6 +767,57 @@ public sealed class BrowserPageAutoCoordinatorTests
         Assert.Contains(packets, packet => packet.Updates?.Any(update => update.Failed && update.Translation == "") == true);
     }
 
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.BadRequest)]
+    [InlineData(System.Net.HttpStatusCode.OK)]
+    public async Task Unsupported_Fast_Mode_Pauses_Automatic_Requests_And_Changing_The_Setting_Resumes_Them(System.Net.HttpStatusCode status)
+    {
+        var rejected = Signal(); var completed = Signal(); var calls = 0;
+        var settings = Settings with { TranslationProvider = ScreenTranslator.Core.Translation.TranslationProviderKind.OpenAI,
+            OpenAiAuthenticationMode = TranslationAuthenticationMode.ChatGptOAuth, ChatGptFastModeEnabled = true };
+        await using var coordinator = new BrowserPageAutoCoordinator((_, _, _) => Task.FromResult(Assessment),
+            (_, active, _, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                return active.ChatGptFastModeEnabled
+                    ? Task.FromException<BrowserPageTranslationResult>(new ScreenTranslator.Core.Authentication.ChatGptException(
+                        "Fast tier is not supported", "subscription_sharing_unsupported_capability", status, parameter: "service_tier"))
+                    : Task.FromResult(Result);
+            }, (_, _) => Task.FromResult(true), (_, packet, _) =>
+            {
+                if (packet.Finished && packet.Error == "api_configuration") rejected.TrySetResult();
+                else if (packet.Finished && packet.Error is null) completed.TrySetResult();
+                return Task.CompletedTask;
+            });
+        coordinator.Configure(settings, 10);
+        Assert.True(coordinator.TryEnqueue(Candidate())); await Wait(rejected.Task);
+        Assert.False(coordinator.TryEnqueue(Candidate("same-fast-mode", samples: false)));
+        Assert.Equal(1, calls);
+        coordinator.Configure(settings with { ChatGptFastModeEnabled = false }, 11);
+        Assert.True(coordinator.TryEnqueue(Candidate("fast-mode-disabled", generation: 11))); await Wait(completed.Task);
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task Temporary_Fast_Mode_Unavailability_Does_Not_Permanently_Pause_The_Page()
+    {
+        var rejected = Signal(); var completed = Signal(); var calls = 0;
+        await using var coordinator = new BrowserPageAutoCoordinator((_, _, _) => Task.FromResult(Assessment),
+            (_, _, _, _) => Interlocked.Increment(ref calls) == 1
+                ? Task.FromException<BrowserPageTranslationResult>(new ScreenTranslator.Core.Authentication.ChatGptException(
+                    "Temporarily unavailable", "subscription_sharing_usage_unavailable", System.Net.HttpStatusCode.ServiceUnavailable, parameter: "service_tier"))
+                : Task.FromResult(Result), (_, _) => Task.FromResult(true), (_, packet, _) =>
+            {
+                if (packet.Finished && packet.Error is not null) rejected.TrySetResult();
+                else if (packet.Finished) completed.TrySetResult();
+                return Task.CompletedTask;
+            });
+        coordinator.Configure(Settings, 10);
+        Assert.True(coordinator.TryEnqueue(Candidate())); await Wait(rejected.Task);
+        Assert.True(coordinator.TryEnqueue(Candidate("retry-after-temporary-failure", samples: false))); await Wait(completed.Task);
+        Assert.Equal(2, calls);
+    }
+
     [Fact]
     public async Task PageWorkersAreBoundedAndDuplicateInflightSnapshotsAreRejected()
     {
