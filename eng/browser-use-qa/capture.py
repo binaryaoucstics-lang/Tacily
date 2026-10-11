@@ -60,6 +60,12 @@ def semantic_signature(value):
     Do not use sourceNodes here: that is the cumulative, unfiltered audit history.
     Sorting encoded rows preserves duplicate counts without relying on DOM order.
     """
+    if value["pageDecision"] is False:
+        # A live Chinese ticker can change forever while the production decision
+        # remains skipped. Stability here means the decision is stable, not that
+        # the site's authored content stopped changing. Failures/jobs are checked
+        # separately and all source/geometry snapshots remain in the journal.
+        return encode([False, any(p.get("failed") for p in value["predictions"])])
     nodes = sorted(encode([row.get(key) for key in
                           ("sourceText", "displayedText", "tag", "role")])
                    for row in value["nodes"])
@@ -445,6 +451,8 @@ def completion_gate(case, path):
     if any(p.get("sourceEvidence") == "unmatched" or p.get("auditIssue")
            or p.get("sourceId") not in source_ids for p in case.get("predictions", [])):
         reasons.append("prediction_source_evidence_unmatched")
+    if any(p.get("sourceId") not in source_ids for p in case.get("predictionHistory", [])):
+        reasons.append("historical_prediction_source_evidence_unmatched")
     terminals = case.get("terminals", [])
     requests = case.get("requestIds", [])
     by_id = {event["id"]: event for event in terminals}
@@ -509,7 +517,8 @@ class CaseCapture:
             for row in value["predictions"]:
                 prediction_history[row["id"]] = row
             case.update(finalUrl=value["finalUrl"], title=value["title"], viewport=value["viewport"],
-                        sourceNodes=list(source_history.values()), predictions=list(prediction_history.values()),
+                        sourceNodes=list(source_history.values()), predictions=value["predictions"],
+                        predictionHistory=list(prediction_history.values()),
                         productionEligibility=value.get("productionEligibility", []),
                         pageDecision=value["pageDecision"],
                         retractions=[event for event in value["events"] if event["type"] == "retraction"])
@@ -676,6 +685,7 @@ class CaseCapture:
                 stable_for = sampled_at - quiet_since if quiet_since is not None else 0
                 semantic_stable = done and unchanged and stable_for >= self.stable_seconds
                 observation = {"phase": phase, "at": now(), "semanticUnchanged": unchanged,
+                               "stabilityBasis": "page-decision" if value["pageDecision"] is False else "content-and-completion",
                                "semanticStable": semantic_stable, "stableForSeconds": stable_for,
                                "geometryChanged": geometry_changed, "geometryVaried": geometry_changes > 0,
                                "geometryChanges": geometry_changes, "idle": idle, "statusReady": status_ready,

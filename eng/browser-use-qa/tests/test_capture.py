@@ -897,7 +897,8 @@ class WorkflowTests(Fixture):
             self.assertIs(prediction["failed"], False)
         raw_predictions = {p["id"]: p for value in samples for p in value["predictions"]}
         raw_sources = {s["id"]: s for value in samples for s in value["sourceNodes"]}
-        self.assertEqual({p["id"]: p for p in result["predictions"]}, raw_predictions)
+        self.assertEqual({p["id"]: p for p in result["predictionHistory"]}, raw_predictions)
+        self.assertEqual(result["predictions"], samples[-1]["predictions"])
         self.assertEqual({s["id"]: s for s in result["sourceNodes"]}, raw_sources)
         self.assertGreater(len(raw_sources), 13)
         self.assertEqual(result["annotations"], [{"sourceId": s["id"], "needTranslation": "unknown"}
@@ -920,8 +921,7 @@ class WorkflowTests(Fixture):
         self.assertIn("simulation_not_real_case", result["blockedReason"])
 
     def test_skipped_candidates_still_block_for_changed_text_or_unresolved_work(self):
-        checks = [("change", "sourceText"), ("change", "displayedText")]
-        checks += [("unresolved", key) for key in
+        checks = [("unresolved", key) for key in
                    ("jobs", "pending", "scanning", "rpcPending", "status", "pageDecision", "failed")]
         for kind, key in checks:
             with self.subTest(kind=kind, key=key):
@@ -939,6 +939,52 @@ class WorkflowTests(Fixture):
                 self.assertFalse(result["evidenceReady"])
                 self.assertEqual(host.requests, [])
                 self.assertFalse(any(row["semanticStable"] for row in rows if row["kind"] == "stability"))
+
+    def test_skipped_live_ticker_records_content_changes_without_waiting_for_static_content(self):
+        for field in ("sourceText", "displayedText"):
+            clock = [1.0]
+            with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                result, _, host, rows = self.scripted_case(
+                    self.motion_events,
+                    browser=self.moving_browser(skipped=True, skipped_candidates=13, change=field),
+                    run_id="skipped-ticker-" + field, case_timeout=.3, stable_seconds=.01,
+                    site={**SITE, "expectedPageTranslation": False})
+            self.assertEqual(result["errors"], [])
+            self.assertTrue(result["settled"])
+            self.assertEqual([r["action"] for r in host.requests], ["assess"])
+            self.assertTrue(all(s["stabilityBasis"] == "page-decision" for s in result["stability"].values()))
+            observed = [e["value"]["nodes"][0][field] for e in rows if e.get("kind") == "sample"]
+            self.assertGreater(len(set(observed)), 1)
+            self.assertTrue(all(a["needTranslation"] == "unknown" for a in result["annotations"]))
+
+    def test_retired_pending_piece_is_archived_not_counted_as_current_omission(self):
+        for unmatched in (False, True):
+            browser = self.moving_browser(skipped=False)
+            original = browser.qa
+            injected = [False]
+            def qa(method, *args):
+                value = original(method, *args)
+                if method == "sample" and args[0] == "after" and not injected[0]:
+                    injected[0] = True
+                    retired = dict(value["predictions"][0], id="retired-pending", completed=False)
+                    if unmatched:
+                        retired.update(sourceId="never-observed", sourceEvidence="unmatched",
+                                       auditIssue="source_not_independently_visible")
+                    value["predictions"] = [retired]
+                return value
+            browser.qa = qa
+            clock = [1.0]
+            with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                result, _, _, _ = self.scripted_case(self.motion_events, browser=browser,
+                    run_id="retired-pending-" + str(unmatched), case_timeout=.3, stable_seconds=.01)
+            self.assertEqual(result["errors"], [])
+            self.assertTrue(all(p["completed"] for p in result["predictions"]))
+            self.assertTrue(any(p["id"] == "retired-pending" and not p["completed"] for p in result["predictionHistory"]))
+            self.assertNotIn("node_completion_missing", result["blockedReason"])
+            if unmatched:
+                self.assertIn("historical_prediction_source_evidence_unmatched", result["blockedReason"])
 
     def test_negative_decision_does_not_bypass_missing_or_failed_request_terminal(self):
         for name, terminal in (("missing", None), ("failed", {"success": False}), ("failed-count", {"failedCount": 1})):

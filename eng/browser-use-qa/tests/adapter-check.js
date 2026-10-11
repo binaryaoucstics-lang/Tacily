@@ -140,6 +140,7 @@ assertCompleteSources(sample);
 hidden.parentElement.display = "none";
 sample = qa.sample("later-hidden");
 assert.ok(!sample.nodes.some(row => row.id === hiddenPredictionId));
+visibleHistory.currentlyRendered = false;
 assert.deepEqual(sample.sourceNodes.find(row => row.id === hiddenPredictionId), visibleHistory);
 body.childNodes.splice(body.childNodes.indexOf(hidden.parentElement), 1); hidden.isConnected = false;
 sample = qa.sample("later-detached");
@@ -149,6 +150,18 @@ assertCompleteSources(sample);
 // Previously visible source versions and blank-translation geometry remain in history.
 assert.equal(sample.sourceNodes.find(row => row.id === sourceId).sourceText, "Synthetic foreign paragraph.");
 assert.equal(sample.sourceNodes.length, 6);
+// An unchanged proper-name prefix completing is not a translation withdrawal.
+const identityName = text("P", "FOIA");
+const identityRecord = { node: identityName, source: "FOIA", lastWritten: "FOI", groupElement: identityName.parentElement };
+state.records.set(identityName, identityRecord);
+identityName.nodeValue = "FOI"; qa.sample("identity-prefix");
+identityName.nodeValue = identityRecord.lastWritten = "FOIA";
+const identityComplete = qa.sample("identity-complete");
+assert.equal(identityComplete.events.filter(x => x.type === "retraction").length, 3);
+// A genuine differing translation returning to source still counts.
+identityName.nodeValue = identityRecord.lastWritten = "信息自由法"; qa.sample("different-translation");
+identityName.nodeValue = identityRecord.lastWritten = "FOIA";
+assert.equal(qa.sample("real-withdrawal").events.filter(x => x.type === "retraction").length, 4);
 const packet = { type: "pageAutoCandidate", blocks: [{ id: "b", text: record.source }] };
 const promise = environment.send(packet);
 const outgoing = qa.drain(); assert.equal(outgoing[0].message, packet); assert.equal(qa.drain().length, 0);

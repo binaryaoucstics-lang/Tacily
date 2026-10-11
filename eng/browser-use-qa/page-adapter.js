@@ -91,7 +91,10 @@
       if (before?.translated && !intentional && unchanged && (value === source || value.trim() === "")
           && before.value !== value) events.push({ type: "retraction", sourceId: id, sourceText: source,
         previousText: before.value, displayedText: value, sourceUnchanged: true, phase, at: timestamp() });
-      previous.set(id, { value, translated: !intentional && value !== source && !!value.trim(),
+      // An identity translation may stream "FOI" then "FOIA". Growing an
+      // unchanged-source prefix is not a withdrawal of a translated value.
+      const originalPrefix = String(source).trim().startsWith(value.trim());
+      previous.set(id, { value, translated: !intentional && value !== source && !!value.trim() && !originalPrefix,
         rects: layout.rects, inViewport: layout.inViewport });
     }
     const predictions = [];
@@ -106,11 +109,13 @@
         local: block.piece.local === true, fromCache: block.piece.cached === true });
     }
     const eligibleSources = new Set(predictions.map(value => value.sourceId));
-    const productionEligibility = nodes.map(value => ({ sourceId: value.id,
-      eligible: eligibleSources.has(value.id) }));
+    const currentSources = new Set(nodes.map(value => value.id));
+    const productionEligibility = Array.from(sources.values(), value => ({ sourceId: value.id,
+      eligible: eligibleSources.has(value.id), currentlyRendered: currentSources.has(value.id) }));
     return { at: timestamp(), finalUrl: root.location.href, title: document.title,
       viewport: { width: root.innerWidth, height: root.innerHeight, scrollX: root.scrollX, scrollY: root.scrollY },
-      nodes, sourceNodes: Array.from(sources.values()), predictions, productionEligibility, status,
+      nodes, sourceNodes: Array.from(sources.values(), value => ({ ...value,
+        currentlyRendered: currentSources.has(value.id) })), predictions, productionEligibility, status,
       pageDecision: typeof state?.assessed === "boolean" ? state.assessed : null,
       jobs: state?.jobs || 0, pending: state?.pending || 0, scanning: state?.scanning || false,
       rpcPending: pending.size, events: events.slice() };
