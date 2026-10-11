@@ -1,10 +1,15 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using ScreenTranslator.Core.Authentication;
 
 namespace ScreenTranslator.Core.Translation;
 
-public sealed record TranslationModelList(IReadOnlyList<string> Models, bool IsTruncated = false);
+public sealed record TranslationModelChoice(string Id, string DisplayName);
+public sealed record TranslationModelList(IReadOnlyList<string> Models, bool IsTruncated = false)
+{
+    public IReadOnlyList<TranslationModelChoice> Choices { get; init; } = [];
+}
 
 public sealed class ModelCatalogException(string message) : Exception(message);
 
@@ -13,6 +18,38 @@ public sealed class TranslationModelCatalog(HttpClient http)
 {
     public const int MaximumModels = 2048;
     private const int MaximumPageBytes = 2 * 1024 * 1024;
+
+    public async Task<TranslationModelList> ReadChatGptAsync(IChatGptTokenProvider tokens, string accountId, CancellationToken token = default)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token, tokens.GetSessionCancellation(accountId));
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        try
+        {
+            var access = await tokens.GetAccessTokenAsync(http, accountId, deadline.Token).ConfigureAwait(false);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.openai.com/v1/models");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access);
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) throw await ChatGptException.FromResponseAsync(response, deadline.Token).ConfigureAwait(false);
+            using var json = await ChatGptProtocol.ReadJsonAsync(response, deadline.Token).ConfigureAwait(false);
+            if (!json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+                throw new ModelCatalogException("ChatGPT 未返回账户可用模型，请稍后重新读取。");
+            var choices = new List<TranslationModelChoice>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var model in models.EnumerateArray())
+            {
+                var id = ChatGptProtocol.Text(model, "slug");
+                if (ChatGptProtocol.Text(model, "visibility") != "list" || string.IsNullOrWhiteSpace(id)
+                    || id.Length > 200 || id.Any(char.IsControl) || !seen.Add(id)) continue;
+                var name = ChatGptProtocol.Text(model, "display_name");
+                choices.Add(new(id, string.IsNullOrWhiteSpace(name) ? id : name));
+                if (choices.Count == MaximumModels) break;
+            }
+            return new(choices.Select(c => c.Id).ToArray(), models.GetArrayLength() > MaximumModels) { Choices = choices };
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new ModelCatalogException("读取 ChatGPT 模型超时或账户已退出，请重试。"); }
+        catch (HttpRequestException) { throw new ModelCatalogException("无法读取 ChatGPT 模型，请检查网络后重试。"); }
+        catch (JsonException) { throw new ModelCatalogException("ChatGPT 模型列表格式无效，请稍后重试。"); }
+    }
 
     public static Uri Endpoint(TranslationProviderKind provider, string baseUrl)
     {

@@ -47,7 +47,7 @@ public sealed partial class ApplicationController
         var service = sameTransport && previous.Service is not null ? previous.Service : new BrowserPageTranslationService(_ =>
         {
             var provider = TranslationProviderFactory.Create(_apiHttp.GetClient(settings), _secretStore, settings,
-                thinkingOverride: ThinkingLevel.None, timeout: TimeSpan.FromSeconds(settings.TranslationProvider == TranslationProviderKind.DeepSeek ? 45 : 60));
+                thinkingOverride: ThinkingLevel.None, timeout: TimeSpan.FromSeconds(settings.TranslationProvider == TranslationProviderKind.DeepSeek ? 45 : 60), chatGptTokens: _chatGpt);
             DeepSeekRequestDiagnostics.Observe(provider, "page-auto");
             return provider;
         }, cache: _pageTextCache, diagnostic: AppDiagnostics.Write);

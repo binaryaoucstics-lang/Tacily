@@ -34,4 +34,21 @@ public sealed class DpapiSecretStoreTests : IDisposable
             Directory.Delete(_directory, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task ChatGpt_Record_Is_Encrypted_And_Atomically_Replaced_Without_Leftover_Files()
+    {
+        var store = new DpapiSecretStore(_directory);
+        const string original = "{\"access_token\":\"synthetic-access\",\"refresh_token\":\"synthetic-refresh\",\"id_token\":\"synthetic-identity\"}";
+        const string replacement = "{\"access_token\":\"rotated-access\",\"refresh_token\":\"rotated-refresh\"}";
+        await store.SetAsync("chatgpt-oauth", original);
+        Assert.DoesNotContain("synthetic", Encoding.UTF8.GetString(await File.ReadAllBytesAsync(Path.Combine(_directory, "chatgpt-oauth.bin"))));
+        await store.SetAsync("chatgpt-oauth", replacement);
+        Assert.Equal(replacement, await store.GetAsync("chatgpt-oauth"));
+        Assert.Single(Directory.GetFiles(_directory));
+        using var canceled = new CancellationTokenSource(); canceled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.SetAsync("chatgpt-oauth", original, canceled.Token));
+        Assert.Equal(replacement, await store.GetAsync("chatgpt-oauth"));
+        Assert.Single(Directory.GetFiles(_directory));
+    }
 }

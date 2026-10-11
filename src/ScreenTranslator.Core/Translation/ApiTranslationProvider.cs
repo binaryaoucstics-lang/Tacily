@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using ScreenTranslator.Core.Abstractions;
 using ScreenTranslator.Core.Models;
+using ScreenTranslator.Core.Authentication;
 
 namespace ScreenTranslator.Core.Translation;
 
@@ -54,6 +55,9 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
             || options.Model.Any(char.IsControl) || options.Timeout <= TimeSpan.Zero || options.Timeout > TimeSpan.FromMinutes(10))
             throw new TranslationConfigurationException("服务商、模型或超时配置无效。");
         _endpoint = TranslationProviderConfiguration.Endpoint(kind, options.BaseUrl);
+        if (options.UseChatGptPlan && (kind != TranslationProviderKind.OpenAI
+            || _endpoint.AbsoluteUri != "https://api.openai.com/v1/responses" || options.ChatGptTokens is null))
+            throw new TranslationConfigurationException("ChatGPT 额度翻译必须使用官方 OpenAI Responses 接口和登录服务。");
     }
 
     public Task<string> TranslateRawAsync(TranslationRequest request, CancellationToken cancellationToken) =>
@@ -74,13 +78,17 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
         var thinking = TranslationProviderConfiguration.Thinking(_options.Provider, _options.Model, requested);
         var budget = TranslationPromptBuilder.OutputTokenBudget(request!, thinking.EffectiveLevel);
         var stats = new RequestState();
+        var sessionToken = _options.UseChatGptPlan ? _options.ChatGptTokens!.GetSessionCancellation(_options.ChatGptAccountId) : CancellationToken.None;
+        var streaming = progress is not null || _options.UseChatGptPlan;
         try
         {
-            var key = (await _secrets.GetAsync(_options.SecretName ?? TranslationProviderConfiguration.SecretName(_options.Provider), token).ConfigureAwait(false))?.Trim();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, sessionToken);
+            timeout.CancelAfter(_options.Timeout);
+            var key = _options.UseChatGptPlan
+                ? await _options.ChatGptTokens!.GetAccessTokenAsync(_http, _options.ChatGptAccountId, timeout.Token).ConfigureAwait(false)
+                : (await _secrets.GetAsync(_options.SecretName ?? TranslationProviderConfiguration.SecretName(_options.Provider), timeout.Token).ConfigureAwait(false))?.Trim();
             if (string.IsNullOrWhiteSpace(key)) throw new TranslationAuthenticationException($"请在翻译设置中填写并保存 {Label} API Key。");
             if (key.Any(char.IsControl)) throw new TranslationAuthenticationException($"{Label} API Key 含有无效字符。");
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-            timeout.CancelAfter(_options.Timeout);
             using var message = new HttpRequestMessage(HttpMethod.Post, _endpoint);
             if (_options.Provider == TranslationProviderKind.OpenAI)
                 message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -89,13 +97,18 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
                 message.Headers.Add("x-api-key", key);
                 message.Headers.Add("anthropic-version", "2023-06-01");
             }
-            if (progress is not null) message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-            message.Content = JsonContent.Create(CreatePayload(request!, thinking, budget, progress is not null), options: JsonOptions);
+            if (streaming) message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            message.Content = JsonContent.Create(CreatePayload(request!, thinking, budget, streaming), options: JsonOptions);
             using var response = await _http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode) { stats.Outcome = DeepSeekRequestOutcome.HttpError; ThrowHttpError(response.StatusCode); }
+            if (!response.IsSuccessStatusCode)
+            {
+                stats.Outcome = DeepSeekRequestOutcome.HttpError;
+                if (_options.UseChatGptPlan) throw await ChatGptException.FromResponseAsync(response, timeout.Token).ConfigureAwait(false);
+                ThrowHttpError(response.StatusCode);
+            }
             await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
             string answer;
-            if (progress is null)
+            if (!streaming)
             {
                 using var reader = new StreamReader(stream, Encoding.UTF8);
                 var body = await ReadBoundedAsync(reader, timeout.Token).ConfigureAwait(false);
@@ -103,11 +116,17 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
                 answer = _options.Provider == TranslationProviderKind.OpenAI
                     ? ExtractResponses(envelope.RootElement, stats) : ExtractClaude(envelope.RootElement, stats);
             }
-            else answer = await ReadStreamingAsync(stream, request!, progress, stats, timeout.Token).ConfigureAwait(false);
+            else answer = await ReadStreamingAsync(stream, request!, progress, stats, timeout.Token,
+                response.StatusCode, response.Headers.TryGetValues("x-request-id", out var ids)
+                    || response.Headers.TryGetValues("openai-request-id", out ids) ? ids.FirstOrDefault() : null).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(answer)) throw new TranslationFormatException($"{Label} 没有返回译文。");
             stats.Outcome = DeepSeekRequestOutcome.Success;
             return answer;
         }
+        catch (ChatGptException error)
+        { _options.ChatGptTokens?.ReportInferenceFailure(_options.ChatGptAccountId, error); throw; }
+        catch (OperationCanceledException) when (sessionToken.IsCancellationRequested && !token.IsCancellationRequested)
+        { stats.Outcome = DeepSeekRequestOutcome.Cancelled; throw new TranslationAuthenticationException("ChatGPT 已退出登录，请重新登录后继续翻译。"); }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         { stats.Outcome = DeepSeekRequestOutcome.Timeout; throw new TranslationUnavailableException($"{Label} 翻译等待超时，可降低思考等级后重试。"); }
         catch (OperationCanceledException) { stats.Outcome = DeepSeekRequestOutcome.Cancelled; throw; }
@@ -120,7 +139,7 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
         finally
         {
             var metrics = new ApiTranslationRequestMetrics(_options.Provider, _options.Model, requested, thinking.Mode, thinking.Effort,
-                budget, progress is not null, stats.Clock.ElapsedMilliseconds, stats.FirstContentMilliseconds,
+                budget, streaming, stats.Clock.ElapsedMilliseconds, stats.FirstContentMilliseconds,
                 stats.InputTokens, stats.OutputTokens, stats.FinishReason, stats.Outcome)
                 { ReasoningTokens = stats.ReasoningTokens, LastContentMilliseconds = stats.LastContentMilliseconds };
             if (RequestCompleted is { } subscribers)
@@ -142,7 +161,7 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
                     : new { type = "input_text", text = part.Text }).ToArray() } },
                 reasoning = thinking.Mode == "reasoning" ? new { effort = thinking.Effort } : null,
                 text = new { format = new { type = "json_object" } },
-                max_output_tokens = budget, stream, store = false,
+                max_output_tokens = _options.UseChatGptPlan ? (int?)null : budget, stream, store = false,
             };
         // Claude's content images have a native base64 source, not Chat Completions image_url objects.
         return new
@@ -158,8 +177,8 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
         };
     }
 
-    private async Task<string> ReadStreamingAsync(Stream stream, TranslationRequest request, IProgress<TranslationStreamUpdate> progress,
-        RequestState stats, CancellationToken token)
+    private async Task<string> ReadStreamingAsync(Stream stream, TranslationRequest request, IProgress<TranslationStreamUpdate>? progress,
+        RequestState stats, CancellationToken token, HttpStatusCode statusCode, string? requestId)
     {
         using var reader = new StreamReader(stream, Encoding.UTF8);
         var output = new StringBuilder();
@@ -180,7 +199,7 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
             stats.LastContentMilliseconds = stats.Clock.ElapsedMilliseconds;
             var update = TranslationStreamingProgress.Read(request, output.ToString());
             if (lastTranslation != update.Translation || update.ImageSegments is { Count: > 0 })
-            { lastTranslation = update.Translation; progress.Report(update); }
+            { lastTranslation = update.Translation; progress?.Report(update); }
         }
 
         void Dispatch()
@@ -194,7 +213,11 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
             if (eventName is not null && Text(root, "type") is { } jsonType && jsonType != eventName)
                 throw new TranslationFormatException("流式事件名称与内容不一致。");
             if (type == "error" || root.TryGetProperty("error", out var error) && error.ValueKind != JsonValueKind.Null)
-            { stats.Outcome = DeepSeekRequestOutcome.Interrupted; throw new TranslationUnavailableException($"{Label} 中断了流式响应。"); }
+            {
+                stats.Outcome = DeepSeekRequestOutcome.Interrupted;
+                if (_options.UseChatGptPlan) throw ChatGptException.FromError(root, statusCode, requestId);
+                throw new TranslationUnavailableException($"{Label} 中断了流式响应。");
+            }
             if (_options.Provider == TranslationProviderKind.OpenAI)
             {
                 switch (type)
@@ -203,6 +226,12 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
                     case "response.refusal.delta":
                     case "response.refusal.done": throw new TranslationFormatException("模型未提供可用译文。");
                     case "response.failed":
+                        if (_options.UseChatGptPlan)
+                        {
+                            stats.Outcome = DeepSeekRequestOutcome.Interrupted;
+                            throw ChatGptException.FromError(root.GetProperty("response"), statusCode, requestId);
+                        }
+                        goto case "response.incomplete";
                     case "response.incomplete":
                         stats.Outcome = type == "response.incomplete" ? DeepSeekRequestOutcome.Truncated : DeepSeekRequestOutcome.Interrupted;
                         throw new TranslationFormatException($"{Label} 未完整生成译文，请缩小选区或调整思考等级。");

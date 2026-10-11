@@ -2,6 +2,7 @@ using ScreenTranslator.Core.Abstractions;
 using ScreenTranslator.Core.Models;
 using ScreenTranslator.Core.Settings;
 using System.Globalization;
+using ScreenTranslator.Core.Authentication;
 
 namespace ScreenTranslator.Core.Translation;
 
@@ -32,6 +33,9 @@ public static class TranslationProviderConfiguration
         settings.TranslationProviderPresets?.FirstOrDefault(p => p.Id == settings.SelectedTranslationPresetId);
 
     public static TranslationProviderKind Provider(AppSettings settings) => ActivePreset(settings)?.Provider ?? settings.TranslationProvider;
+    public static bool UsesChatGptPlan(AppSettings settings) => Provider(settings) == TranslationProviderKind.OpenAI
+        && (ActivePreset(settings)?.AuthenticationMode ?? settings.OpenAiAuthenticationMode) == TranslationAuthenticationMode.ChatGptOAuth;
+    public static string ChatGptAccountId(AppSettings settings) => ActivePreset(settings)?.ChatGptAccountId ?? settings.ChatGptAccountId;
     public static ApiNetworkOptions Network(AppSettings settings) => ActivePreset(settings)?.Network ?? settings.ApiNetwork ?? new();
     public static string SecretName(AppSettings settings) => ActivePreset(settings) is { } preset
         ? PresetSecretName(preset.Id) : SecretName(settings.TranslationProvider);
@@ -51,7 +55,7 @@ public static class TranslationProviderConfiguration
     { TranslationProviderKind.OpenAI => settings.OpenAiModel, TranslationProviderKind.Claude => settings.ClaudeModel,
         TranslationProviderKind.ChatCompletions => settings.ChatCompletionsModel, _ => settings.DeepSeekModel });
 
-    public static string BaseUrl(AppSettings settings) => ActivePreset(settings)?.BaseUrl ?? (settings.TranslationProvider switch
+    public static string BaseUrl(AppSettings settings) => UsesChatGptPlan(settings) ? DefaultOpenAiBaseUrl : ActivePreset(settings)?.BaseUrl ?? (settings.TranslationProvider switch
     { TranslationProviderKind.OpenAI => settings.OpenAiBaseUrl, TranslationProviderKind.Claude => settings.ClaudeBaseUrl,
         TranslationProviderKind.ChatCompletions => settings.ChatCompletionsBaseUrl, _ => settings.DeepSeekBaseUrl });
 
@@ -135,6 +139,7 @@ public static class TranslationProviderConfiguration
     public static string TransportIdentity(AppSettings settings)
     {
         var identity = string.Join("\n", Provider(settings), Model(settings), BaseUrl(settings));
+        if (UsesChatGptPlan(settings)) identity += "\nchatgpt:" + ChatGptAccountId(settings);
         return ActivePreset(settings) is { } preset ? identity + "\npreset:" + preset.Id : identity;
     }
 
@@ -153,12 +158,16 @@ public sealed record TranslationApiOptions
     public ThinkingLevel ThinkingLevel { get; init; }
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(90);
     public bool UseBriefTranslationGuidance { get; init; } = true;
+    public bool UseChatGptPlan { get; init; }
+    public string ChatGptAccountId { get; init; } = "";
+    public IChatGptTokenProvider? ChatGptTokens { get; init; }
 }
 
 public static class TranslationProviderFactory
 {
     public static ITranslationProvider Create(HttpClient http, ISecretStore secrets, AppSettings settings,
-        ThinkingLevel? thinkingOverride = null, TimeSpan? timeout = null, bool allowLowWaitRetry = false)
+        ThinkingLevel? thinkingOverride = null, TimeSpan? timeout = null, bool allowLowWaitRetry = false,
+        IChatGptTokenProvider? chatGptTokens = null)
     {
         var kind = TranslationProviderConfiguration.Provider(settings);
         var thinking = thinkingOverride ?? TranslationProviderConfiguration.ActivePreset(settings)?.ThinkingLevel ?? settings.ThinkingLevel;
@@ -182,6 +191,8 @@ public static class TranslationProviderFactory
             Provider = kind, Model = TranslationProviderConfiguration.Model(settings), SecretName = TranslationProviderConfiguration.SecretName(settings),
             BaseUrl = TranslationProviderConfiguration.BaseUrl(settings), ThinkingLevel = thinking, Timeout = duration,
             UseBriefTranslationGuidance = settings.BriefThinkingGuidanceEnabled,
+            UseChatGptPlan = TranslationProviderConfiguration.UsesChatGptPlan(settings),
+            ChatGptAccountId = TranslationProviderConfiguration.ChatGptAccountId(settings), ChatGptTokens = chatGptTokens,
         };
         return kind == TranslationProviderKind.OpenAI
             ? new OpenAiResponsesTranslationProvider(http, secrets, options)

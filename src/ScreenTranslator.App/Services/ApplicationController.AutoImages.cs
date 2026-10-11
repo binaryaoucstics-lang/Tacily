@@ -33,7 +33,7 @@ public sealed partial class ApplicationController
     private void InitializeAutoImages()
     {
         _imageDecisionMemo = new(persistentCache: _pageTextCache);
-        _autoImageTranslator = new(_imageCache, _secretStore, localJudge: _autoImageJudge, apiHttp: _apiHttp);
+        _autoImageTranslator = new(_imageCache, _secretStore, localJudge: _autoImageJudge, apiHttp: _apiHttp, chatGptTokens: _chatGpt);
         _autoImageQueue = new(AssessAutoImageAsync, ReplyAutoImageAsync, TranslateAutoImageAsync,
             error =>
             {

@@ -7,6 +7,9 @@ https://github.com/NiniTakukon/ScreenTranslator
 
 Microsoft .NET 8 Windows Desktop、WPF-UI、CommunityToolkit.Mvvm 及其依赖：
 发行包 licenses 内提供可获得的许可；对应 NuGet 包的许可和通知为准。
+Microsoft.IdentityModel.JsonWebTokens / Tokens / Logging / Abstractions 8.14.0（MIT）：
+https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
+用于验证 ChatGPT OAuth 身份令牌，许可全文见 licenses/Microsoft-IdentityModel-LICENSE.txt。
 RapidOcrNet（Apache-2.0）：https://github.com/BobLd/RapidOcrNet
 PaddleOCR / RapidAI PP-OCRv5 检测、识读模型和字典（Apache-2.0）：
 https://github.com/PaddlePaddle/PaddleOCR

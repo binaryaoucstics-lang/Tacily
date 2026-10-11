@@ -22,7 +22,7 @@ public enum ThemePreference
 
 public sealed record AppSettings
 {
-    public const int CurrentVersion = 14;
+    public const int CurrentVersion = 15;
 
     public int Version { get; init; } = CurrentVersion;
 
@@ -44,6 +44,8 @@ public sealed record AppSettings
     public string ChatCompletionsBaseUrl { get; init; } = TranslationProviderConfiguration.DefaultOpenAiBaseUrl;
     public string OpenAiModel { get; init; } = TranslationProviderConfiguration.DefaultOpenAiModel;
     public string OpenAiBaseUrl { get; init; } = TranslationProviderConfiguration.DefaultOpenAiBaseUrl;
+    public TranslationAuthenticationMode OpenAiAuthenticationMode { get; init; }
+    public string ChatGptAccountId { get; init; } = "";
     public string ClaudeModel { get; init; } = TranslationProviderConfiguration.DefaultClaudeModel;
     public string ClaudeBaseUrl { get; init; } = TranslationProviderConfiguration.DefaultClaudeBaseUrl;
 
@@ -112,6 +114,9 @@ public sealed record AppSettings
             { Name = string.IsNullOrWhiteSpace(p.Name) ? "自定义服务商" : p.Name.Trim(),
               Model = p.Model?.Trim() ?? "", BaseUrl = p.BaseUrl?.Trim() ?? "",
               ThinkingLevel = Enum.IsDefined(p.ThinkingLevel) ? p.ThinkingLevel : ThinkingLevel.None,
+              AuthenticationMode = p.Provider == TranslationProviderKind.OpenAI && Enum.IsDefined(p.AuthenticationMode)
+                  ? p.AuthenticationMode : TranslationAuthenticationMode.ApiKey,
+              ChatGptAccountId = Guid.TryParseExact(p.ChatGptAccountId, "N", out _) ? p.ChatGptAccountId : "",
               Network = (p.Network ?? new()).Normalize() }).ToImmutableList();
         var white = BrowserSitePolicy.NormalizeList(BrowserTranslationWhitelist);
         var black = BrowserSitePolicy.NormalizeList(BrowserTranslationBlacklist);
@@ -131,6 +136,8 @@ public sealed record AppSettings
             TranslationProvider = Enum.IsDefined(TranslationProvider) ? TranslationProvider : TranslationProviderKind.DeepSeek,
             OpenAiModel = string.IsNullOrWhiteSpace(OpenAiModel) ? TranslationProviderConfiguration.DefaultOpenAiModel : OpenAiModel.Trim(),
             OpenAiBaseUrl = string.IsNullOrWhiteSpace(OpenAiBaseUrl) ? TranslationProviderConfiguration.DefaultOpenAiBaseUrl : OpenAiBaseUrl.Trim(),
+            OpenAiAuthenticationMode = Enum.IsDefined(OpenAiAuthenticationMode) ? OpenAiAuthenticationMode : TranslationAuthenticationMode.ApiKey,
+            ChatGptAccountId = Guid.TryParseExact(ChatGptAccountId, "N", out _) ? ChatGptAccountId : "",
             ClaudeModel = string.IsNullOrWhiteSpace(ClaudeModel) ? TranslationProviderConfiguration.DefaultClaudeModel : ClaudeModel.Trim(),
             ClaudeBaseUrl = string.IsNullOrWhiteSpace(ClaudeBaseUrl) ? TranslationProviderConfiguration.DefaultClaudeBaseUrl : ClaudeBaseUrl.Trim(),
             ThinkingLevel = Version < 7 || !Enum.IsDefined(ThinkingLevel) ? ThinkingLevel.None : ThinkingLevel,

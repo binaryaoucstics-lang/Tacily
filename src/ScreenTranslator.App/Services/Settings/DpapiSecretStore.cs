@@ -37,11 +37,12 @@ public sealed class DpapiSecretStore : ISecretStore
                 encrypted,
                 optionalEntropy: null,
                 DataProtectionScope.CurrentUser);
-            return Encoding.UTF8.GetString(clearText);
+            try { return Encoding.UTF8.GetString(clearText); }
+            finally { CryptographicOperations.ZeroMemory(clearText); }
         }
         catch (Exception exception) when (exception is CryptographicException or IOException or UnauthorizedAccessException)
         {
-            throw new SecretStoreException("无法读取已保存的 API Key。", exception);
+            throw new SecretStoreException("无法读取已保存的凭据。", exception);
         }
     }
 
@@ -50,19 +51,26 @@ public sealed class DpapiSecretStore : ISecretStore
         ArgumentException.ThrowIfNullOrWhiteSpace(value);
         Directory.CreateDirectory(_secretDirectory);
 
+        var clearText = Encoding.UTF8.GetBytes(value);
+        var path = GetSecretPath(key);
+        var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            var clearText = Encoding.UTF8.GetBytes(value);
             var encrypted = ProtectedData.Protect(
                 clearText,
                 optionalEntropy: null,
                 DataProtectionScope.CurrentUser);
-            await File.WriteAllBytesAsync(GetSecretPath(key), encrypted, cancellationToken);
-            CryptographicOperations.ZeroMemory(clearText);
+            await File.WriteAllBytesAsync(temporaryPath, encrypted, cancellationToken);
+            File.Move(temporaryPath, path, overwrite: true);
         }
         catch (Exception exception) when (exception is CryptographicException or IOException or UnauthorizedAccessException)
         {
-            throw new SecretStoreException("无法安全保存 API Key。", exception);
+            throw new SecretStoreException("无法安全保存凭据。", exception);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(clearText);
+            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
         }
     }
 

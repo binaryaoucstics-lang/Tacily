@@ -16,6 +16,7 @@ using ScreenTranslator.App.Services.Ocr;
 using ScreenTranslator.App.Services.Overlays;
 using SkiaSharp;
 using ScreenTranslator.Core.Translation;
+using ScreenTranslator.Core.Authentication;
 using ScreenTranslator.Core.Settings;
 using ScreenTranslator.Core.Browser;
 using ScreenTranslator.App.Services.Browser;
@@ -44,6 +45,7 @@ public static class InstallationCheck
         settingsPage.UpdateLayout();
         var folder = Path.GetDirectoryName(Path.GetFullPath(outputPath))!;
         Directory.CreateDirectory(folder);
+        var chatGptOAuthControlsVerified = await VerifyChatGptControlsAsync(folder);
         var generalModel = new GeneralSettingsViewModel();
         var automaticDefaultsOff = !generalModel.BrowserAutoImageTranslationEnabled;
         var automaticPageDefaultsOff = !generalModel.BrowserAutoPageTranslationEnabled;
@@ -282,7 +284,7 @@ public static class InstallationCheck
         }
         var report = new
         {
-            success = alphaOpaque && detected.Count >= 3 && placementVerified && rendererVerified && fontVerified && automaticModelVerified && automaticImageSettingsVerified && automaticPageSettingsVerified && websiteRuleControlsVerified && pageRulesVerified && translationProviderControlsVerified && modelListControlsVerified && cacheControlsVerified && motionControlsVerified,
+            success = alphaOpaque && detected.Count >= 3 && placementVerified && rendererVerified && fontVerified && automaticModelVerified && automaticImageSettingsVerified && automaticPageSettingsVerified && websiteRuleControlsVerified && pageRulesVerified && translationProviderControlsVerified && modelListControlsVerified && cacheControlsVerified && motionControlsVerified && chatGptOAuthControlsVerified,
             product = "Global AI Translator",
             version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(),
             runtime = Environment.Version.ToString(),
@@ -305,6 +307,7 @@ public static class InstallationCheck
             translationMotionSettingsControlsVerified = motionControlsVerified,
             translationProviderControlsVerified,
             modelListControlsVerified,
+            chatGptOAuthControlsVerified,
             pageCacheControlsVerified = cacheControlsVerified,
             pageCacheMegabytes = generalModel.BrowserPageCacheMegabytes,
             pageCacheDefaultEnabled = generalModel.BrowserPageCacheEnabled,
@@ -333,8 +336,46 @@ public static class InstallationCheck
             apiBenchmarkControlsVerified = benchmarkControlsVerified,
         };
         await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
-        if (!alphaOpaque || detected.Count < 3 || !placementVerified || !rendererVerified || !fontVerified || !automaticModelVerified || !automaticImageSettingsVerified || !automaticPageSettingsVerified || !websiteRuleControlsVerified || !pageRulesVerified || !translationProviderControlsVerified || !modelListControlsVerified || !cacheControlsVerified || !networkControlsVerified || !benchmarkControlsVerified)
+        if (!alphaOpaque || detected.Count < 3 || !placementVerified || !rendererVerified || !fontVerified || !automaticModelVerified || !automaticImageSettingsVerified || !automaticPageSettingsVerified || !websiteRuleControlsVerified || !pageRulesVerified || !translationProviderControlsVerified || !modelListControlsVerified || !cacheControlsVerified || !networkControlsVerified || !benchmarkControlsVerified || !chatGptOAuthControlsVerified)
             throw new InvalidOperationException("Runtime, local position model, or in-place rendering check failed.");
+    }
+
+    private static async Task<bool> VerifyChatGptControlsAsync(string folder)
+    {
+        var vm = new TranslationSettingsViewModel { SelectedProvider = "OpenAI" };
+        var page = new TranslationPage(vm);
+        Render(page, 760, 900, Path.Combine(folder, "chatgpt-api-key-preview.png"));
+        var authentication = (System.Windows.Controls.ComboBox)page.FindName("OpenAiAuthenticationCombo");
+        authentication.SelectedItem = "ChatGPT 登录（使用订阅额度）";
+        page.UpdateLayout();
+        var verified = vm.UsesChatGptPlan && ((FrameworkElement)page.FindName("ChatGptAccountCard")).Visibility == Visibility.Visible
+            && ((FrameworkElement)page.FindName("ApiKeyCard")).Visibility == Visibility.Collapsed && !vm.TestConnectionCommand.CanExecute(null);
+        var account = new ChatGptAccount(Guid.NewGuid().ToString("N"), "离线演示账户 · 仅用于界面检查", true, true, false);
+        vm.ChatGptAccountsLoader = _ => Task.FromResult<IReadOnlyList<ChatGptAccount>>([account]);
+        vm.ChatGptSigner = (_, _) => Task.FromResult(new ChatGptSignInResult(account, false));
+        vm.ModelListLoader = (_, _) => Task.FromResult(new TranslationModelList(["offline-model-a", "offline-model-b"])
+        { Choices = [new("offline-model-a", "演示模型 A"), new("offline-model-b", "演示模型 B")] });
+        await vm.SignInChatGptCommand.ExecuteAsync(null);
+        page.UpdateLayout();
+        var models = (System.Windows.Controls.ComboBox)page.FindName("ChatGptModelCombo");
+        verified &= models.Visibility == Visibility.Visible && models.Items.Count == 2 && (string?)models.SelectedValue == "offline-model-a";
+        models.SelectedValue = "offline-model-b";
+        page.UpdateLayout();
+        verified &= vm.SelectedModel == "offline-model-b" && models.SelectedItem is TranslationModelChoice { DisplayName: "演示模型 B" };
+        Render(page, 760, 2450, Path.Combine(folder, "chatgpt-oauth-settings-preview.png"));
+        Render((FrameworkElement)page.FindName("ChatGptAccountCard"), 680, 340, Path.Combine(folder, "chatgpt-oauth-card-preview.png"));
+        var usageOpened = false;
+        vm.ChatGptUsageOpener = () => usageOpened = true;
+        ((Wpf.Ui.Controls.Button)page.FindName("ChatGptManageUsageButton")).Command.Execute(null);
+        verified &= usageOpened;
+        account = account with { UsagePaused = true };
+        await vm.RefreshChatGptAccountsAsync(); page.UpdateLayout();
+        verified &= ((FrameworkElement)page.FindName("ChatGptResumeUsageButton")).Visibility == Visibility.Visible && !vm.TestConnectionCommand.CanExecute(null);
+        Render((FrameworkElement)page.FindName("ChatGptAccountCard"), 680, 340, Path.Combine(folder, "chatgpt-usage-limit-preview.png"));
+        account = account with { UsagePaused = false, CanUsePlan = false };
+        await vm.RefreshChatGptAccountsAsync(); page.UpdateLayout();
+        verified &= ((FrameworkElement)page.FindName("ChatGptAuthorizePlanButton")).Visibility == Visibility.Visible && !vm.CanUseChatGptPlan;
+        return verified;
     }
 
     private static void Render(FrameworkElement control, int width, int height, string path)

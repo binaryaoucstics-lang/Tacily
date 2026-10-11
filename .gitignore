@@ -26,6 +26,8 @@ outputs/
 **/settings.json
 **/native-host.json
 **/credentials.json
+**/chatgpt-oauth.bin
+**/chatgpt-oauth.bin.*.tmp
 **/*api-key*.bin
 **/*-key.bin
 *.pem

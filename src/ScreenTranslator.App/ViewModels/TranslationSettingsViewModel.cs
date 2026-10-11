@@ -29,7 +29,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         get => _selectedPreset;
         set
         {
-            if (ReferenceEquals(value, _selectedPreset) || IsSaving) return;
+            if (ReferenceEquals(value, _selectedPreset) || IsSaving || IsChatGptBusy) return;
             if (_selectedPreset is null)
             {
                 _providerDrafts[ProviderKind] = (SelectedModel, BaseUrl);
@@ -37,6 +37,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                 _defaultThinking = ThinkingLevel;
                 _defaultBounded = BoundedLowThinkingEnabled;
                 _defaultNetwork = CollectNetwork();
+                _defaultOpenAiAuthenticationMode = _authenticationMode;
+                _defaultChatGptAccountId = _chatGptAccountId;
             }
             CapturePreset();
             PendingCopySecretName = null;
@@ -54,6 +56,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                     { ScreenTranslator.Core.Models.ThinkingLevel.None => "关闭", ScreenTranslator.Core.Models.ThinkingLevel.High => "高", ScreenTranslator.Core.Models.ThinkingLevel.Max => "最高", _ => "低" };
                     BoundedLowThinkingEnabled = config.BoundedLowThinkingEnabled;
                     ApplyNetwork(config.Network);
+                    _authenticationMode = config.AuthenticationMode;
+                    _chatGptAccountId = config.ChatGptAccountId;
                 }
                 else
                 {
@@ -62,6 +66,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                     SelectedModel = draft.Model; BaseUrl = draft.Url;
                     ThinkingLevel = _defaultThinking; BoundedLowThinkingEnabled = _defaultBounded;
                     ApplyNetwork(_defaultNetwork);
+                    _authenticationMode = _defaultOpenAiAuthenticationMode;
+                    _chatGptAccountId = _defaultChatGptAccountId;
                 }
                 LoadProviderKeyMask();
                 InvalidateConnection();
@@ -70,6 +76,9 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             OnPropertyChanged();
             OnPropertyChanged(nameof(PresetName)); OnPropertyChanged(nameof(CanEditPreset));
             OnPropertyChanged(nameof(ActiveSecretName));
+            OnPropertyChanged(nameof(SelectedAuthentication)); OnPropertyChanged(nameof(SelectedChatGptAccount));
+            OnPropertyChanged(nameof(ChatGptAccountId)); NotifyChatGptState();
+            InvalidateModelList(); QueueChatGptModelRefresh();
         }
     }
     public string PresetName
@@ -77,7 +86,11 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         get => SelectedPreset?.Name ?? "";
         set { if (SelectedPreset is not null && SelectedPreset.Name != value) { SelectedPreset.Name = value; OnPropertyChanged(); } }
     }
-    public bool CanEditPreset => SelectedPreset is not null && !IsSaving;
+    public string PresetDescription => UsesChatGptPlan
+        ? "预设分别保存模型、账户、思考等级和网络方式。复制会引用同一账户连接，可再选择其他账户。"
+        : "预设分别保存地址、模型、思考等级、网络方式和加密密钥。新增后填写连接信息并点击保存；复制会一并复制已保存的密钥。";
+    public string ModelSelectionDescription => UsesChatGptPlan ? "选择当前账户可用的模型" : "可选择预设或输入完整模型 ID";
+    public bool CanEditPreset => SelectedPreset is not null && CanEditProvider;
     public string ActiveSecretName => SelectedPreset is { } preset
         ? TranslationProviderConfiguration.PresetSecretName(preset.Id) : TranslationProviderConfiguration.SecretName(ProviderKind);
     public string? PendingCopySecretName { get; private set; }
@@ -94,12 +107,14 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                 "高" => ScreenTranslator.Core.Models.ThinkingLevel.High, "最高" => ScreenTranslator.Core.Models.ThinkingLevel.Max,
                 _ => ScreenTranslator.Core.Models.ThinkingLevel.Low }, BoundedLowThinkingEnabled = BoundedLowThinkingEnabled,
             Network = CollectNetwork(),
+            AuthenticationMode = UsesChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
+            ChatGptAccountId = _chatGptAccountId,
         };
     }
 
     private void CreatePreset(bool copy)
     {
-        if (IsSaving) return;
+        if (!CanEditProvider) return;
         var sourceSecret = ActiveSecretName;
         var draftKey = ApiKey;
         var config = new TranslationProviderPreset
@@ -112,11 +127,13 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                 _ => ScreenTranslator.Core.Models.ThinkingLevel.None }) : ScreenTranslator.Core.Models.ThinkingLevel.None,
             BoundedLowThinkingEnabled = BoundedLowThinkingEnabled,
             Network = copy ? CollectNetwork() : new(),
+            AuthenticationMode = copy && UsesChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
+            ChatGptAccountId = copy ? _chatGptAccountId : "",
         };
         var preset = new ProviderPresetViewModel(config);
         Presets.Add(preset);
         SelectedPreset = preset;
-        PendingCopySecretName = copy ? sourceSecret : null;
+        PendingCopySecretName = copy && UsesApiKey ? sourceSecret : null;
         if (copy && draftKey.Length > 0) ApiKey = draftKey;
         if (copy) SaveRequested?.Invoke(this, EventArgs.Empty);
     }
@@ -169,6 +186,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                 OnPropertyChanged(nameof(ThinkingDescription));
                 OnPropertyChanged(nameof(SelectedProtocol));
                 OnPropertyChanged(nameof(ActiveSecretName));
+                NotifyChatGptState();
             }
             finally { IsSwitchingProvider = _applyingPreset; }
             OnPropertyChanged();
@@ -176,14 +194,14 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
     }
     public string ProviderDescription => ProviderKind switch
     {
-        TranslationProviderKind.OpenAI => "Responses API · 文字、图片与流式输出",
+        TranslationProviderKind.OpenAI => UsesChatGptPlan ? "ChatGPT 账户额度 · 输入支持由所选模型决定" : "Responses API · 文字、图片与流式输出",
         TranslationProviderKind.Claude => "Messages API · 文字、图片与流式输出",
         TranslationProviderKind.ChatCompletions => "Chat Completions · 自定义服务商和本机服务；模型需支持对应输入",
         _ => "DeepSeek V4.1 Flash · 支持图片",
     };
-    public bool CanEditEndpoint => ProviderKind != TranslationProviderKind.DeepSeek && !IsSaving;
-    public bool CanEditModel => ProviderKind != TranslationProviderKind.DeepSeek && !IsSaving;
-    public bool CanEditProvider => !IsSaving;
+    public bool CanEditEndpoint => ProviderKind != TranslationProviderKind.DeepSeek && CanEditProvider && UsesApiKey;
+    public bool CanEditModel => ProviderKind != TranslationProviderKind.DeepSeek && CanEditProvider && (!UsesChatGptPlan || CanUseChatGptPlan);
+    public bool CanEditProvider => !IsSaving && !IsChatGptBusy;
     public bool IsSaving => _isSaving;
     public void SetSaving(bool saving)
     {
@@ -195,6 +213,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         LoadModelsCommand.NotifyCanExecuteChanged();
         ReadClashNodesCommand.NotifyCanExecuteChanged();
         NotifyProbeCommands();
+        NotifyChatGptState();
         if (saving) InvalidateClashDiscovery();
     }
     public string ThinkingDescription => TranslationProviderConfiguration.ThinkingDescription(ProviderKind, SelectedModel, _thinkingLevel switch
@@ -207,6 +226,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         _providerDrafts[TranslationProviderKind.OpenAI] = (settings.OpenAiModel, settings.OpenAiBaseUrl);
         _providerDrafts[TranslationProviderKind.Claude] = (settings.ClaudeModel, settings.ClaudeBaseUrl);
         _providerDrafts[TranslationProviderKind.ChatCompletions] = (settings.ChatCompletionsModel, settings.ChatCompletionsBaseUrl);
+        _authenticationMode = _defaultOpenAiAuthenticationMode = settings.OpenAiAuthenticationMode;
+        _chatGptAccountId = _defaultChatGptAccountId = settings.ChatGptAccountId;
         _selectedPreset = null;
         _defaultNetwork = settings.ApiNetwork;
         ApplyNetwork(_defaultNetwork);
@@ -226,6 +247,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         BaseUrl = selected.Url;
         SelectedPreset = Presets.FirstOrDefault(p => p.Id == settings.SelectedTranslationPresetId);
         OnPropertyChanged(nameof(SelectedPreset)); OnPropertyChanged(nameof(PresetName)); OnPropertyChanged(nameof(CanEditPreset));
+        OnPropertyChanged(nameof(SelectedAuthentication)); OnPropertyChanged(nameof(SelectedChatGptAccount)); NotifyChatGptState();
     }
 
     public AppSettings CollectProviderSettings(AppSettings settings)
@@ -234,6 +256,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         {
             _providerDrafts[ProviderKind] = (SelectedModel.Trim(), BaseUrl.Trim());
             _defaultNetwork = CollectNetwork();
+            _defaultOpenAiAuthenticationMode = _authenticationMode;
+            _defaultChatGptAccountId = _chatGptAccountId;
         }
         CapturePreset();
         return settings with
@@ -249,6 +273,7 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
                 ? settings.TranslationProviderPresets : Presets.Select(p => p.Config).ToImmutableList(),
             SelectedTranslationPresetId = SelectedPreset?.Id ?? "",
             ApiNetwork = _defaultNetwork,
+            OpenAiAuthenticationMode = _defaultOpenAiAuthenticationMode, ChatGptAccountId = _defaultChatGptAccountId,
         };
     }
 
@@ -276,14 +301,15 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         InitializeNetwork();
         TestConnectionCommand = new AsyncRelayCommand(TestConnectionAsync, CanTestConnection);
         InitializeBenchmark();
-        SaveCommand = new RelayCommand(() => SaveRequested?.Invoke(this, EventArgs.Empty), () => !IsSaving);
+        SaveCommand = new RelayCommand(() => SaveRequested?.Invoke(this, EventArgs.Empty), () => CanEditProvider);
         BeginApiKeyEditCommand = new RelayCommand(BeginApiKeyEdit);
         CancelApiKeyEditCommand = new RelayCommand(CancelApiKeyEdit);
+        InitializeChatGpt();
         AddPresetCommand = new RelayCommand(() => CreatePreset(false));
         CopyPresetCommand = new RelayCommand(() => CreatePreset(true));
         DeletePresetCommand = new RelayCommand(() =>
         {
-            if (IsSaving || SelectedPreset is not { } preset) return;
+                if (!CanEditProvider || SelectedPreset is not { } preset) return;
             SelectedPreset = null;
             Presets.Remove(preset);
             var secretName = TranslationProviderConfiguration.PresetSecretName(preset.Id);
@@ -402,8 +428,9 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
         set
         {
             if (_updatingModels) return;
+            value ??= "";
             if (SetProperty(ref _selectedModel, value))
-            { InvalidateConnection(); OnPropertyChanged(nameof(ThinkingDescription)); }
+            { InvalidateConnection(); OnPropertyChanged(nameof(ThinkingDescription)); TestConnectionCommand.NotifyCanExecuteChanged(); }
         }
     }
 
@@ -513,8 +540,8 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
     }
 
     private bool CanTestConnection() =>
-        !IsTesting &&
-        (HasSavedApiKey || !string.IsNullOrWhiteSpace(ApiKey));
+        !IsTesting && !IsChatGptBusy &&
+        (UsesChatGptPlan ? CanUseChatGptPlan && !string.IsNullOrWhiteSpace(SelectedModel) : HasSavedApiKey || !string.IsNullOrWhiteSpace(ApiKey));
 
     public void BeginApiKeyEdit()
     {
@@ -555,11 +582,12 @@ public sealed partial class TranslationSettingsViewModel : ObservableObject
             if (revision == _connectionRevision && IsTesting && !string.IsNullOrWhiteSpace(update.Translation))
                 ConnectionTranslation = update.Translation;
         });
-        var request = new TranslationConnectionTestRequest(ApiKey, SelectedModel, BaseUrl, provider, ActiveSecretName, CollectNetwork())
+        var request = new TranslationConnectionTestRequest(ApiKey, SelectedModel, UsesChatGptPlan ? TranslationProviderConfiguration.DefaultOpenAiBaseUrl : BaseUrl, provider, ActiveSecretName, CollectNetwork())
         {
             ThinkingLevel = ThinkingLevel switch { "低" => ScreenTranslator.Core.Models.ThinkingLevel.Low,
                 "高" => ScreenTranslator.Core.Models.ThinkingLevel.High, "最高" => ScreenTranslator.Core.Models.ThinkingLevel.Max,
                 _ => ScreenTranslator.Core.Models.ThinkingLevel.None }, Progress = stream,
+            UseChatGptPlan = UsesChatGptPlan, ChatGptAccountId = _chatGptAccountId,
         };
         ConnectionStatus = $"正在通过 {TranslationProviderConfiguration.Label(provider)} 翻译测试句…";
 
@@ -608,6 +636,8 @@ public sealed record TranslationConnectionTestRequest(
 {
     public ScreenTranslator.Core.Models.ThinkingLevel ThinkingLevel { get; init; }
     public IProgress<ScreenTranslator.Core.Models.TranslationStreamUpdate>? Progress { get; init; }
+    public bool UseChatGptPlan { get; init; }
+    public string ChatGptAccountId { get; init; } = "";
     public override string ToString() => $"Connection test ({Provider})";
 }
 

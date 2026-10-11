@@ -75,6 +75,9 @@ public sealed partial class ApplicationController : IDisposable
         _application = application;
         _settingsStore = new JsonSettingsStore();
         _secretStore = new DpapiSecretStore();
+        _chatGpt = new(_secretStore, uri => Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true }),
+            typeof(App).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyProductAttribute), false)
+                .OfType<System.Reflection.AssemblyProductAttribute>().FirstOrDefault()?.Product ?? "全局 AI 翻译器");
         _screenCapture = new FallbackScreenCaptureService();
         _ocrEngine = new WindowsOcrEngine();
         _hotkey = new GlobalHotkeyService();
@@ -159,6 +162,7 @@ public sealed partial class ApplicationController : IDisposable
                     ? $"准备就绪 · {HotkeySettings.HotkeyText}"
                     : "准备就绪 · 快捷键已暂停";
         await LoadSavedApiKeyPreviewAsync();
+        await InitializeChatGptAsync();
         _ = WarmupVisionAsync();
     }
 
@@ -419,7 +423,7 @@ public sealed partial class ApplicationController : IDisposable
         MainWindow.StatusText = $"正在调用 {TranslationProviderConfiguration.Label(settings.TranslationProvider)} 翻译…";
         TranslationResultViewModel? pending = floating;
         var apiProvider = TranslationProviderFactory.Create(_apiHttp.GetClient(settings), _secretStore, settings,
-            allowLowWaitRetry: work.ImagePng is not null);
+            allowLowWaitRetry: work.ImagePng is not null, chatGptTokens: _chatGpt);
         DeepSeekRequestDiagnostics.Observe(apiProvider, "translation");
         var provider = new ResponsiveThinkingTranslationProvider(apiProvider, settings.ThinkingLevel,
             settings.TranslationProvider == TranslationProviderKind.DeepSeek && settings.BoundedLowThinkingEnabled);
@@ -542,7 +546,9 @@ public sealed partial class ApplicationController : IDisposable
             pending.IsBusy = false;
             pending.TranslatedText = string.Empty;
             pending.ErrorMessage = exception.Message;
-            pending.StatusText = exception is TranslationAuthenticationException ? "未设置 API Key · 点击查看" : "翻译失败 · 点击查看";
+            pending.StatusText = exception is ScreenTranslator.Core.Authentication.ChatGptException { IsUsageLimit: true } ? "ChatGPT 额度达到限制 · 点击查看"
+                : TranslationProviderConfiguration.UsesChatGptPlan(settings) && exception is TranslationAuthenticationException
+                    ? "ChatGPT 已退出登录 · 点击查看" : exception is TranslationAuthenticationException ? "未设置 API Key · 点击查看" : "翻译失败 · 点击查看";
             _sessions.TryTransition(session.Id, TranslationSessionState.Failed);
             MainWindow.StatusText = "翻译失败，可在浮窗中重试";
             return;
@@ -992,11 +998,11 @@ public sealed partial class ApplicationController : IDisposable
             return new ConnectionTestResult(false, error.Message);
         }
 
-        var apiKey = await ApiKeyResolver.ResolveAsync(
+        var apiKey = request.UseChatGptPlan ? null : await ApiKeyResolver.ResolveAsync(
             request.ApiKey,
             _secretStore,
             cancellationToken, request.Provider, request.SecretName);
-        if (string.IsNullOrWhiteSpace(apiKey))
+        if (!request.UseChatGptPlan && string.IsNullOrWhiteSpace(apiKey))
         {
             return new ConnectionTestResult(
                 false,
@@ -1011,10 +1017,12 @@ public sealed partial class ApplicationController : IDisposable
             ChatCompletionsModel = request.Model, ChatCompletionsBaseUrl = request.BaseUrl,
             ApiNetwork = request.Network ?? new(),
             ThinkingLevel = request.ThinkingLevel,
+            OpenAiAuthenticationMode = request.UseChatGptPlan ? TranslationAuthenticationMode.ChatGptOAuth : TranslationAuthenticationMode.ApiKey,
+            ChatGptAccountId = request.ChatGptAccountId,
         };
         try
         {
-            var provider = TranslationProviderFactory.Create(_apiHttp.GetClient(testSettings), new InMemorySecretStore(apiKey), testSettings);
+            var provider = TranslationProviderFactory.Create(_apiHttp.GetClient(testSettings), new InMemorySecretStore(apiKey ?? ""), testSettings, chatGptTokens: _chatGpt);
             var benchmark = await TranslationBenchmark.RunAsync(provider, request.ThinkingLevel, cancellationToken, request.Progress);
             return new ConnectionTestResult(true, "翻译测速完成", benchmark.Elapsed) { Benchmark = benchmark };
         }
@@ -1042,10 +1050,10 @@ public sealed partial class ApplicationController : IDisposable
             TranslationSettings.SetSaving(true);
             var snapshot = CollectSettings();
             _ = TranslationProviderConfiguration.Endpoint(TranslationProviderConfiguration.Provider(snapshot), TranslationProviderConfiguration.BaseUrl(snapshot));
-            _ = TranslationProviderFactory.Create(_apiHttp.GetClient(snapshot), _secretStore, snapshot);
+            _ = TranslationProviderFactory.Create(_apiHttp.GetClient(snapshot), _secretStore, snapshot, chatGptTokens: _chatGpt);
             var secretName = TranslationProviderConfiguration.SecretName(snapshot);
-            var replacementApiKey = TranslationSettings.ApiKey.Trim();
-            if (replacementApiKey.Length == 0 && TranslationSettings.PendingCopySecretName is { } copyFrom)
+            var replacementApiKey = TranslationSettings.UsesChatGptPlan ? "" : TranslationSettings.ApiKey.Trim();
+            if (TranslationSettings.UsesApiKey && replacementApiKey.Length == 0 && TranslationSettings.PendingCopySecretName is { } copyFrom)
                 replacementApiKey = (await _secretStore.GetAsync(copyFrom)) ?? "";
             if (replacementApiKey.Length > 0)
             {
@@ -1209,6 +1217,7 @@ public sealed partial class ApplicationController : IDisposable
                 or nameof(TranslationSettings.SourceLanguage) or nameof(TranslationSettings.TranslationStyle)
                 or nameof(TranslationSettings.SelectedProvider) or nameof(TranslationSettings.SelectedModel) or nameof(TranslationSettings.BaseUrl)
                 or nameof(TranslationSettings.SelectedPreset)
+                or nameof(TranslationSettings.SelectedAuthentication) or nameof(TranslationSettings.ChatGptAccountId)
                 or nameof(TranslationSettings.CustomContext) or nameof(TranslationSettings.ThinkingLevel) or nameof(TranslationSettings.BoundedLowThinkingEnabled)))
             SyncAutoImageConfiguration();
 
@@ -1653,6 +1662,9 @@ public sealed partial class ApplicationController : IDisposable
         CloseResultWindows();
         DisposeBrowserIntegration();
         _sessions.Dispose();
+        _chatGpt.AccountsChanged -= OnChatGptAccountsChanged;
+        TranslationSettings.SignInChatGptCommand.Cancel(); TranslationSettings.AddChatGptAccountCommand.Cancel();
+        TranslationSettings.AuthorizeChatGptPlanCommand.Cancel();
         _apiHttp.Dispose();
         _localTextDetector.Dispose();
         _ocrWarmupCancellation.Cancel();

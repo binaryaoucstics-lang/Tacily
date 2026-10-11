@@ -47,7 +47,7 @@
                         <ui:Button Content="默认配置" Command="{Binding DefaultPresetCommand}" Margin="8,0,0,0" Padding="12,6" />
                         <ui:Button Content="删除" Command="{Binding DeletePresetCommand}" IsEnabled="{Binding CanEditPreset}" Margin="8,0,0,0" Padding="12,6" />
                     </WrapPanel>
-                    <TextBlock Text="预设分别保存地址、模型、思考等级、网络方式和加密密钥。新增后填写连接信息并点击保存；复制会一并复制已保存的密钥。"
+                    <TextBlock Text="{Binding PresetDescription}"
                                Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" Margin="0,12,0,0" />
                 </StackPanel>
             </Border>
@@ -61,6 +61,44 @@
                     <ComboBox x:Name="TranslationProviderCombo" Grid.Column="1" ItemsSource="{Binding Protocols}" SelectedItem="{Binding SelectedProtocol}"
                               IsEnabled="{Binding CanEditProvider}" MinWidth="260" />
                 </Grid>
+            </Border>
+            <Border x:Name="OpenAiAuthenticationCard" Style="{StaticResource SettingCardStyle}"
+                    Visibility="{Binding IsOpenAi, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="使用方式" Style="{StaticResource SettingLabelStyle}" />
+                        <TextBlock Text="选择 API Key 或 ChatGPT 账户额度。" Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ComboBox x:Name="OpenAiAuthenticationCombo" Grid.Column="1" ItemsSource="{Binding AuthenticationChoices}"
+                              SelectedItem="{Binding SelectedAuthentication}" IsEnabled="{Binding CanEditProvider}" MinWidth="260" />
+                </Grid>
+            </Border>
+            <Border x:Name="ChatGptAccountCard" Style="{StaticResource SettingCardStyle}"
+                    Visibility="{Binding UsesChatGptPlan, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <StackPanel>
+                    <TextBlock Text="使用 ChatGPT 订阅额度" Style="{StaticResource SettingLabelStyle}" />
+                    <TextBlock Text="在浏览器中登录并授权，可使用符合条件的 ChatGPT 计划或余额完成翻译。登录凭据在本机加密保存。"
+                               Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" Margin="0,6,0,12" />
+                    <ComboBox x:Name="ChatGptAccountCombo" ItemsSource="{Binding ChatGptAccounts}" DisplayMemberPath="Label"
+                              SelectedItem="{Binding SelectedChatGptAccount}" IsEnabled="{Binding CanEditProvider}" MinWidth="260" />
+                    <TextBlock Text="{Binding ChatGptPlanStatus}" FontWeight="SemiBold" Margin="0,10,0,0" TextWrapping="Wrap" />
+                    <WrapPanel Margin="0,12,0,0">
+                        <ui:Button x:Name="ChatGptSignInButton" Content="Continue with ChatGPT" Command="{Binding SignInChatGptCommand}" Padding="14,7" />
+                        <ui:Button Content="添加账户 / 工作区" Command="{Binding AddChatGptAccountCommand}" Padding="12,7" Margin="8,0,0,0" />
+                        <ui:Button Content="退出登录" Command="{Binding SignOutChatGptCommand}" Padding="12,7" Margin="8,0,0,0" />
+                        <ui:Button Content="取消登录" Command="{Binding CancelChatGptSignInCommand}" Padding="12,7" Margin="8,0,0,0"
+                                   Visibility="{Binding IsChatGptBusy, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                    </WrapPanel>
+                    <WrapPanel Margin="0,10,0,0">
+                        <ui:Button x:Name="ChatGptManageUsageButton" Content="管理额度" Appearance="Primary" Command="{Binding ManageChatGptUsageCommand}" Padding="12,7" />
+                        <ui:Button x:Name="ChatGptAuthorizePlanButton" Content="授权使用额度" Command="{Binding AuthorizeChatGptPlanCommand}" Padding="12,7" Margin="8,0,0,0"
+                                   Visibility="{Binding ShowChatGptConsent, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        <ui:Button x:Name="ChatGptResumeUsageButton" Content="恢复翻译" Command="{Binding ResumeChatGptUsageCommand}" Padding="12,7" Margin="8,0,0,0"
+                                   Visibility="{Binding IsChatGptUsagePaused, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                    </WrapPanel>
+                    <TextBlock Text="{Binding ChatGptStatus}" Style="{StaticResource SettingDescriptionStyle}" TextWrapping="Wrap" Margin="0,10,0,0" />
+                </StackPanel>
             </Border>
             <Border Style="{StaticResource SettingCardStyle}">
                 <StackPanel>
@@ -137,7 +175,8 @@
                 </Grid>
             </Border>
 
-            <Border Style="{StaticResource SettingCardStyle}">
+            <Border x:Name="ApiKeyCard" Style="{StaticResource SettingCardStyle}"
+                    Visibility="{Binding UsesApiKey, Converter={StaticResource BooleanToVisibilityConverter}}">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="180" />
@@ -195,7 +234,7 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="模型" Style="{StaticResource SettingLabelStyle}" />
-                        <TextBlock Text="可选择预设或输入完整模型 ID"
+                        <TextBlock Text="{Binding ModelSelectionDescription}"
                                    Style="{StaticResource SettingDescriptionStyle}" />
                     </StackPanel>
                     <StackPanel Grid.Column="1">
@@ -207,7 +246,12 @@
                                       IsTextSearchEnabled="True" MaxDropDownHeight="280"
                                       IsDropDownOpen="{Binding IsModelListOpen, Mode=TwoWay}"
                                       Text="{Binding SelectedModel, UpdateSourceTrigger=PropertyChanged}"
+                                      Visibility="{Binding UsesApiKey, Converter={StaticResource BooleanToVisibilityConverter}}"
                                       MinWidth="240" />
+                            <ComboBox x:Name="ChatGptModelCombo" ItemsSource="{Binding ChatGptModels}" DisplayMemberPath="DisplayName"
+                                      SelectedValuePath="Id" SelectedValue="{Binding SelectedModel, Mode=TwoWay}"
+                                      IsEnabled="{Binding CanEditModel}" MinWidth="240" MaxDropDownHeight="280"
+                                      Visibility="{Binding UsesChatGptPlan, Converter={StaticResource BooleanToVisibilityConverter}}" />
                             <ui:Button x:Name="ReadModelsButton" Grid.Column="1" Margin="8,0,0,0" Padding="12,7"
                                        Content="{Binding ModelListButtonText}" Command="{Binding LoadModelsCommand}"
                                        Visibility="{Binding SupportsModelListing, Converter={StaticResource BooleanToVisibilityConverter}}" />
@@ -224,6 +268,7 @@
             </Border>
 
             <Border Style="{StaticResource SettingCardStyle}"
+                        Visibility="{Binding UsesApiKey, Converter={StaticResource BooleanToVisibilityConverter}}"
                         Margin="0,8,0,0">
                     <Grid>
                         <Grid.ColumnDefinitions>

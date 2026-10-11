@@ -11,6 +11,7 @@ using ScreenTranslator.Core.Layout;
 using ScreenTranslator.Core.Models;
 using ScreenTranslator.Core.Settings;
 using ScreenTranslator.Core.Translation;
+using ScreenTranslator.Core.Authentication;
 
 namespace ScreenTranslator.App.Services.Browser;
 
@@ -28,6 +29,7 @@ public sealed class BrowserAutoImageTranslator : IAsyncDisposable
 {
     private readonly ImageTranslationCache _cache;
     private readonly ISecretStore _secrets;
+    private readonly IChatGptTokenProvider? _chatGptTokens;
     private readonly Func<AppSettings, ITranslationProvider>? _providerFactory;
     private readonly Func<CapturedBitmap, CancellationToken, Task<GroundedVisionDocument>>? _prepareAsync;
     private readonly Func<CapturedBitmap, CancellationToken, Task<IReadOnlyList<OcrBlock>>>? _locateAsync;
@@ -50,10 +52,11 @@ public sealed class BrowserAutoImageTranslator : IAsyncDisposable
         Func<CapturedBitmap, CancellationToken, Task<IReadOnlyList<OcrBlock>>>? locateAsync = null,
         BrowserImageTranslationJudge? localJudge = null,
         Func<CapturedBitmap, string, CancellationToken, Task<ImageTranslationAssessment>>? assessAsync = null,
-        ApiHttpClientRouter? apiHttp = null)
+        ApiHttpClientRouter? apiHttp = null, IChatGptTokenProvider? chatGptTokens = null)
     {
         _cache = cache ?? throw new ArgumentNullException(nameof(cache));
         _secrets = secrets ?? throw new ArgumentNullException(nameof(secrets));
+        _chatGptTokens = chatGptTokens;
         _providerFactory = providerFactory;
         _prepareAsync = prepareAsync;
         _locateAsync = locateAsync;
@@ -91,7 +94,12 @@ public sealed class BrowserAutoImageTranslator : IAsyncDisposable
             }
 
             // Failed credentials never spend time loading local layout models.
-            if (_providerFactory is null && string.IsNullOrWhiteSpace(
+            if (_providerFactory is null && TranslationProviderConfiguration.UsesChatGptPlan(settings))
+            {
+                if (_chatGptTokens is null) throw new TranslationAuthenticationException("ChatGPT 登录服务尚未就绪。");
+                _ = await _chatGptTokens.GetAccessTokenAsync(_apiHttp.GetClient(settings), TranslationProviderConfiguration.ChatGptAccountId(settings), active.Token).ConfigureAwait(false);
+            }
+            else if (_providerFactory is null && string.IsNullOrWhiteSpace(
                     await _secrets.GetAsync(TranslationProviderConfiguration.SecretName(settings), active.Token).ConfigureAwait(false)))
                 throw new TranslationAuthenticationException($"请在翻译设置中填写并保存 {TranslationProviderConfiguration.Label(settings.TranslationProvider)} API Key。");
 
@@ -123,7 +131,7 @@ public sealed class BrowserAutoImageTranslator : IAsyncDisposable
             await transport.PublishAsync([], true, active.Token, phase: "translating").ConfigureAwait(false);
             var provider = _providerFactory is not null
                 ? _providerFactory(settings) ?? throw new InvalidOperationException("翻译服务未提供可用的模型连接。")
-                : TranslationProviderFactory.Create(_apiHttp.GetClient(settings), _secrets, settings, allowLowWaitRetry: true);
+                : TranslationProviderFactory.Create(_apiHttp.GetClient(settings), _secrets, settings, allowLowWaitRetry: true, chatGptTokens: _chatGptTokens);
             DeepSeekRequestDiagnostics.Observe(provider, "auto_translation");
             var responsive = new ResponsiveThinkingTranslationProvider(provider, settings.ThinkingLevel,
                 settings.TranslationProvider == TranslationProviderKind.DeepSeek && settings.BoundedLowThinkingEnabled);
