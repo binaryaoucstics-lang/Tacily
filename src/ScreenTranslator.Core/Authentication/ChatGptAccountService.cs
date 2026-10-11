@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ScreenTranslator.Core.Abstractions;
+using ScreenTranslator.Core.Models;
+using ScreenTranslator.Core.Translation;
 
 namespace ScreenTranslator.Core.Authentication;
 
@@ -20,7 +22,17 @@ public sealed class ChatGptAccountService(ISecretStore secrets, Action<Uri> open
     private readonly SemaphoreSlim _signInGate = new(1, 1);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _sessions = new();
     private readonly ConcurrentDictionary<string, ChatGptException> _usageLimits = new();
+    private readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<ThinkingLevel>>> _modelCapabilities = new();
     public event Action? AccountsChanged;
+
+    public IReadOnlyList<ThinkingLevel>? GetSupportedThinkingLevels(string accountId, string model) =>
+        _modelCapabilities.TryGetValue(accountId, out var models) && models.TryGetValue(model, out var levels) ? levels : null;
+
+    public void UpdateModelCapabilities(string accountId, IReadOnlyList<TranslationModelChoice> models) =>
+        _modelCapabilities[accountId] = models.Where(model => model.SupportedReasoningLevels is not null)
+            .GroupBy(model => model.Id, StringComparer.Ordinal).ToDictionary(group => group.Key,
+                group => (IReadOnlyList<ThinkingLevel>)Array.AsReadOnly(group.First().SupportedReasoningLevels!
+                    .Where(level => Enum.IsDefined(level)).Distinct().ToArray()), StringComparer.Ordinal);
 
     public async Task<IReadOnlyList<ChatGptAccount>> ListAccountsAsync(CancellationToken token = default)
     {

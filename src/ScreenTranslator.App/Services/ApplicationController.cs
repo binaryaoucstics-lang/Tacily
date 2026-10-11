@@ -543,6 +543,7 @@ public sealed partial class ApplicationController : IDisposable
         }
         catch (Exception exception) when (pending is not null)
         {
+            ChatGptFailureDiagnostics.Write("translation", exception);
             pending.IsBusy = false;
             pending.TranslatedText = string.Empty;
             pending.ErrorMessage = exception.Message;
@@ -1029,6 +1030,7 @@ public sealed partial class ApplicationController : IDisposable
         catch (OperationCanceledException) { throw; }
         catch (Exception exception)
         {
+            ChatGptFailureDiagnostics.Write("connection_test", exception);
             return new ConnectionTestResult(false, exception.Message);
         }
     }
@@ -1476,10 +1478,8 @@ public sealed partial class ApplicationController : IDisposable
         }
     }
 
-    private static ThinkingLevel ThinkingValue(string label) => label switch
-    { "关闭" => ThinkingLevel.None, "高" => ThinkingLevel.High, "最高" => ThinkingLevel.Max, _ => ThinkingLevel.Low };
-    private static string ThinkingLabel(ThinkingLevel value) => value switch
-    { ThinkingLevel.None => "关闭", ThinkingLevel.High => "高", ThinkingLevel.Max => "最高", _ => "低" };
+    private static ThinkingLevel ThinkingValue(string label) => ThinkingLevelNames.FromLabel(label);
+    private static string ThinkingLabel(ThinkingLevel value) => ThinkingLevelNames.Label(value);
     private static TranslationInputMode InputValue(string label) => label switch
     { "VLM 直接翻译" => TranslationInputMode.VisionOnly, _ => TranslationInputMode.Automatic };
     private static string InputLabel(TranslationInputMode value) => value switch

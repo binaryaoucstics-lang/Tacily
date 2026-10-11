@@ -44,7 +44,8 @@ public sealed record VisionReadingHint(string RegionId, string Text, double Conf
     public string? Name { get; init; }
 }
 
-public enum ThinkingLevel { None, Low, High, Max }
+// Existing numeric values are persisted in settings; append new levels without renumbering.
+public enum ThinkingLevel { None = 0, Low = 1, High = 2, Max = 3, Medium = 4, XHigh = 5, Minimal = 6 }
 
 public enum VisionRequestTask { Default, Translation, Placement }
 

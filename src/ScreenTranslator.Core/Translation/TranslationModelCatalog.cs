@@ -2,10 +2,16 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using ScreenTranslator.Core.Authentication;
+using ScreenTranslator.Core.Models;
 
 namespace ScreenTranslator.Core.Translation;
 
-public sealed record TranslationModelChoice(string Id, string DisplayName);
+public sealed record TranslationModelChoice(string Id, string DisplayName)
+{
+    // Null means metadata absent; an empty list means no recognized direct API efforts.
+    public IReadOnlyList<ThinkingLevel>? SupportedReasoningLevels { get; init; }
+    public ThinkingLevel? DefaultReasoningLevel { get; init; }
+}
 public sealed record TranslationModelList(IReadOnlyList<string> Models, bool IsTruncated = false)
 {
     public IReadOnlyList<TranslationModelChoice> Choices { get; init; } = [];

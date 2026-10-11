@@ -81,7 +81,8 @@ public static class TranslationProviderConfiguration
         return new Uri(uri.AbsoluteUri.TrimEnd('/') + (path.Length == 0 ? "/v1" : "") + suffix);
     }
 
-    public static ApiThinkingConfiguration Thinking(TranslationProviderKind provider, string model, ThinkingLevel requested)
+    public static ApiThinkingConfiguration Thinking(TranslationProviderKind provider, string model, ThinkingLevel requested,
+        bool useChatGptPlan = false, IReadOnlyList<ThinkingLevel>? supportedLevels = null)
     {
         if (!Enum.IsDefined(requested)) throw new TranslationConfigurationException("思考等级无效。");
         if (provider == TranslationProviderKind.ChatCompletions) return new("default", null, requested);

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using ScreenTranslator.Core.Translation;
+using ScreenTranslator.Core.Models;
 
 namespace ScreenTranslator.Core.Authentication;
 
@@ -9,6 +10,8 @@ public interface IChatGptTokenProvider
     Task<string> GetAccessTokenAsync(HttpClient http, string accountId, CancellationToken token);
     CancellationToken GetSessionCancellation(string accountId);
     void ReportInferenceFailure(string accountId, ChatGptException error);
+    IReadOnlyList<ThinkingLevel>? GetSupportedThinkingLevels(string accountId, string model) => null;
+    void UpdateModelCapabilities(string accountId, IReadOnlyList<TranslationModelChoice> models) { }
 }
 
 public sealed class ChatGptException : TranslationException
