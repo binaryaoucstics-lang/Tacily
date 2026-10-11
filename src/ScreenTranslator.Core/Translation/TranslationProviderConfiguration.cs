@@ -8,7 +8,7 @@ namespace ScreenTranslator.Core.Translation;
 
 public enum TranslationProviderKind { DeepSeek, OpenAI, Claude, ChatCompletions }
 
-/// <summary>Capabilities verified against official documentation on 2026-10-09.</summary>
+/// <summary>Capabilities verified against official documentation on 2026-10-11.</summary>
 public static class TranslationProviderConfiguration
 {
     public const string OpenAiApiKeyName = "openai-api-key";
@@ -20,7 +20,7 @@ public static class TranslationProviderConfiguration
 
     public static IReadOnlyList<string> Models(TranslationProviderKind provider) => provider switch
     {
-        TranslationProviderKind.OpenAI => ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-4.1", "gpt-4.1-mini"],
+        TranslationProviderKind.OpenAI => ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-4.1", "gpt-4.1-mini"],
         TranslationProviderKind.Claude => ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-opus-4-6", "claude-sonnet-4-6"],
         TranslationProviderKind.ChatCompletions => [],
         _ => ["deepseek-flash"],
@@ -85,25 +85,26 @@ public static class TranslationProviderConfiguration
         bool useChatGptPlan = false, IReadOnlyList<ThinkingLevel>? supportedLevels = null)
     {
         if (!Enum.IsDefined(requested)) throw new TranslationConfigurationException("思考等级无效。");
+        if (!Enum.IsDefined(provider)) throw new TranslationConfigurationException("不支持的翻译服务商。");
         if (provider == TranslationProviderKind.ChatCompletions) return new("default", null, requested);
-        var effort = requested.ToString().ToLowerInvariant();
-        if (provider == TranslationProviderKind.DeepSeek)
-            return new(requested == ThinkingLevel.None ? "disabled" : "enabled", effort, requested);
         if (provider == TranslationProviderKind.OpenAI)
         {
-            if (Matches(model, "gpt-6-astra") || Matches(model, "gpt-6.1-sol") || Matches(model, "gpt-6-sol"))
-                return new("reasoning", requested == ThinkingLevel.None ? "low" : effort,
-                    requested == ThinkingLevel.None ? ThinkingLevel.Low : requested);
-            if (Matches(model, "gpt-6-luna") || Matches(model, "gpt-5.6-luna") || Matches(model, "gpt-5.6-terra")
-                || Matches(model, "gpt-5.6-sol") || model == "gpt-5.6") return new("reasoning", effort, requested);
-            if (Matches(model, "gpt-5.5") || Matches(model, "gpt-5.4"))
-                return new("reasoning", requested == ThinkingLevel.Max ? "xhigh" : effort, requested);
-            if (Matches(model, "gpt-4.1") || Matches(model, "gpt-4.1-mini") || Matches(model, "gpt-4.1-nano")
-                || Matches(model, "gpt-4o") || Matches(model, "gpt-4o-mini"))
+            // Only OAuth account metadata overrides the documented public API capabilities.
+            // An explicit empty snapshot must not reintroduce fallback parameters.
+            var metadata = useChatGptPlan && supportedLevels is not null;
+            var levels = metadata ? supportedLevels!.Where(level => Enum.IsDefined(level)).Distinct().ToArray()
+                : TranslationThinkingCatalog.SupportedLevels(provider, model, useChatGptPlan);
+            if (levels.Count == 0) return new("default", null, requested);
+            if (!metadata && levels.Count == 1 && levels[0] == ThinkingLevel.None)
                 return new("unsupported", null, ThinkingLevel.None);
-            // Custom/future model IDs use server defaults, never an invented capability or parameter retry.
-            return new("default", null, requested);
+            var effective = TranslationThinkingCatalog.Normalize(requested, levels);
+            return new("reasoning", ThinkingLevelNames.Effort(effective), effective);
         }
+        var originalRequested = requested;
+        requested = TranslationThinkingCatalog.Normalize(requested, TranslationThinkingCatalog.SupportedLevels(provider, model));
+        var effort = ThinkingLevelNames.Effort(requested);
+        if (provider == TranslationProviderKind.DeepSeek)
+            return new(requested == ThinkingLevel.None ? "disabled" : "enabled", effort, requested);
         if (Matches(model, "claude-opus-5-5") || Matches(model, "claude-fable-5-1") || Matches(model, "claude-fable-5")
             || Matches(model, "claude-mythos-5-1") || Matches(model, "claude-mythos-5") || model == "claude-mythos-preview")
             return new("adaptive", requested == ThinkingLevel.None ? "low" : effort,
@@ -115,7 +116,7 @@ public static class TranslationProviderConfiguration
             || Matches(model, "claude-opus-4-8") || Matches(model, "claude-opus-4-7")
             || Matches(model, "claude-opus-4-6") || Matches(model, "claude-sonnet-4-6"))
             return new(requested == ThinkingLevel.None ? "disabled" : "adaptive", requested == ThinkingLevel.None ? "low" : effort, requested);
-        return new("default", null, requested);
+        return new("default", null, originalRequested);
     }
 
     private static bool Matches(string model, string known) => model == known
@@ -172,9 +173,15 @@ public static class TranslationProviderFactory
     {
         var kind = TranslationProviderConfiguration.Provider(settings);
         var thinking = thinkingOverride ?? TranslationProviderConfiguration.ActivePreset(settings)?.ThinkingLevel ?? settings.ThinkingLevel;
-        var duration = timeout ?? TimeSpan.FromSeconds(thinking switch
+        var model = TranslationProviderConfiguration.Model(settings);
+        var useChatGptPlan = TranslationProviderConfiguration.UsesChatGptPlan(settings);
+        var effective = TranslationProviderConfiguration.Thinking(kind, model, thinking, useChatGptPlan,
+            useChatGptPlan ? chatGptTokens?.GetSupportedThinkingLevels(TranslationProviderConfiguration.ChatGptAccountId(settings), model) : null).EffectiveLevel;
+        if (kind == TranslationProviderKind.DeepSeek) thinking = effective;
+        var duration = timeout ?? TimeSpan.FromSeconds(effective switch
         { ThinkingLevel.None => kind == TranslationProviderKind.DeepSeek ? 45 : 60,
-            ThinkingLevel.Low => 90, ThinkingLevel.High => 180, _ => 300 });
+            ThinkingLevel.Minimal => 60, ThinkingLevel.Low => 90, ThinkingLevel.Medium => 120,
+            ThinkingLevel.High => 180, ThinkingLevel.XHigh => 240, _ => 300 });
         var endpoint = TranslationProviderConfiguration.Endpoint(kind, TranslationProviderConfiguration.BaseUrl(settings));
         if (kind is TranslationProviderKind.DeepSeek or TranslationProviderKind.ChatCompletions)
             return new DeepSeekTranslationProvider(http, secrets, new DeepSeekOptions

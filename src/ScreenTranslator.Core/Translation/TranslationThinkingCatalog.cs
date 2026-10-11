@@ -12,12 +12,14 @@ public static class TranslationThinkingCatalog
         if (Matches(model, "gpt-6-astra") || Matches(model, "gpt-6.1-sol"))
             return [ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High, ThinkingLevel.XHigh, ThinkingLevel.Max];
         if (Matches(model, "gpt-6-sol") || Matches(model, "gpt-6-luna") || Matches(model, "gpt-5.6-luna")
-            || Matches(model, "gpt-5.6-terra") || Matches(model, "gpt-5.6-sol") || model == "gpt-5.6")
+            || Matches(model, "gpt-5.6-terra") || Matches(model, "gpt-5.6-sol"))
             return useChatGptPlan
                 ? [ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High, ThinkingLevel.XHigh, ThinkingLevel.Max]
                 : [ThinkingLevel.None, ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High, ThinkingLevel.XHigh, ThinkingLevel.Max];
         if (Matches(model, "gpt-5.5") || Matches(model, "gpt-5.4"))
-            return [ThinkingLevel.None, ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High, ThinkingLevel.XHigh];
+            return useChatGptPlan
+                ? [ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High, ThinkingLevel.XHigh]
+                : [ThinkingLevel.None, ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High, ThinkingLevel.XHigh];
         if (Matches(model, "gpt-4.1") || Matches(model, "gpt-4.1-mini") || Matches(model, "gpt-4.1-nano")
             || Matches(model, "gpt-4o") || Matches(model, "gpt-4o-mini")) return [ThinkingLevel.None];
         return [];
@@ -31,7 +33,8 @@ public static class TranslationThinkingCatalog
         ThinkingLevel[] order = [ThinkingLevel.None, ThinkingLevel.Minimal, ThinkingLevel.Low, ThinkingLevel.Medium,
             ThinkingLevel.High, ThinkingLevel.XHigh, ThinkingLevel.Max];
         var position = Array.IndexOf(order, requested);
-        return order.Take(position + 1).Reverse().FirstOrDefault(supported.Contains, supported[0]);
+        var lowest = order.FirstOrDefault(supported.Contains, ThinkingLevel.None);
+        return order.Take(position + 1).Reverse().FirstOrDefault(supported.Contains, lowest);
     }
 
     private static bool Matches(string model, string known) => model == known
