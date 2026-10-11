@@ -10,14 +10,15 @@ internal static class Program
         Console.InputEncoding = new UTF8Encoding(false);
         Console.OutputEncoding = new UTF8Encoding(false);
         if (args.SequenceEqual(new[] { "--self-test" })) return await SelfTest.RunAsync();
-        if (args.Length != 0)
+        var useRunningPreset = args.SequenceEqual(new[] { "--use-running-app-preset" });
+        if (args.Length != 0 && !useRunningPreset)
         {
             Console.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, id = "", caseId = "", type = "error",
-                code = "invalid_arguments", message = "Use no arguments for live JSONL, or --self-test for offline verification." }));
+                code = "invalid_arguments", message = "Use live JSONL, --use-running-app-preset, or --self-test." }));
             return 2;
         }
         using var runtime = new LiveRuntime();
-        await using var host = new JsonlHost(true, LiveRuntime.LoadSettingsAsync, runtime.CreateProvider, Console.Out);
+        await using var host = new JsonlHost(true, () => LiveRuntime.LoadSettingsAsync(useRunningPreset), runtime.CreateProvider, Console.Out);
         ConsoleCancelEventHandler stop = (_, e) => { e.Cancel = true; host.CancelAll(); };
         Console.CancelKeyPress += stop;
         try { await host.RunAsync(Console.In); return 0; }
