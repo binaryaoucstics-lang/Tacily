@@ -5,6 +5,10 @@ using ScreenTranslator.Core.Models;
 
 namespace ScreenTranslator.Core.Translation;
 
+public sealed record PageTextNumericTransfer(string OwnerId, string ReceivingId);
+public sealed record PageTextSemanticAssessment(
+    IReadOnlyList<string> UnsafeIds, IReadOnlyList<PageTextNumericTransfer> NumericTransfers);
+
 /// <summary>
 /// A small, local safeguard for DOM replacements, not a general translation scorer.
 /// Protects independently located calendar/number facts and rejects punctuation-only
@@ -76,6 +80,12 @@ public static class PageTextSemanticGuard
     public static IReadOnlyList<string> FindUnsafeIds(
         IReadOnlyList<BrowserPageTextBlock> source,
         IReadOnlyDictionary<string, string> translations)
+        => Assess(source, translations).UnsafeIds;
+
+    /// <summary>Reports the same guard verdict plus actual numeric ownership edges.</summary>
+    public static PageTextSemanticAssessment Assess(
+        IReadOnlyList<BrowserPageTextBlock> source,
+        IReadOnlyDictionary<string, string> translations)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(translations);
@@ -84,6 +94,7 @@ public static class PageTextSemanticGuard
             block => translations.TryGetValue(block.Id, out var text)
                 ? Facts(text, originals[block.Id].Numbers.Contains("auth-factors:2")) : new TextFacts([], [], [], []), StringComparer.Ordinal);
         var rejected = new HashSet<string>(StringComparer.Ordinal);
+        var transfers = new HashSet<PageTextNumericTransfer>();
         foreach (var block in source)
         {
             if (!translations.TryGetValue(block.Id, out var text)
@@ -106,9 +117,14 @@ public static class PageTextSemanticGuard
             foreach (var receiving in source.Where(block => block.Id != owner.Id))
                 if (missing.Any(value => translated[receiving.Id].Numbers.Contains(value)
                     && !originals[receiving.Id].Numbers.Contains(value)))
-                { rejected.Add(owner.Id); rejected.Add(receiving.Id); }
+                {
+                    rejected.Add(owner.Id); rejected.Add(receiving.Id);
+                    transfers.Add(new(owner.Id, receiving.Id));
+                }
         }
-        return source.Where(block => rejected.Contains(block.Id)).Select(block => block.Id).ToArray();
+        return new(source.Where(block => rejected.Contains(block.Id)).Select(block => block.Id).ToArray(),
+            transfers.OrderBy(edge => edge.OwnerId, StringComparer.Ordinal)
+                .ThenBy(edge => edge.ReceivingId, StringComparer.Ordinal).ToArray());
     }
 
     private static bool TimesEquivalent(HashSet<string> expected,HashSet<string> actual)

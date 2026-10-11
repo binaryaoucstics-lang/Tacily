@@ -451,7 +451,8 @@ def completion_gate(case, path):
     if any(p.get("sourceEvidence") == "unmatched" or p.get("auditIssue")
            or p.get("sourceId") not in source_ids for p in case.get("predictions", [])):
         reasons.append("prediction_source_evidence_unmatched")
-    if any(p.get("sourceId") not in source_ids for p in case.get("predictionHistory", [])):
+    if any(any(sid not in source_ids for sid in p.get("sourceIds", [p.get("sourceId")]))
+           for p in case.get("predictions", []) + case.get("predictionHistory", [])):
         reasons.append("historical_prediction_source_evidence_unmatched")
     terminals = case.get("terminals", [])
     requests = case.get("requestIds", [])
@@ -478,6 +479,44 @@ def completion_gate(case, path):
     return ready, ready and reviewed, reasons
 
 
+def record_source_observations(observations, value, phase):
+    """Keep each source's last production observation while it was represented.
+
+    This records production flags, never truth. A later hidden source must not
+    become a rejected candidate just because its former session blocks retired.
+    Sources that disappear before an idle observation remain unknown.
+    """
+    if type(value.get("pageDecision")) is not bool:
+        return
+    idle = not any(value.get(key) for key in ("jobs", "pending", "scanning", "rpcPending"))
+    pieces = {}
+    for piece in value["predictions"]:
+        for source_id in piece.get("sourceIds", [piece.get("sourceId")]):
+            pieces.setdefault(source_id, []).append(piece)
+    eligibility = {row["sourceId"]: row["eligible"] for row in value.get("productionEligibility", [])}
+    visible_ids = {source["id"] for source in value["nodes"]}
+    independent = {source["id"]: source for source in value["sourceNodes"]}
+    represented = {}
+    for piece in value["predictions"]:
+        owner = piece.get("sourceId")
+        members = piece.get("sourceIds", [])
+        if owner in visible_ids and len(members) > 1:
+            for member in members:
+                if member != owner:
+                    represented[member] = owner
+    # Atomic blocks represent their explicit peer records at the owner node.
+    # Membership is taken from production records, never guessed from text.
+    for source_id in (visible_ids | represented.keys()) & independent.keys():
+        if source_id in eligibility:
+            observations[source_id] = {"sourceId": source_id, "phase": phase,
+                                       "at": value.get("at"), "rendered": source_id in visible_ids,
+                                       "representedBy": represented.get(source_id),
+                                       "sourceText": independent[source_id]["sourceText"],
+                                       "pageDecision": value["pageDecision"], "idle": idle,
+                                       "eligible": eligibility[source_id] if idle or source_id in pieces else None,
+                                       "pieces": pieces.get(source_id, [])}
+
+
 class CaseCapture:
     def __init__(self, browser, host, run, repo, case_timeout=120, stable_seconds=2, poll_seconds=.15,
                  full_screenshots=False):
@@ -496,7 +535,7 @@ class CaseCapture:
                 "errors": [], "blockedReason": "", "terminals": [], "requestIds": [], "settled": False,
                 "settlementKind": "semantic", "semanticStable": False, "stability": {},
                 "layoutReviewRequired": True, "fullScreenshots": self.full_screenshots}
-        pending, production_requests, prediction_history, source_history = {}, {}, {}, {}
+        pending, production_requests, prediction_history, source_history, source_observations = {}, {}, {}, {}, {}
         self.browser.journal = log; self.host.journal = log
         started = time.monotonic()
         deadline = started + self.case_timeout
@@ -516,9 +555,12 @@ class CaseCapture:
                 source_history[row["id"]] = row
             for row in value["predictions"]:
                 prediction_history[row["id"]] = row
+            if configured:
+                record_source_observations(source_observations, value, phase)
             case.update(finalUrl=value["finalUrl"], title=value["title"], viewport=value["viewport"],
                         sourceNodes=list(source_history.values()), predictions=value["predictions"],
                         predictionHistory=list(prediction_history.values()),
+                        sourceObservations=list(source_observations.values()),
                         productionEligibility=value.get("productionEligibility", []),
                         pageDecision=value["pageDecision"],
                         retractions=[event for event in value["events"] if event["type"] == "retraction"])

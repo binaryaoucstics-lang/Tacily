@@ -475,6 +475,63 @@ class ManifestAndResumeTests(Fixture):
             capture.EvidenceRun(self.root, "run-1", frozen)
 
 
+class SourceObservationTests(unittest.TestCase):
+    def value(self, completed=True, pending=0):
+        return {"at": "sample-time", "pageDecision": True, "jobs": pending,
+                "nodes": [{"id": "s1"}], "sourceNodes": [{"id": "s1", "sourceText": "Foreign sentence."}],
+                "productionEligibility": [{"sourceId": "s1", "eligible": True}],
+                "predictions": [{"id": "p1", "sourceId": "s1", "eligible": True,
+                                 "completed": completed, "failed": False}]}
+
+    def test_hidden_source_retains_last_actual_flags(self):
+        for complete in (True, False):
+            observations, value = {}, self.value(complete)
+            capture.record_source_observations(observations, value, "after")
+            value["nodes"] = []; value["predictions"] = []
+            value["productionEligibility"][0]["eligible"] = False
+            capture.record_source_observations(observations, value, "hidden")
+            self.assertTrue(observations["s1"]["eligible"])
+            self.assertEqual(complete, observations["s1"]["pieces"][0]["completed"])
+            self.assertEqual("after", observations["s1"]["phase"])
+
+    def test_last_pending_snapshot_replaces_success_without_borrowing_it(self):
+        observations = {}
+        capture.record_source_observations(observations, self.value(), "success")
+        value = self.value(False, pending=1)
+        value["predictions"][0]["id"] = "new-piece"
+        capture.record_source_observations(observations, value, "pending")
+        self.assertEqual("new-piece", observations["s1"]["pieces"][0]["id"])
+        self.assertFalse(observations["s1"]["pieces"][0]["completed"])
+
+    def test_hidden_owner_completion_does_not_replace_last_visible_pending(self):
+        observations = {}
+        capture.record_source_observations(observations, self.value(False, pending=1), "visible-pending")
+        hidden = self.value()
+        hidden["nodes"] = []
+        capture.record_source_observations(observations, hidden, "hidden-completed")
+        self.assertFalse(observations["s1"]["pieces"][0]["completed"])
+        self.assertEqual("visible-pending", observations["s1"]["phase"])
+
+    def test_unprocessed_visible_source_is_unknown_and_before_has_no_verdict(self):
+        observations, value = {}, self.value(pending=1)
+        value["predictions"] = []; value["productionEligibility"][0]["eligible"] = False
+        capture.record_source_observations(observations, value, "scanning")
+        self.assertIsNone(observations["s1"]["eligible"])
+        observations.clear(); value["pageDecision"] = None
+        capture.record_source_observations(observations, value, "before")
+        self.assertEqual({}, observations)
+
+    def test_atomic_peer_uses_explicit_production_membership_with_independent_source(self):
+        observations, value = {}, self.value()
+        value["sourceNodes"].append({"id": "peer", "sourceText": "foreign peer"})
+        value["productionEligibility"].append({"sourceId": "peer", "eligible": True})
+        value["predictions"][0]["sourceIds"] = ["s1", "peer"]
+        capture.record_source_observations(observations, value, "atomic")
+        self.assertFalse(observations["peer"]["rendered"])
+        self.assertEqual("s1", observations["peer"]["representedBy"])
+        self.assertEqual("p1", observations["peer"]["pieces"][0]["id"])
+
+
 class CompletionTests(Fixture):
     def valid(self, expected=True):
         phases = ["before", "after", "stable", "scroll-before", "scroll-after", "return-after", "reflow-after"]

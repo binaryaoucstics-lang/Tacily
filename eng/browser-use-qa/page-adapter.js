@@ -101,14 +101,17 @@
     for (const block of state?.blocks.values() || []) {
       const record = block.record;
       const sourceId = identity(record.node, record.source), matched = sources.has(sourceId);
-      predictions.push({ id: block.id, sourceId,
-        sourceEvidence: matched ? "matched" : "unmatched",
-        auditIssue: matched ? null : "source_not_independently_visible",
+      const sourceIds = Array.from(new Set((block.atomicRecords || [record])
+        .map(member => identity(member.node, member.source))));
+      const allMatched = matched && sourceIds.every(id => sources.has(id));
+      predictions.push({ id: block.id, sourceId, sourceIds,
+        sourceEvidence: allMatched ? "matched" : "unmatched",
+        auditIssue: allMatched ? null : "source_not_independently_visible",
         sourceText: record.source, text: block.text, groupId: block.groupId, eligible: true,
         completed: block.piece.complete === true && !block.piece.failed, failed: block.piece.failed === true,
         local: block.piece.local === true, fromCache: block.piece.cached === true });
     }
-    const eligibleSources = new Set(predictions.map(value => value.sourceId));
+    const eligibleSources = new Set(predictions.flatMap(value => value.sourceIds));
     const currentSources = new Set(nodes.map(value => value.id));
     const productionEligibility = Array.from(sources.values(), value => ({ sourceId: value.id,
       eligible: eligibleSources.has(value.id), currentlyRendered: currentSources.has(value.id) }));

@@ -115,6 +115,72 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual("before.png", result["screenshots"]["before"]["path"])
         self.assertTrue(_score_case(result, SITE, self.attempt)[1])
 
+    def retired_observation(self, pieces, eligible=True):
+        self.case["sourceNodes"][0]["currentlyRendered"] = False
+        self.case["predictions"] = []
+        self.case["productionEligibility"][0]["eligible"] = False
+        self.case["predictionHistory"] = pieces
+        self.case["sourceObservations"] = [{"sourceId": "s1", "sourceText": "Independent source text",
+            "rendered": True, "phase": "scroll-after", "at": "observed-time",
+            "eligible": eligible, "pieces": pieces}]
+
+    def test_hidden_completed_source_keeps_real_completion_and_old_pending_is_not_combined(self):
+        piece = self.piece("latest", "s1")
+        self.retired_observation([piece])
+        self.case["predictionHistory"].append(self.piece("old", "s1", completed=False))
+        self.case["sourceObservations"][0]["pieces"] = [piece]
+        result = self.normalize()
+        self.assertTrue(result["completed"])
+        self.assertEqual(["latest"], result["predictions"][0]["pieceIds"])
+        self.assertTrue(result["predictions"][0]["eligible"])
+
+    def test_hidden_pending_last_set_does_not_borrow_old_success(self):
+        pending = self.piece("latest", "s1", completed=False)
+        self.retired_observation([pending])
+        self.case["predictionHistory"].append(self.piece("old-success", "s1"))
+        self.case["sourceObservations"][0]["pieces"] = [pending]
+        self.assert_blocked(self.normalize(), "node_not_completed:s1")
+
+    def test_hidden_source_without_production_observation_remains_unknown(self):
+        self.retired_observation([])
+        self.case["sourceObservations"] = []
+        self.assert_blocked(self.normalize(), "unknown_prediction:s1")
+
+    def test_retired_observation_cannot_invent_completion_or_reuse_changed_source(self):
+        self.retired_observation([self.piece("latest", "s1")])
+        self.case["predictionHistory"] = []
+        with self.assertRaisesRegex(NormalizationError, "not_in_raw_prediction_history"):
+            self.normalize()
+        self.case["predictionHistory"] = [self.piece("latest", "s1")]
+        self.case["sourceObservations"][0]["sourceText"] = "Changed source"
+        with self.assertRaisesRegex(NormalizationError, "text_mismatch"):
+            self.normalize()
+
+    def test_atomic_piece_completes_only_explicit_independently_observed_members(self):
+        self.case["sourceNodes"].append(self.source("peer"))
+        self.review["annotations"].append({"sourceId": "peer", "needTranslation": True})
+        self.case["predictions"][0]["sourceIds"] = ["s1", "peer"]
+        self.case["productionEligibility"].append({"sourceId": "peer", "eligible": True})
+        result = self.normalize()
+        self.assertTrue(result["completed"])
+        self.assertEqual(2, len(result["predictions"]))
+        self.assertTrue(all(row["completed"] for row in result["predictions"]))
+
+    def test_retired_atomic_peer_does_not_overwrite_current_owners_piece_set(self):
+        self.case["sourceNodes"].append({**self.source("peer"), "currentlyRendered": False})
+        self.review["annotations"].append({"sourceId": "peer", "needTranslation": True})
+        old = self.piece("old-atomic", "s1", sourceIds=["s1", "peer"], completed=False)
+        self.case["predictionHistory"] = [old, *self.case["predictions"]]
+        self.case["sourceObservations"] = [{"sourceId": "peer", "sourceText": "Independent source text",
+            "rendered": False, "representedBy": "s1", "eligible": True, "pieces": [old]}]
+        self.case["productionEligibility"].append({"sourceId": "peer", "eligible": False})
+        result = self.normalize()
+        owner, peer = result["predictions"]
+        self.assertTrue(owner["completed"])
+        self.assertEqual(["p1"], owner["pieceIds"])
+        self.assertFalse(peer["completed"])
+        self.assert_blocked(result, "node_not_completed:peer")
+
     def test_split_pieces_any_eligible_all_eligible_must_complete(self):
         for patch, expected in [({}, True), ({"completed": False}, False), ({"failed": True}, False),
                                 ({"eligible": False, "completed": False}, True)]:

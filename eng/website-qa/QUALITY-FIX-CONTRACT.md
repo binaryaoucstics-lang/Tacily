@@ -33,6 +33,18 @@ and observed unsafe translations, without user settings, keys or screenshots.
   frontend/backend parity and target-language boundaries. Do not change page
   activation thresholds or classify every mixed-script string as readable.
 
+## Shared semantic assessment interface
+
+The controller provides `PageTextSemanticGuard.Assess(source, translations)` on
+the next fixed baseline. It returns the unchanged `UnsafeIds` verdict and exact
+`NumericTransfers` edges (`OwnerId`, `ReceivingId`) from the existing missing-fact
+loop. `FindUnsafeIds` remains compatible. Retry code must use these real edges
+instead of synthesizing source-plus-answer probes; independent errors must not
+be joined. Retain the original owner source/answer as an invocation-local witness
+so correcting the owner cannot make a receiver's transferred fact acceptable.
+Test a receiver that initially also changes Monday to Tuesday, then corrects only
+the weekday while retaining a transferred quantity. No guard rule is weakened.
+
 ## Gates and controller duties
 
 Workers use offline synthetic/public fixtures only in their own worktree; no real

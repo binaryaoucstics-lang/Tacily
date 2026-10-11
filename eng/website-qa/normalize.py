@@ -181,6 +181,60 @@ def _predictions(case, nodes, issues):
     pieces = case.get("predictions")
     if not isinstance(pieces, list) or not all(isinstance(p, dict) for p in pieces):
         raise NormalizationError("invalid_prediction_evidence")
+    observations = case.get("productionEligibility", [])
+    retained_members = {}
+    current_piece_ids = {p.get("id") for p in pieces}
+    if not isinstance(observations, list) or not all(isinstance(row, dict) for row in observations):
+        raise NormalizationError("invalid_production_eligibility")
+    if "sourceObservations" in case:
+        records = case["sourceObservations"]
+        history = case.get("predictionHistory", [])
+        if not isinstance(records, list) or not isinstance(history, list):
+            raise NormalizationError("invalid_source_observations")
+        history_by_id = {p.get("id"): p for p in history if isinstance(p, dict)}
+        node_by_id = {n["id"]: n for n in nodes}
+        current_ids = {n["id"] for n in nodes if n.get("currentlyRendered") is not False}
+        retired = node_by_id.keys() - current_ids
+        retained, seen_sources = [], set()
+        observations = [row for row in observations if row.get("sourceId") not in retired]
+        for record in records:
+            if (not isinstance(record, dict) or record.get("sourceId") in seen_sources
+                    or record.get("sourceId") not in node_by_id
+                    or record.get("eligible") is not None and type(record.get("eligible")) is not bool
+                    or not isinstance(record.get("pieces"), list)):
+                raise NormalizationError("invalid_source_observation")
+            source_id = record["sourceId"]
+            seen_sources.add(source_id)
+            if source_id not in retired:
+                continue
+            source = node_by_id[source_id]
+            if record.get("sourceText") != source["text"]:
+                raise NormalizationError("source_observation_text_mismatch")
+            if record.get("eligible") is None:
+                issues.append("unknown_retired_source:" + source_id)
+                continue
+            represented = record.get("representedBy")
+            atomic_peer = any(p.get("sourceId") == represented and represented != source_id
+                              and source_id in p.get("sourceIds", []) and len(p.get("sourceIds", [])) > 1
+                              for p in record["pieces"] if isinstance(p, dict))
+            if record.get("rendered") is not True and not atomic_peer:
+                issues.append("unobserved_retired_source:" + source_id)
+                continue
+            observations.append({"sourceId": source_id, "eligible": record["eligible"]})
+            for piece in record["pieces"]:
+                if (not isinstance(piece, dict) or history_by_id.get(piece.get("id")) != piece
+                        or source_id not in piece.get("sourceIds", [piece.get("sourceId")])):
+                    raise NormalizationError("source_observation_not_in_raw_prediction_history")
+                retained.append(piece)
+                retained_members.setdefault(piece["id"], set()).add(source_id)
+        # One atomic piece legitimately covers several source records. Collapse
+        # only identical evidence references, retaining every source membership.
+        selected = {p["id"]: p for p in pieces}
+        for piece in retained:
+            if piece["id"] in selected and selected[piece["id"]] != piece:
+                raise NormalizationError("conflicting_source_observation")
+            selected[piece["id"]] = piece
+        pieces = list(selected.values())
     grouped = {n["id"]: [] for n in nodes}
     seen = set()
     for piece in pieces:
@@ -189,14 +243,18 @@ def _predictions(case, nodes, issues):
             issues.append("missing_or_duplicate_prediction_id")
         else:
             seen.add(piece_id)
-        if not isinstance(source_id, str) or source_id not in grouped:
+        members = piece.get("sourceIds", [source_id])
+        if (not isinstance(members, list) or not members or source_id not in members
+                or len(set(members)) != len(members)
+                or any(not isinstance(member, str) or member not in grouped for member in members)):
             issues.append("unmatched_prediction_source:" + str(source_id))
             continue
         if piece.get("sourceEvidence") == "unmatched" or piece.get("auditIssue"):
             issues.append("prediction_source_audit_issue:" + source_id)
-        grouped[source_id].append(piece)
+        projected = members if piece_id in current_piece_ids else retained_members.get(piece_id, members)
+        for member in projected:
+            grouped[member].append(piece)
     eligibility = {}
-    observations = case.get("productionEligibility", [])
     if not isinstance(observations, list):
         raise NormalizationError("invalid_production_eligibility")
     for row in observations:
