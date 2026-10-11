@@ -22,6 +22,8 @@ HERE = Path(__file__).resolve().parent
 PRODUCTION = ("page-auto-policy.js", "translation-motion.js", "page-auto-content.js")
 EVAL_LIMIT_BYTES = 20000
 SOURCE_CHUNK_CHARACTERS = 8000
+DELIVERY_BATCH_PACKETS = 32
+FORWARD_EVENT_LIMIT = 1000
 REPLACE_RETRY_DELAYS = (.02, .05, .1)
 
 
@@ -35,6 +37,45 @@ def now():
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def check_deadline(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise CaptureError("case_timeout_without_settlement")
+
+
+def delivery_expression(frames, stored=False):
+    # Synchronous execution is essential: CLI eval does not await Promises.
+    data = "globalThis.__qaFrameBatch" if stored else encode(frames)
+    expression = ("(()=>{const q=globalThis.__websiteQa;for(const [rpcId,packet,ack] of " + data +
+                  "){if(ack)q.acknowledge(rpcId,{accepted:true});q.deliver(rpcId,packet);}return true})()")
+    if stored:
+        expression = "(()=>{try{return " + expression + "}finally{delete globalThis.__qaFrameBatch}})()"
+    return expression
+
+
+def semantic_signature(value):
+    """Current content multiset, independent of motion and bookkeeping identity.
+
+    Do not use sourceNodes here: that is the cumulative, unfiltered audit history.
+    Sorting encoded rows preserves duplicate counts without relying on DOM order.
+    """
+    nodes = sorted(encode([row.get(key) for key in
+                          ("sourceText", "displayedText", "tag", "role")])
+                   for row in value["nodes"])
+    predictions = sorted(encode([row.get(key) for key in
+                                ("sourceText", "text", "eligible", "completed", "failed",
+                                 "sourceEvidence", "auditIssue")])
+                         for row in value["predictions"])
+    return encode([nodes, predictions, value["pageDecision"]])
+
+
+def geometry_signature(value):
+    """Diagnostic only; matching geometry never certifies layout quality."""
+    nodes = sorted(encode([row.get(key) for key in
+                          ("rects", "rendered", "ancestorsVisible", "inViewport")])
+                   for row in value["nodes"])
+    return encode([nodes, value["viewport"]])
 
 
 def error_record(error, prefix=""):
@@ -95,17 +136,25 @@ class BrowserCli:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", session):
             raise CaptureError("invalid_session")
         self.session, self.journal, self.runner, self.python = session, journal, runner, python
+        self.deadline = None
 
     def command(self, *arguments):
+        deadline = self.deadline
+        check_deadline(deadline)
+        timeout = min(60, deadline - time.monotonic()) if deadline is not None else 60
+        if timeout <= 0:
+            raise CaptureError("case_timeout_without_settlement")
         argv = [self.python, str(WRAPPER), "--session", self.session, "--json", *map(str, arguments)]
         try:
             result = self.runner(argv, shell=False, capture_output=True, text=True,
-                                 encoding="utf-8", timeout=60)
+                                 encoding="utf-8", timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as error:
             self.journal.append({"kind": "cli_failure", "argv": argv, "error": type(error).__name__})
+            check_deadline(deadline)
             raise CaptureError("cli_unavailable_or_timeout") from error
         self.journal.append({"kind": "cli", "argv": argv, "exitCode": result.returncode,
                              "stdout": result.stdout, "stderr": result.stderr})
+        check_deadline(deadline)
         if result.returncode:
             raise CaptureError("cli_nonzero_exit")
         try:
@@ -158,13 +207,31 @@ class BrowserCli:
     def state(self):
         return self.command("state")  # Preserve data._raw_text without parsing human output.
 
-    def screenshot(self, path):
-        self.command("screenshot", str(path))
+    def screenshot(self, path, full=False):
+        arguments = ("--full",) if full else ()
+        self.command("screenshot", str(path), *arguments)
         if not Path(path).is_file() or Path(path).stat().st_size == 0:
             raise CaptureError("screenshot_missing")
 
     def qa(self, method, *args):
         return self.evaluate("globalThis.__websiteQa." + method + "(" + ",".join(map(encode, args)) + ")")
+
+    def deliver_batch(self, frames):
+        """Deliver a bounded ordered batch of [rpcId, original packet, acknowledge]."""
+        if not frames:
+            return
+        if len(frames) > DELIVERY_BATCH_PACKETS:
+            raise CaptureError("delivery_batch_too_many_packets")
+        expression = delivery_expression(frames)
+        if len(expression.encode("utf-16-le")) > EVAL_LIMIT_BYTES:
+            if len(frames) != 1:
+                raise CaptureError("delivery_batch_too_large")
+            # Chunk the data assignment with the existing safe injector. The
+            # frame itself is never parsed/re-serialized or split for receive.
+            self.inject("globalThis.__qaFrameBatch=" + encode(frames) + ";true")
+            expression = delivery_expression(frames, stored=True)
+        if self.evaluate(expression) is not True:
+            raise CaptureError("delivery_invalid_result")
 
     def probe(self, target_language, timeout=15, poll_seconds=.15):
         """CLI eval serializes Promises as {}; poll a synchronous QA job instead."""
@@ -366,6 +433,8 @@ def completion_gate(case, path):
     if case.get("pageDecision") is not case["expectedPageTranslation"]:
         reasons.append("page_decision_mismatch")
     required = {"before", "after", "stable", "scroll-before", "scroll-after", "return-after", "reflow-after"}
+    if case.get("fullScreenshots"):
+        required.update(("before-full", "after-full", "stable-full"))
     shots = {shot["phase"]: shot for shot in case.get("screenshots", [])}
     if not required.issubset(shots) or any(not (path / shot["path"]).is_file()
                                          or (path / shot["path"]).stat().st_size == 0 for shot in shots.values()):
@@ -402,9 +471,11 @@ def completion_gate(case, path):
 
 
 class CaseCapture:
-    def __init__(self, browser, host, run, repo, case_timeout=120, stable_seconds=2, poll_seconds=.15):
+    def __init__(self, browser, host, run, repo, case_timeout=120, stable_seconds=2, poll_seconds=.15,
+                 full_screenshots=False):
         self.browser, self.host, self.run, self.repo = browser, host, run, Path(repo)
         self.case_timeout, self.stable_seconds, self.poll_seconds = case_timeout, stable_seconds, poll_seconds
+        self.full_screenshots = full_screenshots
 
     def capture(self, site):
         path = self.run.attempt(site["id"])
@@ -414,10 +485,14 @@ class CaseCapture:
                 "liveTranslation": False, "completed": False, "captureFinished": False, "evidenceReady": False,
                 "simulation": False, "pageDecision": None, "sourceNodes": [], "predictions": [],
                 "annotations": [], "screenshots": [], "screenshotReview": {}, "retractions": [],
-                "errors": [], "blockedReason": "", "terminals": [], "requestIds": [], "settled": False}
+                "errors": [], "blockedReason": "", "terminals": [], "requestIds": [], "settled": False,
+                "settlementKind": "semantic", "semanticStable": False, "stability": {},
+                "layoutReviewRequired": True, "fullScreenshots": self.full_screenshots}
         pending, production_requests, prediction_history, source_history = {}, {}, {}, {}
         self.browser.journal = log; self.host.journal = log
         started = time.monotonic()
+        deadline = started + self.case_timeout
+        previous_deadline = getattr(self.browser, "deadline", None)
         configured = False
         installed = False
 
@@ -445,16 +520,51 @@ class CaseCapture:
             save()
             return value
 
-        def screenshot(phase):
+        def screenshot(phase, full=False):
             value = sample(phase)
             image = path / (phase + ".png")
-            self.browser.screenshot(image)
+            if full:
+                self.browser.screenshot(image, full=True)
+            else:
+                self.browser.screenshot(image)
             case["screenshots"].append({"phase": phase, "path": image.name, "at": now(), "viewport": value["viewport"],
-                                        "sha256": hashlib.sha256(image.read_bytes()).hexdigest()})
+                                        "sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "fullPage": full})
             save()
 
         def forward():
+            frames = []
+
+            def flush():
+                check_deadline(deadline)
+                if frames:
+                    deliver = getattr(self.browser, "deliver_batch", None)
+                    if deliver is not None:
+                        deliver(frames)
+                    else:
+                        # Preserve the existing duck-typed qa interface for
+                        # callers/tests. Production BrowserCli always batches.
+                        for rpc_id, packet, acknowledge in frames:
+                            check_deadline(deadline)
+                            if acknowledge:
+                                self.browser.qa("acknowledge", rpc_id, {"accepted": True})
+                                check_deadline(deadline)
+                            self.browser.qa("deliver", rpc_id, packet)
+                    frames.clear()
+                    check_deadline(deadline)
+
+            def queue_frame(rpc_id, packet, acknowledge):
+                frame = [rpc_id, packet, acknowledge]
+                if frames and (len(frames) >= DELIVERY_BATCH_PACKETS or
+                               len(delivery_expression(frames + [frame]).encode("utf-16-le")) > EVAL_LIMIT_BYTES):
+                    flush()
+                frames.append(frame)
+                if len(frames) >= DELIVERY_BATCH_PACKETS or \
+                        len(delivery_expression(frames).encode("utf-16-le")) > EVAL_LIMIT_BYTES:
+                    flush()
+
+            check_deadline(deadline)
             for item in self.browser.qa("drain"):
+                check_deadline(deadline)
                 message = item["message"]
                 rpc_id = item["rpcId"]
                 request_id = site["id"] + "-" + rpc_id
@@ -462,7 +572,7 @@ class CaseCapture:
                     raise CaptureError("unsupported_production_outbound_type")
                 action = "message" if message["type"] == "pageAutoCandidate" else "cancel"
                 if action == "message":
-                    pending[request_id] = {"rpcId": rpc_id, "action": action, "terminal": False}
+                    pending[request_id] = {"rpcId": rpc_id, "action": action, "terminal": False, "acknowledged": False}
                     production_requests[message["requestId"]] = request_id
                     # Only transport identity fields added, no rewriting production blocks/samples.
                     message = {**message, "tabId": 1, "browserWindowId": 1, "frameId": 0,
@@ -477,64 +587,115 @@ class CaseCapture:
                                 "url": case["finalUrl"], "action": action, "message": message})
                 if action == "cancel":
                     self.browser.qa("acknowledge", rpc_id, {"accepted": True})
-            for _ in range(1000):
+            for _ in range(FORWARD_EVENT_LIMIT):
+                check_deadline(deadline)
                 event = self.host.poll()
                 if event is None:
                     break
                 log.append({"kind": "host_event", "event": event})
+                check_deadline(deadline)
                 if event.get("code") in ("host_eof", "host_invalid_jsonl"):
+                    flush()
                     raise CaptureError(event["code"])
                 if event.get("caseId") != site["id"]:
                     # Late cancellation from a previous site is audited but cannot finish this site.
                     continue
                 entry = pending.get(event.get("id"))
                 if not entry:
+                    flush()
                     raise CaptureError("host_uncorrelated_event")
                 if event["type"] == "error":
-                    if entry.get("rpcId"):
+                    flush()
+                    if entry.get("rpcId") and not entry.get("acknowledged"):
                         self.browser.qa("acknowledge", entry["rpcId"], {"accepted": False, "reason": event.get("code", "host_error")})
+                        entry["acknowledged"] = True
                     raise CaptureError(event.get("code", "host_error"))
                 if event["type"] == "packet":
-                    packet = event["packet"]
-                    wire = json.loads(packet) if isinstance(packet, str) else packet
+                    try:
+                        packet = event["packet"]
+                        wire = json.loads(packet) if isinstance(packet, str) else packet
+                        if not isinstance(wire, dict) or not entry.get("rpcId"):
+                            raise CaptureError("host_invalid_packet")
+                    except (KeyError, TypeError, ValueError, CaptureError):
+                        flush()
+                        raise
                     # Preserve raw serialized frame for receive; acknowledge the transport
-                    # once the host has produced a frame for the submitted candidate.
-                    self.browser.qa("acknowledge", entry["rpcId"], {"accepted": True})
-                    self.browser.qa("deliver", entry["rpcId"], packet)
+                    # once, before delivering its first frame (even across batch boundaries).
+                    acknowledge = not entry["acknowledged"]
+                    # Do not retry an acknowledgement after a partially executed
+                    # eval fails; that case is failed evidence, not a replay.
+                    entry["acknowledged"] = True
+                    queue_frame(entry["rpcId"], packet, acknowledge)
                     if wire.get("error"):
+                        flush()
                         raise CaptureError("backend_packet_error")
                 if event["type"] == "terminal":
+                    flush()
                     entry["terminal"] = True
                     case["terminals"].append(event)
                     if event.get("success") is not True or event.get("failedCount", 0):
                         raise CaptureError("backend_terminal_failed")
                 if event["type"] == "assessment":
+                    flush()
                     case["localAssessment"] = event
                     entry["terminal"] = True
+            flush()
             save()
 
         def settle(phase):
             quiet_since, signature = None, None
+            geometry, geometry_changes = None, 0
             while time.monotonic() - started < self.case_timeout:
                 forward()
+                check_deadline(deadline)
                 value = sample(phase)
-                candidate_signature = encode([value["nodes"], value["predictions"], value["pageDecision"]])
-                done = not value["jobs"] and not value["pending"] and not value["scanning"] and not value["rpcPending"]
-                done = done and value["status"] and value["status"]["state"] in ("skipped", "completed")
-                done = done and all(entry["terminal"] for entry in pending.values() if entry["action"] == "message")
-                if done and candidate_signature == signature:
-                    quiet_since = quiet_since or time.monotonic()
-                    if time.monotonic() - quiet_since >= self.stable_seconds:
-                        return value
+                check_deadline(deadline)
+                candidate_signature = semantic_signature(value)
+                candidate_geometry = geometry_signature(value)
+                geometry_changed = geometry is not None and candidate_geometry != geometry
+                geometry_changes += int(geometry_changed)
+                idle = not value["jobs"] and not value["pending"] and not value["scanning"] and not value["rpcPending"]
+                status_ready = bool(value["status"] and value["status"]["state"] in ("skipped", "completed"))
+                terminals_complete = all(entry["terminal"] for entry in pending.values())
+                # A skipped page may retain untranslated eligible blocks. Their
+                # flags remain evidence for recognition scoring; only a positive
+                # decision requires translation completion. Failures always block.
+                predictions_complete = all(not p.get("failed") and
+                                           (value["pageDecision"] is False or
+                                            p.get("eligible") is False or p.get("completed") is True)
+                                           for p in value["predictions"])
+                decision_known = type(value["pageDecision"]) is bool
+                done = idle and status_ready and terminals_complete and predictions_complete and decision_known
+                unchanged = candidate_signature == signature
+                sampled_at = time.monotonic()
+                if done:
+                    if not unchanged or quiet_since is None:
+                        quiet_since = sampled_at
                 else:
                     quiet_since = None
+                stable_for = sampled_at - quiet_since if quiet_since is not None else 0
+                semantic_stable = done and unchanged and stable_for >= self.stable_seconds
+                observation = {"phase": phase, "at": now(), "semanticUnchanged": unchanged,
+                               "semanticStable": semantic_stable, "stableForSeconds": stable_for,
+                               "geometryChanged": geometry_changed, "geometryVaried": geometry_changes > 0,
+                               "geometryChanges": geometry_changes, "idle": idle, "statusReady": status_ready,
+                               "terminalsComplete": terminals_complete, "predictionsComplete": predictions_complete,
+                               "pageDecisionKnown": decision_known, "layoutReviewRequired": True}
+                log.append({"kind": "stability", **observation})
+                case["stability"][phase] = observation
+                save()
+                check_deadline(deadline)
+                if semantic_stable:
+                    return value
                 signature = candidate_signature
-                time.sleep(self.poll_seconds)
+                geometry = candidate_geometry
+                time.sleep(min(self.poll_seconds, max(0, deadline - time.monotonic())))
             raise CaptureError("case_timeout_without_settlement")
 
         save()
         try:
-            capabilities = self.host.capabilities(site["id"])
+            self.browser.deadline = deadline
+            capabilities = self.host.capabilities(site["id"], timeout=min(15, max(0, deadline - time.monotonic())))
             case["capabilities"] = capabilities
             case["simulation"] = capabilities.get("live") is not True
             case["liveTranslation"] = capabilities.get("live") is True
@@ -555,6 +716,8 @@ class CaseCapture:
                 raise CaptureError("no_visible_source_candidates")
             case["visitSuccess"] = True
             screenshot("before")
+            if self.full_screenshots:
+                screenshot("before-full", full=True)
             configured = True
             if self.browser.qa("configure", {"enabled": True, "active": True, "generation": 1,
                                               "targetLanguage": capabilities.get("targetLanguage"), "concurrency": 10}) is not True:
@@ -571,12 +734,16 @@ class CaseCapture:
                 pending[request_id] = {"action": "assess", "terminal": False}
                 self.host.send({"schemaVersion": 1, "id": request_id, "caseId": site["id"], "url": case["finalUrl"],
                                 "action": "assess", **evidence})
-                deadline = time.monotonic() + 15
+                assessment_deadline = min(deadline, time.monotonic() + 15)
                 while not pending[request_id]["terminal"]:
-                    if time.monotonic() >= deadline:
+                    check_deadline(deadline)
+                    if time.monotonic() >= assessment_deadline:
                         raise CaptureError("assessment_timeout")
-                    forward(); time.sleep(self.poll_seconds)
+                    forward()
+                    time.sleep(min(self.poll_seconds, max(0, assessment_deadline - time.monotonic())))
             screenshot("after")
+            if self.full_screenshots:
+                screenshot("after-full", full=True)
             screenshot("scroll-before")
             self.browser.evaluate("window.scrollBy(0,Math.max(innerHeight*.85,400));true")
             settle("scroll-after"); screenshot("scroll-after")
@@ -595,7 +762,10 @@ class CaseCapture:
             settle("reflow-after"); screenshot("reflow-after")
             self.browser.evaluate("document.body.style.setProperty('max-width',globalThis.__qaLayout.value,globalThis.__qaLayout.priority);delete globalThis.__qaLayout;window.dispatchEvent(new Event('resize'));true")
             settle("stable"); screenshot("stable")
+            if self.full_screenshots:
+                screenshot("stable-full", full=True)
             case["settled"] = True
+            case["semanticStable"] = True
         except (CaptureError, OSError, ValueError, KeyError, TypeError) as error:
             case["errors"].append(error_record(error))
         finally:
@@ -612,7 +782,10 @@ class CaseCapture:
                 event.get("requestCount", 0) > 0 for event in case["terminals"])
             case["evidenceReady"], case["completed"], reasons = completion_gate(case, path)
             case["blockedReason"] = ";".join(reasons)
-            save()
+            try:
+                save()
+            finally:
+                self.browser.deadline = previous_deadline
         return case
 
 
@@ -626,6 +799,8 @@ def main(argv=None):
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--case-timeout", type=float, default=120)
+    parser.add_argument("--full-screenshots", "--full", action="store_true",
+                        help="Also capture before/after/stable full-page screenshots via screenshot --full")
     args = parser.parse_args(argv)
     repo = HERE.parent.parent.resolve()
     evidence = args.evidence_dir.resolve()
@@ -639,7 +814,8 @@ def main(argv=None):
         if not isinstance(host_command, list) or not host_command or not all(isinstance(x, str) for x in host_command):
             raise CaptureError("host_command_must_be_string_list")
         frozen = {**source_identity(repo), "manifestHash": manifest_hash, "hostCommand": host_command,
-                  "wrapper": str(WRAPPER), "session": args.session, "caseTimeout": args.case_timeout}
+                  "wrapper": str(WRAPPER), "session": args.session, "caseTimeout": args.case_timeout,
+                  "fullScreenshots": args.full_screenshots}
         run = EvidenceRun(evidence, args.run_id, frozen, args.resume)
         if not args.resume:
             atomic_json(run.path / "manifest.json", sites)
@@ -653,7 +829,8 @@ def main(argv=None):
                     continue
                 if args.limit is not None and count >= args.limit:
                     break
-                result = CaseCapture(browser, host, run, repo, args.case_timeout).capture(site)
+                result = CaseCapture(browser, host, run, repo, args.case_timeout,
+                                     full_screenshots=args.full_screenshots).capture(site)
                 count += 1
                 issues += int(not result["evidenceReady"])
                 print(encode({"id": site["id"], "completed": result["completed"], "evidenceReady": result["evidenceReady"],
