@@ -12,6 +12,7 @@ public sealed partial class TranslationSettingsViewModel
     private TranslationAuthenticationMode _defaultOpenAiAuthenticationMode;
     private string _chatGptAccountId = "", _defaultChatGptAccountId = "", _chatGptStatus = "登录后可使用获授权的 ChatGPT 订阅额度，无需 API Key。";
     private bool _isChatGptBusy, _updatingChatGptAccounts;
+    private int _accountListRevision;
     public ObservableCollection<string> AuthenticationChoices { get; } = ["API Key", "ChatGPT 登录（使用订阅额度）"];
     public ObservableCollection<ChatGptAccount> ChatGptAccounts { get; } = [];
     public ObservableCollection<TranslationModelChoice> ChatGptModels { get; } = [];
@@ -116,10 +117,18 @@ public sealed partial class TranslationSettingsViewModel
     public async Task RefreshChatGptAccountsAsync(CancellationToken token = default)
     {
         if (ChatGptAccountsLoader is null) return;
+        var revision = ++_accountListRevision;
         var accounts = await ChatGptAccountsLoader(token);
+        if (revision != _accountListRevision || token.IsCancellationRequested) return;
+        var previousAccount = SelectedChatGptAccount;
         _updatingChatGptAccounts = true;
         try { ChatGptAccounts.Clear(); foreach (var account in accounts) ChatGptAccounts.Add(account); }
         finally { _updatingChatGptAccounts = false; }
+        if (previousAccount != SelectedChatGptAccount)
+        {
+            InvalidateConnection(); InvalidateModelList();
+            QueueChatGptModelRefresh();
+        }
         OnPropertyChanged(nameof(SelectedChatGptAccount)); NotifyChatGptState();
     }
     private async Task SignInChatGptAsync(bool newAccount, bool consent, CancellationToken token)
