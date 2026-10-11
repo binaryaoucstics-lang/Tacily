@@ -46,6 +46,8 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
     private readonly TranslationApiOptions _options;
     private readonly Uri _endpoint;
     private string Label => TranslationProviderConfiguration.Label(_options.Provider);
+    private string? RequestedServiceTier => _options.UseChatGptPlan && _options.ChatGptFastModeEnabled
+        ? TranslationProviderConfiguration.ChatGptFastServiceTier : null;
     public event Action<ApiTranslationRequestMetrics>? RequestCompleted;
 
     protected ApiTranslationProvider(HttpClient http, ISecretStore secrets, TranslationApiOptions options, TranslationProviderKind kind)
@@ -145,7 +147,8 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
             var metrics = new ApiTranslationRequestMetrics(_options.Provider, _options.Model, requested, thinking.Mode, thinking.Effort,
                 budget, streaming, stats.Clock.ElapsedMilliseconds, stats.FirstContentMilliseconds,
                 stats.InputTokens, stats.OutputTokens, stats.FinishReason, stats.Outcome)
-                { ReasoningTokens = stats.ReasoningTokens, LastContentMilliseconds = stats.LastContentMilliseconds };
+                { ReasoningTokens = stats.ReasoningTokens, LastContentMilliseconds = stats.LastContentMilliseconds,
+                    RequestedServiceTier = RequestedServiceTier, EffectiveServiceTier = stats.EffectiveServiceTier };
             if (RequestCompleted is { } subscribers)
                 foreach (Action<ApiTranslationRequestMetrics> subscriber in subscribers.GetInvocationList())
                     try { subscriber(metrics); } catch { /* Telemetry never changes the translation outcome. */ }
@@ -170,6 +173,7 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
                 reasoning = thinking.Mode == "reasoning" ? new { effort = thinking.Effort } : null,
                 text = new { format = new { type = "json_object" } },
                 max_output_tokens = _options.UseChatGptPlan ? (int?)null : budget, stream, store = false,
+                service_tier = RequestedServiceTier,
             };
         // Claude's content images have a native base64 source, not Chat Completions image_url objects.
         return new
@@ -346,6 +350,10 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
         }
         if (root.TryGetProperty("error", out var error) && error.ValueKind != JsonValueKind.Null)
             throw new TranslationUnavailableException("OpenAI 没有成功生成译文。");
+        // Only the completed server response establishes the actual tier. Never infer it
+        // from the requested tier, thinking mode or an earlier streaming event.
+        var tier = Text(root, "service_tier");
+        stats.EffectiveServiceTier = tier is "fast" or "priority" or "default" ? tier : null;
         ObserveUsage(root, stats);
         if (allowStreamSummary && !root.TryGetProperty("output", out _)) return string.Empty;
         var text = new StringBuilder();
@@ -435,6 +443,7 @@ public abstract class ApiTranslationProvider : ITranslationProvider, IStreamingT
         internal int? InputTokens;
         internal int? OutputTokens;
         internal string? FinishReason;
+        internal string? EffectiveServiceTier;
         internal DeepSeekRequestOutcome Outcome = DeepSeekRequestOutcome.InvalidResponse;
     }
 }

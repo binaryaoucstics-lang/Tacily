@@ -77,6 +77,10 @@ public sealed class ChatGptException : TranslationException
         // Known recovery guidance remains actionable; unfamiliar failures expose their actual reason.
         if (serverMessage is not null && message != serverMessage) message += " 原因：" + serverMessage;
         if (detail is not null && detail != serverMessage && message != detail) message += " " + detail;
+        if (parameter == "service_tier" || code?.Contains("service_tier", StringComparison.OrdinalIgnoreCase) == true
+            || serverMessage?.Contains("service_tier", StringComparison.OrdinalIgnoreCase) == true
+            || detail?.Contains("service_tier", StringComparison.OrdinalIgnoreCase) == true)
+            message = "ChatGPT 快速模式请求未被接受，请关闭快速模式或更换可用模型。 " + message;
         message = SafeText(message, 1000) + StatusAndParameter(status, parameter);
         return new(message, code, status, requestId, parameter, shape, errorType, serverMessage, detail);
     }
