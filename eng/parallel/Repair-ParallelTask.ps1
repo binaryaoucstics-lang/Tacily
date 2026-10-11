@@ -20,7 +20,7 @@ try {
     if ($task.ContainsKey('launchState') -and $task.launchState -eq 'starting' -and -not $snapshot.process) {
         throw 'Interrupted startup has no worker metadata; process identity is uncertain. Controller must establish that no worker launched before repair.'
     }
-    if ($snapshot.status -notin @('failed','blocked','needs_rework','timed_out','completed')) { throw "Task cannot be repaired from status $($snapshot.status)." }
+    if ($snapshot.status -notin @('failed','blocked','needs_rework','timed_out','completed','validation_resolved')) { throw "Task cannot be repaired from status $($snapshot.status)." }
     Assert-ParallelTaskWorktree $state $task
     if ($task.attemptPath) {
         $attempt = Assert-ParallelChildPath $RunPath $task.attemptPath
@@ -32,8 +32,14 @@ try {
     }
     # Preserve both the state transition and instructions without changing attempt evidence or checkout.
     if (-not $task.ContainsKey('repairs')) { $task.repairs = @() }
-    $task.repairs = @($task.repairs) + @(@{ at = [DateTime]::UtcNow.ToString('o');
-        attempt = $task.attempt; previousStatus = $snapshot.status; previousError = $snapshot.error; instructions = $Instructions })
+    $repair = @{ at = [DateTime]::UtcNow.ToString('o'); attempt = $task.attempt;
+        previousStatus = $snapshot.status; previousError = $snapshot.error; instructions = $Instructions }
+    if ($task.ContainsKey('blockResolutionPath')) {
+        # The prior proof belongs to the retained attempt, never the next outputs.
+        $repair.previousBlockResolutionPath = $task.blockResolutionPath
+        $task.Remove('blockResolutionPath')
+    }
+    $task.repairs = @($task.repairs) + @($repair)
     $task.instructions += "`n`nRepair instructions ($([DateTime]::UtcNow.ToString('o'))):`n$Instructions"
     $task.status = 'pending'; $task.workerPid = $null; $task.verifiedCommit = $null; $task.error = ''
     $state.status = 'prepared'

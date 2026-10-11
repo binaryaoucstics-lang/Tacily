@@ -114,6 +114,8 @@ main HEAD 等于启动时 mainHead 且可快进，只执行 `merge --ff-only`。
 并通过 Sync 纳入 integration，否则 main 提升失败。该步骤不授予 worker 任何新权限。
 解析器必须已正常退出、原始证据不变、代码归属/HEAD 正确、全部原验收命令成功且未改源文件，
 才记为 `validation_resolved`；随后仍运行正常 Review、人工差异审查、提交和完整门禁。
+若差异审查发现代码缺陷，尚未集成的 `validation_resolved` 任务可正常 Repair；旧解析报告
+路径保存在 repairs 历史中并取消当前引用，新 attempt 必须重新验收，不能复用旧证明。
 权限或实现缺陷尚未解决时不得使用此步骤，失败保留 blocked 状态。无需修改原结果为 completed。
 
 - 任务：`pending → running → completed → reviewed → integrated`。`completed` 只是 CLI

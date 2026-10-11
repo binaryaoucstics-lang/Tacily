@@ -19,6 +19,23 @@ Invoke-WorkflowTest 'controller resolution preserves blocked result and still re
     Assert-Workflow ((Read-WorkflowState $f).tasks[0].status -eq 'reviewed') 'Resolved task was not normally reviewed.'
 }
 
+Invoke-WorkflowTest 'resolved validation can be repaired without reusing or deleting its proof' {
+    $f = New-ResolutionFixture 'resolve-then-repair'; $task = (Read-WorkflowState $f).tasks[0]
+    $resultPath = Join-Path $task.attemptPath 'result.json'
+    $originalResult = (Get-FileHash -LiteralPath $resultPath).Hash
+    Assert-WorkflowSuccess (Invoke-WorkflowScript 'Resolve-ParallelTaskBlock.ps1' @('-RunPath',$f.runPath,'-TaskId','alpha','-ResolutionNotes','Original acceptance passed; code still requires review.'))
+    $resolved = (Read-WorkflowState $f).tasks[0]
+    $proofPath = $resolved.blockResolutionPath
+    $proofHash = (Get-FileHash -LiteralPath $proofPath).Hash
+    Assert-WorkflowSuccess (Invoke-WorkflowScript 'Repair-ParallelTask.ps1' @('-RunPath',$f.runPath,'-TaskId','alpha','-Instructions','Fix independently reviewed code defect.'))
+    $requeued = (Read-WorkflowState $f).tasks[0]
+    Assert-Workflow ($requeued.status -eq 'pending' -and -not $requeued.ContainsKey('blockResolutionPath')) 'Repair reused the old resolution.'
+    Assert-Workflow ($requeued.repairs[-1].previousStatus -eq 'validation_resolved' -and $requeued.repairs[-1].previousBlockResolutionPath -eq $proofPath) 'Resolution history was lost.'
+    Assert-Workflow ((Get-FileHash -LiteralPath $proofPath).Hash -eq $proofHash -and (Get-FileHash -LiteralPath $resultPath).Hash -eq $originalResult) 'Original resolution or blocked evidence changed.'
+    Assert-Workflow ((Get-ParallelHead $task.worktree) -eq (Read-WorkflowState $f).baseline) 'Repair committed task code.'
+    Assert-WorkflowRejected (Invoke-WorkflowScript 'Review-ParallelTask.ps1' @('-RunPath',$f.runPath,'-TaskId','alpha','-Approve')) 'status=pending'
+}
+
 Invoke-WorkflowTest 'failed controller validation retains block and cannot commit' {
     $f = New-ResolutionFixture 'resolve-failing-validation'; $task = (Read-WorkflowState $f).tasks[0]
     [IO.File]::WriteAllText((Join-Path $task.worktree 'outputs/alpha.txt'),'validation-failure')
