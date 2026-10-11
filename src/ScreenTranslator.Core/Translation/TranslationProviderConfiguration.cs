@@ -17,7 +17,9 @@ public static class TranslationProviderConfiguration
     public const string DefaultClaudeModel = "claude-sonnet-5-5";
     public const string DefaultOpenAiBaseUrl = "https://api.openai.com/v1";
     public const string DefaultClaudeBaseUrl = "https://api.anthropic.com/v1";
-    public const string ChatGptFastServiceTier = "fast";
+    // Fast is the mode name; OAuth requests use Codex's wire value for compatibility.
+    // https://learn.chatgpt.com/docs/config-file/config-reference (service_tier)
+    public const string ChatGptFastServiceTier = "priority";
 
     public static IReadOnlyList<string> Models(TranslationProviderKind provider) => provider switch
     {
