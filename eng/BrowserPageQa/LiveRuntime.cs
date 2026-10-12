@@ -21,8 +21,19 @@ internal sealed class LiveRuntime : IDisposable
     private DpapiSecretStore? _secrets;
     private ChatGptAccountService? _accounts;
 
-    public static async Task<AppSettings> LoadSettingsAsync(bool useRunningPreset = false, string? snapshotPath = null)
+    public static async Task<AppSettings> LoadSettingsAsync(bool useRunningPreset = false, string? snapshotPath = null,
+        bool pinnedPreset = false)
     {
+        if (pinnedPreset)
+        {
+            if (snapshotPath is null) throw new InvalidDataException("saved_snapshot_required");
+            using var snapshot = JsonDocument.Parse(await File.ReadAllTextAsync(snapshotPath).ConfigureAwait(false));
+            var pinned = ReadPinnedSnapshot(snapshot.RootElement);
+            var credential = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "GlobalAITranslator", "secrets", TranslationProviderConfiguration.SecretName(pinned) + ".bin");
+            if (!File.Exists(credential)) throw new InvalidDataException("saved_snapshot_credential_missing");
+            return pinned;
+        }
         // JsonSettingsStore.LoadAsync backs up corrupt settings. This read-only host must not use it.
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "GlobalAITranslator", "settings.json");
@@ -69,6 +80,25 @@ internal sealed class LiveRuntime : IDisposable
             || TranslationProviderConfiguration.BaseUrl(settings).TrimEnd('/') != "https://api.deepseek.com"
             || TranslationProviderConfiguration.ActivePreset(settings) is null)
             throw new InvalidDataException("running_snapshot_unsupported");
+        return settings;
+    }
+
+    // Explicit controller-selected archive, not a claim about current GUI state.
+    // The archive is trusted input from a previously verified successful preset.
+    // No provider/key trials, settings writes or default-credential fallback.
+    internal static AppSettings ReadPinnedSnapshot(JsonElement snapshot)
+    {
+        if (snapshot.GetProperty("schemaVersion").GetInt32() != 1
+            || snapshot.GetProperty("runningCacheScope").GetString() is not { Length: 64 } scope
+            || !scope.All(Uri.IsHexDigit)) throw new InvalidDataException("saved_snapshot_invalid");
+        var settings = snapshot.GetProperty("settings").Deserialize<AppSettings>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!
+            .Migrate(out _);
+        if (TranslationProviderConfiguration.Provider(settings) != TranslationProviderKind.DeepSeek
+            || TranslationProviderConfiguration.Model(settings) != "deepseek-flash"
+            || TranslationProviderConfiguration.BaseUrl(settings).TrimEnd('/') != "https://api.deepseek.com"
+            || TranslationProviderConfiguration.ActivePreset(settings) is not { } preset
+            || !Guid.TryParseExact(preset.Id, "N", out _))
+            throw new InvalidDataException("saved_snapshot_unsupported");
         return settings;
     }
 
