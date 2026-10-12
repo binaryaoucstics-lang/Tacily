@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Encodings.Web;
+using System.Text.RegularExpressions;
 using ScreenTranslator.Core.Models;
 
 namespace ScreenTranslator.Core.Translation;
@@ -80,7 +81,13 @@ internal static class TranslationPromptBuilder
         return new(systemPrompt, content);
     }
 
-    private sealed record PageSourceFacts(string[] NumericLiterals, bool IsPartial);
+    private sealed record PageSourceFacts(string[] NumericLiterals, string[]? DecadeLiterals, bool IsPartial);
+
+    // Lexical excerpts only, not validation or normalized calendar claims. Keep
+    // the phase with its decade; a bare number cannot convey that source wording.
+    private static readonly Regex PageDecadeLiterals = new(
+        @"(?<![\p{L}\p{N}_.+])(?:(?:early|mid|late)[\s-]+)?[0-9]{3}0['’]?s\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
 
     private static PageSourceFacts? PageSourceFactsFromText(string? text)
     {
@@ -121,7 +128,24 @@ internal static class TranslationPromptBuilder
             literals.Add(text.Substring(start, length));
             totalCharacters += length;
         }
-        return literals.Count == 0 && !partial ? null : new(literals.ToArray(), partial);
+        var decades = new List<string>();
+        var decadeCharacters = 0;
+        // Independently bound each excerpt collection to 16 entries, 64 characters
+        // per entry and 512 total characters, scanning only the same 4096 prefix.
+        foreach (Match match in PageDecadeLiterals.Matches(text[..limit]))
+        {
+            var end = match.Index + match.Length;
+            // A word crossing the scan boundary is not a complete source excerpt.
+            if (end == limit && limit < text.Length
+                && (char.IsLetterOrDigit(text[limit]) || text[limit] == '_')) continue;
+            if (match.Length > maxLiteralCharacters) { partial = true; continue; }
+            if (decades.Count == maxLiterals || decadeCharacters + match.Length > maxTotalCharacters)
+            { partial = true; break; }
+            decades.Add(match.Value);
+            decadeCharacters += match.Length;
+        }
+        return literals.Count == 0 && decades.Count == 0 && !partial ? null
+            : new(literals.ToArray(), decades.Count == 0 ? null : decades.ToArray(), partial);
     }
 
     private static bool IsNumericSeparator(char value) => value is '.' or ',' or ':' or '/' or '-';
