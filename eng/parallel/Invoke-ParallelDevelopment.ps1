@@ -143,6 +143,9 @@ try {
                 $copyPath = Join-Path $task.attemptPath 'result.json'
                 if (-not (Test-Path -LiteralPath $copyPath)) { Copy-Item -LiteralPath $rawResult -Destination $copyPath }
             }
+            # The child join can complete metadata and result publication after
+            # the first PID observation. Classify only the refreshed evidence.
+            $snapshot = Get-ParallelRuntimeSnapshot $state $task
             $task.status = $snapshot.status; $task.error = $snapshot.error; $task.workerPid = $null
             Save-ParallelRuntimeState $state
         }
