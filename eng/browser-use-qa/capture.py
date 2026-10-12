@@ -110,6 +110,68 @@ def screenshot_content_signature(value, dynamic_sources=()):
     return hashlib.sha256(encode([nodes, value["pageDecision"]]).encode("utf-8")).hexdigest()
 
 
+def content_observation(value):
+    """The actual visible rows and their independent evidence at one timestamp."""
+    visible = {row["id"] for row in value["nodes"]}
+    return {"at": value.get("at"), "pageDecision": value["pageDecision"],
+            "nodes": value["nodes"], "predictions": value["predictions"],
+            "sourceNodes": [row for row in value["sourceNodes"] if row["id"] in visible]}
+
+
+def authored_content_changes(before, after, observed=()):
+    """Explain source versions/visibility, never changed display on the same source.
+
+    IDs come from the independent adapter traversal. A locator plus unchanged
+    source also protects against display changes disguised by a fresh ID. Keep
+    last visible rows across gaps; hiding and revealing a source is not a license
+    to change its translation. Geometry remains an independent review question.
+    """
+    changes, dynamic, unexplained = [], set(), set()
+    seen, seen_predictions = {}, {}
+    previous = None
+    valid = before["pageDecision"] is after["pageDecision"]
+    for value in (before, *observed, after):
+        valid &= value["pageDecision"] is after["pageDecision"]
+        nodes = {row["id"]: row for row in value["nodes"]}
+        independent = {row["id"]: row for row in value["sourceNodes"]}
+        valid &= len(nodes) == len(value["nodes"])
+        for sid, row in nodes.items():
+            source = row.get("sourceText")
+            valid &= (isinstance(source, str) and isinstance(row.get("displayedText"), str)
+                      and sid in independent and independent[sid].get("sourceText") == source)
+            keys = [("id", sid, source)]
+            if row.get("locator"):
+                keys.append(("locator", row["locator"], source))
+            display = [row.get(k) for k in ("displayedText", "tag", "role")]
+            for key in keys:
+                if key in seen and seen[key] != display:
+                    unexplained.add(sid)
+                seen[key] = display
+        predictions = {}
+        for prediction in value["predictions"]:
+            key = (prediction.get("sourceId"), prediction.get("sourceText"))
+            predictions.setdefault(key, []).append(encode([prediction.get(k) for k in
+                ("text", "eligible", "completed", "failed", "sourceEvidence", "auditIssue")]))
+        for key, pieces in predictions.items():
+            state = sorted(pieces)
+            if key in seen_predictions and seen_predictions[key] != state:
+                unexplained.add(key[0])
+            seen_predictions[key] = state
+        if previous is not None:
+            added, removed = nodes.keys() - previous.keys(), previous.keys() - nodes.keys()
+            versions = {sid for sid in nodes.keys() & previous.keys()
+                        if nodes[sid].get("sourceText") != previous[sid].get("sourceText")}
+            if added or removed or versions:
+                dynamic.update(added | removed | versions)
+                changes.append({"at": value.get("at"), "addedSourceIds": sorted(added),
+                                "removedSourceIds": sorted(removed), "changedSourceIds": sorted(versions)})
+        previous = nodes
+    return {"explained": bool(changes) and bool(valid) and not unexplained,
+            "independentEvidenceComplete": bool(valid), "changes": changes,
+            "dynamicSourceIds": sorted(dynamic),
+            "unexplainedSourceIds": sorted(sid for sid in unexplained if sid is not None)}
+
+
 def error_record(error, prefix=""):
     record = {"code": prefix + (str(error) if isinstance(error, CaptureError) else type(error).__name__), "at": now()}
     if isinstance(error, OSError):
@@ -309,6 +371,7 @@ class JsonlHost:
         if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
             raise CaptureError("host_command_must_be_string_list")
         self.journal, self.events, self.backlog = journal, queue.Queue(), []
+        self.sent_requests = {}
         self.process = factory(command, shell=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
         self.threads = [threading.Thread(target=self._read, daemon=True),
@@ -341,6 +404,29 @@ class JsonlHost:
             self.process.stdin.flush()
         except (OSError, ValueError) as error:
             raise CaptureError("host_write_failed") from error
+        self.sent_requests[(request.get("id"), request.get("caseId"))] = request.get("action")
+
+    def owns_event(self, event):
+        return (event.get("id"), event.get("caseId")) in self.sent_requests
+
+    def validate_late_event(self, event):
+        action = self.sent_requests.get((event.get("id"), event.get("caseId")))
+        allowed = {"capabilities": ("capabilities", "error"), "assess": ("assessment", "error"),
+                   "message": ("packet", "terminal", "error"), "cancel": ("packet", "terminal", "error")}
+        if event.get("type") not in allowed.get(action, ()):
+            raise CaptureError("host_uncorrelated_event")
+        if event["type"] == "packet":
+            try:
+                packet = event["packet"]
+                wire = json.loads(packet) if isinstance(packet, str) else packet
+                if not isinstance(wire, dict):
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError) as error:
+                raise CaptureError("host_invalid_packet") from error
+        if event["type"] == "capabilities" and (type(event.get("live")) is not bool or
+                not isinstance(event.get("targetLanguage"), str) or
+                not 0 < len(event["targetLanguage"]) <= 64):
+            raise CaptureError("invalid_capabilities")
 
     def poll(self, timeout=0):
         if self.backlog:
@@ -357,21 +443,42 @@ class JsonlHost:
                    "action": "capabilities", "caseId": case_id}
         self.send(request)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            event = self.poll(min(.25, max(0, deadline - time.monotonic())))
-            if event and event.get("type") == "capabilities":
-                if event.get("id") != request["id"] or event.get("caseId") != request["caseId"]:
+        # Do not poll events deferred by this handshake again. Restore the
+        # original order even on failure so later forwarding retains the evidence.
+        deferred = []
+        events_read = 0
+        try:
+            while time.monotonic() < deadline:
+                event = self.poll(min(.25, max(0, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    if event is not None:
+                        self.backlog.insert(0, event)
+                    raise CaptureError("capabilities_timeout")
+                if event is None:
+                    continue
+                events_read += 1
+                if event.get("code") in ("host_eof", "host_invalid_jsonl"):
+                    raise CaptureError(event["code"])
+                if event.get("caseId") != case_id and self.owns_event(event):
+                    deferred.append(event)
+                    self.journal.append({"kind": "host_deferred_event", "waitingFor": request, "event": event})
+                    self.validate_late_event(event)
+                    if events_read >= FORWARD_EVENT_LIMIT:
+                        raise CaptureError("capabilities_event_limit")
+                    continue
+                if event.get("id") != request["id"] or event.get("caseId") != case_id:
                     raise CaptureError("capabilities_identity_mismatch")
-                if type(event.get("live")) is not bool or not isinstance(event.get("targetLanguage"), str) \
-                        or not event["targetLanguage"] or len(event["targetLanguage"]) > 64:
-                    raise CaptureError("invalid_capabilities")
-                return event
-            if event and event.get("type") == "error":
-                if event.get("code") not in ("host_eof", "host_invalid_jsonl") and (
-                        event.get("id") != request["id"] or event.get("caseId") != request["caseId"]):
-                    raise CaptureError("capabilities_identity_mismatch")
-                raise CaptureError(event.get("code", "host_error"))
-        raise CaptureError("capabilities_timeout")
+                if event.get("type") == "capabilities":
+                    if type(event.get("live")) is not bool or not isinstance(event.get("targetLanguage"), str) \
+                            or not event["targetLanguage"] or len(event["targetLanguage"]) > 64:
+                        raise CaptureError("invalid_capabilities")
+                    return event
+                if event.get("type") == "error":
+                    raise CaptureError(event.get("code", "host_error"))
+                raise CaptureError("host_unexpected_capabilities_event")
+            raise CaptureError("capabilities_timeout")
+        finally:
+            self.backlog[:0] = deferred
 
     def close(self):
         self.process.stdin.close()
@@ -591,6 +698,7 @@ class CaseCapture:
         configured = False
         installed = False
         backend_failed = False
+        content_observations = []
 
         def save():
             atomic_json(path / "case.json", case, on_retry=log.append)
@@ -601,6 +709,7 @@ class CaseCapture:
             if not isinstance(value, dict):
                 raise CaptureError("adapter_lost_or_invalid")
             log.append({"kind": "sample", "phase": phase, "value": value})
+            content_observations.append(content_observation(value))
             for row in value["sourceNodes"]:
                 source_history[row["id"]] = row
             for row in value["predictions"]:
@@ -640,9 +749,12 @@ class CaseCapture:
                                         "sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "fullPage": full,
                                         "contentSignature": screenshot_content_signature(value),
                                         "dynamicContentSignature": screenshot_content_signature(value,
-                                            case["stability"].get("stable", {}).get("dynamicSourceIds", [])),
+                                            case["stability"].get("stable", {}).get("dynamicDisplaySourceIds", [])),
                                         "semanticSignature": hashlib.sha256(semantic_signature(value).encode("utf-8")).hexdigest(),
                                         "requestCount": len(case["requestIds"]),
+                                        "sampleAt": value.get("at"),
+                                        "contentObservation": content_observations[-1],
+                                        "observationIndex": len(content_observations) - 1,
                                         **({"basePhase": base_phase} if base_phase is not None else {})})
             save()
             check_deadline(deadline)
@@ -695,6 +807,18 @@ class CaseCapture:
                         raise CaptureError(event["code"])
                     if event.get("caseId") != site["id"]:
                         # Late cancellation from a previous site is audited but cannot finish this site.
+                        owns = getattr(self.host, "owns_event", None)
+                        if owns is not None and not owns(event):
+                            flush()
+                            raise CaptureError("host_uncorrelated_event")
+                        validate = getattr(self.host, "validate_late_event", None)
+                        if validate is not None:
+                            try:
+                                validate(event)
+                            except CaptureError:
+                                flush()
+                                raise
+                        case.setdefault("lateHostEvents", []).append(event)
                         continue
                     entry = pending.get(event.get("id"))
                     if not entry:
@@ -799,6 +923,8 @@ class CaseCapture:
             geometry, geometry_changes = None, 0
             content, content_changed = None, False
             source_content, dynamic_sources = {}, set()
+            authored_sources = set()
+            previous_nodes = None
             while time.monotonic() - started < self.case_timeout:
                 value = forward(phase)
                 check_deadline(deadline)
@@ -813,6 +939,10 @@ class CaseCapture:
                 candidate_content = screenshot_content_signature(value)
                 content_changed |= content is not None and candidate_content != content
                 content = candidate_content
+                current_nodes = {row["id"]: row.get("sourceText") for row in value["nodes"]}
+                if previous_nodes is not None:
+                    authored_sources.update(current_nodes.keys() ^ previous_nodes.keys())
+                previous_nodes = current_nodes
                 for row in value["nodes"]:
                     row_content = encode([row.get("sourceText"), row.get("displayedText")])
                     source_id = row.get("id")
@@ -853,7 +983,8 @@ class CaseCapture:
                                "terminalsComplete": terminals_complete, "predictionsComplete": predictions_complete,
                                "modelRequestsZero": model_requests_zero,
                                "contentVaried": content_changed,
-                               "dynamicSourceIds": sorted(sid for sid in dynamic_sources if sid is not None),
+                               "dynamicSourceIds": sorted(sid for sid in dynamic_sources | authored_sources if sid is not None),
+                               "dynamicDisplaySourceIds": sorted(sid for sid in dynamic_sources if sid is not None),
                                "pageDecisionKnown": decision_known, "layoutReviewRequired": True}
                 log.append({"kind": "stability", **observation})
                 case["stability"][phase] = observation
@@ -870,7 +1001,7 @@ class CaseCapture:
             # Screenshot commands can trigger production scans, work and text
             # changes. Every final observation uses the normal settlement proof,
             # host forwarding and the original deadline, before QA disposal.
-            dynamic_sources = (case["stability"]["stable"]["dynamicSourceIds"]
+            dynamic_sources = (case["stability"]["stable"]["dynamicDisplaySourceIds"]
                                if case["pageDecision"] is False else [])
             for refresh in range(FINAL_SCREENSHOT_REFRESH_LIMIT + 1):
                 value = settle("final-idle")
@@ -890,9 +1021,26 @@ class CaseCapture:
                 current = all(latest[phase]["requestCount"] == len(case["requestIds"]) and
                               latest[phase]["semanticSignature"] == final_semantics
                               for phase in phases)
+                authored = {phase: authored_content_changes(
+                    latest[phase]["contentObservation"], content_observations[-1],
+                    content_observations[latest[phase]["observationIndex"] + 1:-1]) for phase in phases}
+                # A real settled final state can follow an authored carousel
+                # version/visibility change. Images remain timestamped evidence,
+                # not a claim of static content. Unchanged-source display changes
+                # still require refresh/exhaustion under the original limit.
+                authored_current = all(
+                    latest[phase]["requestCount"] == len(case["requestIds"]) and
+                    ((latest[phase]["contentSignature"] == screenshot_content_signature(value) and
+                      latest[phase]["semanticSignature"] == final_semantics) or authored[phase]["explained"])
+                    for phase in phases)
+                timestamped_dynamic = authored_current and any(a["explained"] for a in authored.values())
+                observed_dynamic_ids = sorted(set(case["stability"]["stable"]["dynamicSourceIds"]).union(
+                    *(set(a["dynamicSourceIds"]) for a in authored.values())))
                 proof = {"refreshes": refresh, "contentMatches": content_matches,
-                         "dynamicSkippedContent": dynamic_skipped, "dynamicSourceIds": dynamic_sources,
-                         "screenshotsCurrent": current and comparable_content_matches, "at": value.get("at"),
+                         "dynamicSkippedContent": dynamic_skipped, "dynamicSourceIds": observed_dynamic_ids,
+                         "timestampedDynamicContent": timestamped_dynamic, "authoredSourceChanges": authored,
+                         "screenshotsCurrent": (current and comparable_content_matches) or authored_current,
+                         "at": value.get("at"),
                          "contentSignature": screenshot_content_signature(value),
                          "paths": [latest[phase]["path"] for phase in phases],
                          "images": [{"basePhase": phase, **{key: latest[phase][key]
