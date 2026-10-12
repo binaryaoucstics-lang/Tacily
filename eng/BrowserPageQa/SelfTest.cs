@@ -28,6 +28,7 @@ internal static class SelfTest
             ("read-only-settings-migration-and-corruption", SettingsAsync),
             ("running-preset-scope-resolution", RunningPresetAsync),
             ("verified-running-snapshot-rejects-drift", SnapshotAsync),
+            ("explicit-saved-snapshot-selects-only-supported-preset", PinnedSnapshotAsync),
             ("continuation-reuses-document-assessment", ContinuationAsync),
             ("bounded-jsonl-and-eof-drain", InputAsync),
             ("broken-output-cannot-exit-successfully", TransportAsync),
@@ -278,6 +279,27 @@ internal static class SelfTest
         var rejected = false;
         try { LiveRuntime.ReadVerifiedSnapshot(unsupported, scope, settings.TargetLanguage); } catch (InvalidDataException) { rejected = true; }
         Check(rejected);
+        return Task.CompletedTask;
+    }
+
+    private static Task PinnedSnapshotAsync()
+    {
+        var id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var settings = new AppSettings { SelectedTranslationPresetId = id, TranslationProviderPresets = [new()
+            { Id = id, Provider = TranslationProviderKind.DeepSeek, Model = "deepseek-flash", BaseUrl = "https://api.deepseek.com" }] };
+        JsonElement Snapshot(AppSettings value) => JsonSerializer.SerializeToElement(new
+            { schemaVersion = 1, runningCacheScope = new string('a', 64), settings = value });
+        var pinned = LiveRuntime.ReadPinnedSnapshot(Snapshot(settings));
+        Check(pinned.SelectedTranslationPresetId == id && TranslationProviderConfiguration.SecretName(pinned) == "translation-preset-" + id);
+        foreach (var candidate in new[] {
+            settings with { SelectedTranslationPresetId = "" },
+            settings with { TranslationProviderPresets = [settings.TranslationProviderPresets[0] with { Model = "deepseek-pro" }] },
+            settings with { TranslationProviderPresets = [settings.TranslationProviderPresets[0] with { BaseUrl = "https://other.invalid" }] } })
+        {
+            var rejected = false;
+            try { LiveRuntime.ReadPinnedSnapshot(Snapshot(candidate)); } catch (InvalidDataException) { rejected = true; }
+            Check(rejected);
+        }
         return Task.CompletedTask;
     }
 
