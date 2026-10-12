@@ -469,13 +469,20 @@
     return { text, positions };
   }
   function canonicalSpace(code) { return code === 32 || code === 9 || code === 10 || code === 12 || code === 13; }
-  function completedPdfSpacing(previous, next) {
+  function sourceLink(node) {
+    for (let parent = composedParent(node); parent; parent = composedParent(parent)) {
+      if (parent.tagName === "A") return parent;
+      if (semanticTags.has(parent.tagName)) break;
+    }
+    return null;
+  }
+  function completedSourceSpacing(previous, next) {
     if (!previous.length || !next.length) return false;
     const source = previous.map(record => record.source).join("");
     if (source === next.map(record => record.source).join("")
         || previous.some(record => record.groupText !== source || record.selectionScoped || record.atomicOwner
           || record.pieces.some(piece => piece.id && (!piece.complete || piece.failed)))
-        || !previous.some(record => record.source === "(PDF)" && record.pieces.some(piece => piece.id && piece.complete))) return false;
+        || !previous.some(record => record.pieces.some(piece => piece.id && piece.complete))) return false;
     const previousByNode = new Map(previous.map(record => [record.node, record]));
     const nextByNode = new Map(next.map(record => [record.node, record]));
     function sameSlots(left, right) {
@@ -484,24 +491,27 @@
     }
     if (previous.some(record => !sameSlots(record, nextByNode.get(record.node)))
         || next.some(record => !sameSlots(previousByNode.get(record.node), record))) return false;
-    // Only separate horizontal separator nodes before an unchanged PDF label
-    // are optional. Every word, fact, selected source and its DOM owner stays
-    // exact; this is deliberately not a whitespace-normalized paragraph cache.
+    // Only separate horizontal nodes before PDF or between distinct unchanged
+    // link owners are optional. Spaces inside authored prose/links, dates and
+    // punctuation remain exact; never normalize an entire paragraph for reuse.
     function substantive(records) {
       return records.filter((record, index) => {
         if (!/^[ \t]+$/u.test(record.source)) return true;
         let left = index - 1, right = index + 1;
         while (left >= 0 && /^[ \t]+$/u.test(records[left].source)) left--;
         while (right < records.length && /^[ \t]+$/u.test(records[right].source)) right++;
-        return !(left >= 0 && /\p{L}$/u.test(records[left].source)
-          && records[right]?.source === "(PDF)");
+        const before = records[left], after = records[right];
+        const linkGap = !record.sourceLink && before?.sourceLink && after?.sourceLink
+          && before.sourceLink !== after.sourceLink && /^\p{L}/u.test(after.source);
+        return !(before && /\p{L}$/u.test(before.source)
+          && (after?.source === "(PDF)" || linkGap));
       });
     }
     const before = substantive(previous), after = substantive(next);
     return before.length === after.length && before.every((record, index) => {
       const current = after[index];
       return record.node === current.node && record.source === current.source && record.groupElement === current.groupElement
-        && sameSlots(record, current);
+        && record.sourceLink === current.sourceLink && sameSlots(record, current);
     });
   }
   function randomIdentifier(implementation = root.crypto) {
@@ -576,7 +586,7 @@
       const renderSlots = new Set();
       for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") renderSlots.add(ancestor);
       const bounds = layout.bounds(element);
-      const record = { node, source, lastWritten: node.nodeValue, groupId: group.id, groupKind: group.kind, groupElement: element,
+      const record = { node, source, sourceLink: sourceLink(node), lastWritten: node.nodeValue, groupId: group.id, groupKind: group.kind, groupElement: element,
         groupOrder: group.records.length, groupSourceStart: group.text.length, renderSlots, pieces: [], before, renderEligible: true,
         visible: !!bounds && bounds.bottom > 0 && bounds.top < viewportHeight };
       for (const sourcePiece of policy.splitText(source)) {
@@ -610,17 +620,17 @@
       const groupBlockStart = blocks.length;
       const unchanged = group.records.every(record => record.before?.groupId && record.before.source === record.source
         && record.before.groupElement === group.element && record.before.groupText === group.text);
-      const pdfSpacing = !selectedRanges && completedPdfSpacing(previousGroups.get(group.element) || [], group.records);
-      if (unchanged || pdfSpacing) {
-        group.id = (pdfSpacing ? previousGroups.get(group.element)[0] : group.records[0].before).groupId;
+      const sourceSpacing = !selectedRanges && completedSourceSpacing(previousGroups.get(group.element) || [], group.records);
+      if (unchanged || sourceSpacing) {
+        group.id = (sourceSpacing ? previousGroups.get(group.element)[0] : group.records[0].before).groupId;
         for (const record of group.records) record.groupId = group.id;
       }
       for (const record of group.records) {
         // Prefixes require an exact paragraph; complete output also tolerates
-        // the proven separate PDF gap. A changed date or inline neighbour must
+        // a proven separate horizontal gap. A changed date or inline neighbour must
         // not leave fragments displaying facts from the previous paragraph.
         const before = record.before;
-        if (before?.source === record.source && before.groupElement === group.element && (before.groupText === group.text || pdfSpacing))
+        if (before?.source === record.source && before.groupElement === group.element && (before.groupText === group.text || sourceSpacing))
           record.pieces = before.pieces.map(piece => ({ ...piece }));
         record.groupText = group.text; record.groupHash = group.sourceDigest; delete record.before;
         if (selectedRanges) applySelectedPieces(record, selectedRanges.get(record.node) || []);
@@ -1018,10 +1028,17 @@
         knownOpenRoots = snapshot.openRoots;
         environment.onOpenRoots?.(knownOpenRoots);
         const nextRecords = new Map(snapshot.records.map(record => [record.node, record]));
+        const currentElements = new Set(snapshot.records.map(record => record.groupElement));
         // A scroll-driven collapsed component still owns its translated text.
         // Keep its original snapshot while hidden so showing it cannot mistake
         // our Chinese output for newly authored page content.
-        for (const [node, record] of records) if (!nextRecords.has(node) && node.isConnected !== false) nextRecords.set(node, record);
+        for (const [node, record] of records) if (!nextRecords.has(node) && node.isConnected !== false
+            // An omitted horizontal separator in a still-rendered group has no
+            // translated value to retain. Keeping its obsolete groupText would
+            // poison the next removal/insertion proof. Hidden whole groups and
+            // every substantive/factual record still retain their provenance.
+            && !(currentElements.has(record.groupElement) && /^[ \t]*$/u.test(record.source)
+              && !record.pieces.some(piece => piece.id))) nextRecords.set(node, record);
         records = nextRecords;
         blocks = new Map(snapshot.blocks.map(block => [block.id, block])); queue = snapshot.blocks.filter(block => !block.piece.complete);
         // New untouched source already passed the scan's rendering proof. It
@@ -1559,6 +1576,12 @@
         for (const node of walkAccessibleNodes(element)) {
           if (node.nodeType !== 3 || groupElement(node) !== element || !permitted(node, environment.getStyle, environment.fragmentGroups)) continue;
           const before = records.get(node);
+          // A collapsed horizontal gap has no Range rectangle and was absent
+          // from extraction. Including it only in this guard makes every exact
+          // source repaint retire the group again, even with an identical hash.
+          // Keep all tracked records and every factual/nonhorizontal sibling.
+          if (!before && /^[ \t]*$/u.test(node.nodeValue) && environment.isRenderedText
+              && !environment.isRenderedText(node)) continue;
           text += before && node.nodeValue === before.lastWritten ? before.source : node.nodeValue;
         }
         return text === expected;
@@ -1648,16 +1671,16 @@
         return changed;
       }
       let changed = false;
-      const pdfSpacingGroups = new Set(), checkedPdfSpacingGroups = new Set();
+      const spacingGroups = new Set(), checkedSpacingGroups = new Set();
       if (!selectedRanges) for (const mutation of mutations) {
         if (ownedNodes.has(mutation.target) || !["characterData", "childList"].includes(mutation.type)) continue;
         if (mutation.type === "characterData" && records.get(mutation.target)?.lastWritten === mutation.target.nodeValue) continue;
         const element = groupElement(mutation.target.nodeType === 3 ? mutation.target : { assignedSlot: mutation.target });
-        if (!element || checkedPdfSpacingGroups.has(element)) continue;
-        checkedPdfSpacingGroups.add(element);
+        if (!element || checkedSpacingGroups.has(element)) continue;
+        checkedSpacingGroups.add(element);
         const previous = [...records.values()].filter(record => record.groupElement === element)
           .sort((left, right) => left.groupOrder - right.groupOrder);
-        if (!previous.some(record => record.source === "(PDF)" && record.pieces.some(piece => piece.id && piece.complete))
+        if (!previous.some(record => record.pieces.some(piece => piece.id && piece.complete))
             || previous.some(record => record.pieces.some(piece => piece.id && (!piece.complete || piece.failed)))) continue;
         const next = [];
         for (const node of walkAccessibleNodes(element)) {
@@ -1668,16 +1691,16 @@
           if (!source) continue;
           const renderSlots = new Set();
           for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") renderSlots.add(ancestor);
-          next.push({ node, source, groupElement: element, renderSlots });
+          next.push({ node, source, sourceLink: sourceLink(node), groupElement: element, renderSlots });
         }
-        if (!completedPdfSpacing(previous, next)) continue;
+        if (!completedSourceSpacing(previous, next)) continue;
         // Retire this paragraph's old response authority without rolling back
         // completed display. The next snapshot computes the current SHA/ranges
         // from the new exact source, and carries only the proven complete pieces.
         const ids = new Set(previous.flatMap(record => record.pieces.map(piece => piece.id).filter(Boolean)));
         for (const job of jobs.values()) for (const id of ids) job.ids.delete(id);
         queue = queue.filter(block => !ids.has(block.id));
-        pdfSpacingGroups.add(element); changed = true; invalidated = true;
+        spacingGroups.add(element); changed = true; invalidated = true;
         for (const record of previous) if (record.node.nodeValue === record.source) { record.lastWritten = record.source; write(record); }
       }
       if (mutations.some(mutation => mutation.type === "childList" && !ownedNodes.has(mutation.target)
@@ -1696,7 +1719,7 @@
         if (ownedNodes.has(mutation.target)) continue;
         if (!touchesManualSelection(mutation)) continue;
         if (["characterData", "childList"].includes(mutation.type)
-            && pdfSpacingGroups.has(groupElement(mutation.target.nodeType === 3 ? mutation.target : { assignedSlot: mutation.target }))) continue;
+            && spacingGroups.has(groupElement(mutation.target.nodeType === 3 ? mutation.target : { assignedSlot: mutation.target }))) continue;
         if (mutation.type === "characterData") {
           const record = records.get(mutation.target);
           if (record && mutation.target.nodeValue === record.lastWritten) continue;
