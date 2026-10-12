@@ -12,6 +12,7 @@ public static class BrowserAutoConfigurationPolicy
     public static bool PreserveManualGeneration(AppSettings previous, AppSettings next) =>
         previous with { BrowserAutoImageTranslationEnabled = next.BrowserAutoImageTranslationEnabled,
             BrowserAutoPageTranslationEnabled = next.BrowserAutoPageTranslationEnabled,
+            BrowserChineseProseShareThresholdPercent = next.BrowserChineseProseShareThresholdPercent,
             BrowserTranslationWhitelist = next.BrowserTranslationWhitelist,
             BrowserTranslationBlacklist = next.BrowserTranslationBlacklist,
             BrowserPageTranslationConcurrency = next.BrowserPageTranslationConcurrency } == next;

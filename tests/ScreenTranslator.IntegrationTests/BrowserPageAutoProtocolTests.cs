@@ -1,10 +1,14 @@
 using System.Security.Cryptography;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using ScreenTranslator.App.Services.Browser;
+using ScreenTranslator.App.Services;
 using ScreenTranslator.Core.Browser;
 using ScreenTranslator.Core.Models;
+using ScreenTranslator.Core.Settings;
+using ScreenTranslator.Core.Translation;
 
 namespace ScreenTranslator.IntegrationTests;
 
@@ -38,15 +42,107 @@ public sealed class BrowserPageAutoProtocolTests
         """;
 
     [Fact]
-    public void WholePageStatisticsUseTheActualExtensionFieldsAndStopMixedLanguageUpload()
+    public void LegacyWholePageStatisticsAllowForeignDominantPagesAtTheFixedDefault()
     {
         using var json = JsonDocument.Parse(WireCandidate);
         Assert.True(BrowserPageAutoProtocol.TryReadCandidate(Connection, json.RootElement, out var candidate));
         Assert.Equal(new PageTextStatistics(300, 40, 0, 180, 3, 40, 180, 0), candidate!.Statistics);
-        var decision = PageTranslationDecision.Inspect(candidate.Samples!, "zh-CN", candidate.Statistics).RuleDecision;
-        Assert.False(decision.NeedsTranslation);
-        Assert.True(decision.IsMixedTargetLanguage);
-        Assert.Equal("mixed-target-body", decision.ReasonCode);
+        var decision = PageTranslationDecision.Inspect(candidate.Samples!, "zh-CN", candidate.Statistics,
+            PageTranslationDecision.DefaultChineseProseShareThresholdPercent).RuleDecision;
+        Assert.True(decision.NeedsTranslation);
+        Assert.False(decision.IsMixedTargetLanguage);
+    }
+
+    [Theory]
+    [InlineData(10)]
+    [InlineData(50)]
+    [InlineData(90)]
+    public void SavedThresholdRoundTripsToRuntimeConfigurationWithoutChangingTranslationIdentity(int threshold)
+    {
+        var original = new AppSettings { BrowserAutoPageTranslationEnabled = true, TargetLanguage = "zh-CN" }.Migrate(out _);
+        var saved = original with { BrowserChineseProseShareThresholdPercent = threshold };
+        var restored = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(saved))!.Migrate(out _);
+        Assert.Equal(threshold, restored.BrowserChineseProseShareThresholdPercent);
+        var cacheScope = typeof(ApplicationController).GetMethod("PageCacheScope", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var originalScope = (string)cacheScope.Invoke(null, [original])!;
+        var restoredScope = (string)cacheScope.Invoke(null, [restored])!;
+        Assert.Equal(originalScope, restoredScope);
+        using var wire = JsonDocument.Parse(BrowserPageAutoProtocol.SerializeConfiguration(restored, 100, true, restoredScope, 7));
+        using var previous = JsonDocument.Parse(BrowserPageAutoProtocol.SerializeConfiguration(original, 100, true, originalScope, 7));
+        Assert.Equal(threshold, wire.RootElement.GetProperty("chineseProseShareThresholdPercent").GetInt32());
+        foreach (var field in new[] { "type", "enabled", "manualAvailable", "targetLanguage", "generation", "cacheScope", "cacheEpoch" })
+            Assert.Equal(previous.RootElement.GetProperty(field).GetRawText(), wire.RootElement.GetProperty(field).GetRawText());
+        Assert.Equal(TranslationProviderConfiguration.ConnectionIdentity(original), TranslationProviderConfiguration.ConnectionIdentity(restored));
+    }
+
+    [Fact]
+    public void OlderSavedSettingsEmitTheFiftyPercentDefault()
+    {
+        var settings = JsonSerializer.Deserialize<AppSettings>("{\"Version\":16}")!.Migrate(out _);
+        using var wire = JsonDocument.Parse(BrowserPageAutoProtocol.SerializeConfiguration(settings, 100, true, "cache", 0));
+        Assert.Equal(50, wire.RootElement.GetProperty("chineseProseShareThresholdPercent").GetInt32());
+    }
+
+    [Theory]
+    [InlineData(-1, 10)]
+    [InlineData(100, 90)]
+    public void RuntimeConfigurationBoundsTheThresholdEvenWithoutSettingsMigration(int supplied, int expected)
+    {
+        using var wire = JsonDocument.Parse(BrowserPageAutoProtocol.SerializeConfiguration(
+            new() { BrowserChineseProseShareThresholdPercent = supplied }, 100, true, "cache", 0));
+        Assert.Equal(expected, wire.RootElement.GetProperty("chineseProseShareThresholdPercent").GetInt32());
+    }
+
+    [Theory]
+    [InlineData(null, 0)]
+    [InlineData("0", 0)]
+    [InlineData("220", 220)]
+    [InlineData("260", 260)]
+    public void NonChineseProseStatisticIsOptionalAndPreserved(string? valueJson, int expected)
+    {
+        var wire = JsonNode.Parse(WireCandidate)!;
+        if (valueJson is not null) wire["pageSummary"]!["nonChineseProseCharacters"] = JsonNode.Parse(valueJson);
+        using var json = JsonDocument.Parse(wire.ToJsonString());
+        Assert.True(BrowserPageAutoProtocol.TryReadCandidate(Connection, json.RootElement, out var candidate));
+        Assert.Equal(expected, candidate!.Statistics!.NonChineseProseCharacters);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void WholePageForeignProseCountReachesJudgementWhileLegacyCountsRemainUsable(bool includeForeignCount, bool expected)
+    {
+        var wire = JsonNode.Parse(WireCandidate)!;
+        var summary = wire["pageSummary"]!;
+        summary["hanCharacters"] = 120;
+        summary["hanProseCharacters"] = 120;
+        summary["latinCharacters"] = 40;
+        summary["latinProseCharacters"] = 40;
+        if (includeForeignCount) summary["nonChineseProseCharacters"] = 180;
+        using var json = JsonDocument.Parse(wire.ToJsonString());
+        Assert.True(BrowserPageAutoProtocol.TryReadCandidate(Connection, json.RootElement, out var candidate));
+        var decision = PageTranslationDecision.Inspect(candidate!.Samples!, "zh-CN", candidate.Statistics,
+            PageTranslationDecision.DefaultChineseProseShareThresholdPercent).RuleDecision;
+        Assert.Equal(expected, decision.NeedsTranslation);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("261")]
+    [InlineData("10000001")]
+    [InlineData("2147483648")]
+    [InlineData("1.5")]
+    [InlineData("null")]
+    [InlineData("\"220\"")]
+    [InlineData("true")]
+    [InlineData("[]")]
+    public void InvalidNonChineseProseStatisticsAreRejected(string valueJson)
+    {
+        var wire = JsonNode.Parse(WireCandidate)!;
+        wire["pageSummary"]!["nonChineseProseCharacters"] = JsonNode.Parse(valueJson);
+        using var json = JsonDocument.Parse(wire.ToJsonString());
+        Assert.False(BrowserPageAutoProtocol.TryReadCandidate(Connection, json.RootElement, out var candidate));
+        Assert.Null(candidate);
     }
 
     [Fact]

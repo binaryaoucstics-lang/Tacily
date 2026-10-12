@@ -1,12 +1,26 @@
 using System.Text.Json;
 using ScreenTranslator.Core.Browser;
 using ScreenTranslator.Core.Models;
+using ScreenTranslator.Core.Settings;
 
 namespace ScreenTranslator.App.Services.Browser;
 
 /// <summary>Bounded native wire adapter, shared by the controller and protocol tests.</summary>
 public static class BrowserPageAutoProtocol
 {
+    public static string SerializeConfiguration(AppSettings settings, long generation, bool chromeAvailable,
+        string cacheScope, long cacheEpoch) => JsonSerializer.Serialize(new
+    {
+        type = "pageAutoConfig", enabled = settings.BrowserAutoPageTranslationEnabled && chromeAvailable,
+        manualAvailable = chromeAvailable, targetLanguage = settings.TargetLanguage, generation,
+        judgementMode = settings.BrowserPageJudgementMode.ToString().ToLowerInvariant(),
+        concurrency = Math.Clamp(settings.BrowserPageTranslationConcurrency, 1, 10),
+        chineseProseShareThresholdPercent = PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(
+            settings.BrowserChineseProseShareThresholdPercent),
+        siteWhitelist = settings.BrowserTranslationWhitelist, siteBlacklist = settings.BrowserTranslationBlacklist,
+        autoImages = settings.BrowserAutoImageTranslationEnabled, cacheScope, cacheEpoch,
+    });
+
     public static bool TryReadCandidate(Guid connection, JsonElement root, out AutoPageCandidate? candidate)
     {
         candidate = null;
@@ -35,7 +49,8 @@ public static class BrowserPageAutoProtocol
             if (root.TryGetProperty("pageSummary", out var counts)) statistics = new(
                 Count(counts, "totalCharacters"), Count(counts, "hanCharacters"), Count(counts, "kanaCharacters"),
                 Count(counts, "latinCharacters"), Count(counts, "proseBlocks"), Count(counts, "hanProseCharacters"),
-                Count(counts, "latinProseCharacters"), Count(counts, "kanaProseCharacters"));
+                Count(counts, "latinProseCharacters"), Count(counts, "kanaProseCharacters"),
+                Count(counts, "nonChineseProseCharacters"));
             var value = new AutoPageCandidate(connection, root.GetProperty("requestId").GetString()!,
                 root.GetProperty("documentToken").GetString()!, root.GetProperty("tabId").GetInt32(),
                 root.GetProperty("browserWindowId").GetInt32(), root.GetProperty("generation").GetInt64(),
