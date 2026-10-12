@@ -4,6 +4,138 @@ namespace ScreenTranslator.Core.Tests.Translation;
 
 public sealed class PageTextEligibilityTests
 {
+    // Synthetic per-node regressions, not a website corpus or page verdict.
+    [Theory]
+    [InlineData("研究人员介绍，IPC用于描述处理器每个周期执行指令的能力，改进架构有助于提高计算效率。")]
+    [InlineData("报道介绍了PAC-3系统的技术升级，相关研究将继续关注设备性能、维护成本以及后续测试结果。")]
+    [InlineData("技术团队公布了CR450动车组的试验进展，车辆设计围绕运行效率和乘客体验持续改进。")]
+    [InlineData("国产AB-123设备完成了连续运行测试，研究团队正在核对记录并准备下一阶段的技术评估。")]
+    [InlineData("技术团队公布了ＣＲ４５０动车组的试验进展，车辆设计围绕运行效率和乘客体验持续改进。")]
+    public void ChineseTechnicalNewsRequiresLexicallyRecognizedRuns(string text)
+    {
+        foreach (var source in new[] { text, string.Concat(Enumerable.Repeat(text, 8)) })
+        {
+            foreach (var target in new[] { "简体中文", "zh-CN", "zh-Hant", "Chinese" })
+            {
+                Assert.False(PageTextEligibility.NeedsTranslation(source, target));
+                Assert.False(PageTextEligibility.NeedsTranslation(source, target, explicitSelection: true));
+                Assert.True(PageTextEligibility.NeedsTranslation(source, target, foreignHanContext: true));
+            }
+            Assert.True(PageTextEligibility.NeedsTranslation(source, "English"));
+        }
+    }
+
+    [Theory]
+    [InlineData("研究团队持续改进设备，HELP，这是外国访客发出的求助信息，请继续记录原文。")]
+    [InlineData("研究团队持续改进设备，STOP，这是外国访客发出的指令，请继续记录原文。")]
+    [InlineData("研究团队持续改进设备，NO WAR，这是外国访客发出的呼吁，请继续记录原文。")]
+    [InlineData("研究团队持续改进设备，XYZ是原文中的未知外语内容，请继续记录原文。")]
+    [InlineData("研究团队持续改进设备，Read the IPC guide，这是外国访客的建议，请继续记录原文。")]
+    [InlineData("研究团队持续改进设备，Alice介绍了CR450的新方案，请继续记录原文。")]
+    [InlineData("研究团队持续改进设备，PAC-3の説明需要结合日语原文进行理解。")]
+    [InlineData("研究团队持续改进设备，CR450ﾆｭｰｽ需要结合日语原文进行理解。")]
+    [InlineData("研究团队持续改进设备，AB12CDE是原文中的未知内容，请继续记录原文。")]
+    public void LongChineseSurroundingsDoNotSuppressForeignWordsOrDialogue(string text)
+    {
+        foreach (var source in new[] { text, string.Concat(Enumerable.Repeat("研究团队继续记录设备运行情况。", 50)) + text })
+        {
+            Assert.True(PageTextEligibility.NeedsTranslation(source, "简体中文"));
+            Assert.True(PageTextEligibility.NeedsTranslation(source, "简体中文", explicitSelection: true));
+        }
+    }
+
+    [Theory]
+    [InlineData("CCTV13")]
+    [InlineData("CCTV-13")]
+    [InlineData("CR450")]
+    [InlineData("PAC-3")]
+    [InlineData("AB_123")]
+    [InlineData("R7")]
+    [InlineData("ＡＢ－１２３")]
+    public void BareStructuredIdentifiersAreAutomaticMetadataOnly(string text)
+    {
+        foreach (var target in new[] { "简体中文", "English", "ja-JP" })
+        {
+            Assert.False(PageTextEligibility.NeedsTranslation(text, target));
+            Assert.True(PageTextEligibility.NeedsTranslation(text, target, explicitSelection: true));
+        }
+    }
+
+    [Theory]
+    [InlineData("HELP")]
+    [InlineData("STOP")]
+    [InlineData("NO WAR")]
+    [InlineData("IPC")]
+    [InlineData("PAC")]
+    [InlineData("CR")]
+    [InlineData("Alice")]
+    [InlineData("London")]
+    [InlineData("Apple")]
+    [InlineData("Quantum")]
+    [InlineData("AB12CDE")]
+    [InlineData("MODEL123")]
+    [InlineData("CR 450")]
+    [InlineData("Help 2 people")]
+    [InlineData("PAC-3 is a technical identifier.")]
+    [InlineData("CR450：Read the report.")]
+    public void IdentifierStructureDoesNotRejectNamesNounsOrSentences(string text)
+        => Assert.True(PageTextEligibility.NeedsTranslation(text, "简体中文"));
+
+    [Theory]
+    [InlineData("1920x1080")]
+    [InlineData("3840 × 2160 px")]
+    [InlineData("１９２０ｘ１０８０")]
+    [InlineData("1080p")]
+    [InlineData("4K")]
+    [InlineData("60 fps")]
+    [InlineData("300 ppi")]
+    [InlineData("100 Mbps")]
+    [InlineData("FPS")]
+    [InlineData("Gbps")]
+    public void CompleteResolutionAndUnitLabelsRemainNoiseEvenWhenSelected(string text)
+    {
+        Assert.False(PageTextEligibility.NeedsTranslation(text, "简体中文"));
+        Assert.False(PageTextEligibility.NeedsTranslation(text, "English", explicitSelection: true));
+    }
+
+    [Theory]
+    [InlineData("京ICP备12345678号-1")]
+    [InlineData("沪ICP证123456号")]
+    [InlineData("粵ICP備12345678號-2")]
+    [InlineData("京公网安备11010102012345号")]
+    [InlineData("Registration No. 123456")]
+    [InlineData("Company registration number: AB-123456")]
+    [InlineData("5 min read")]
+    [InlineData("5-minute read")]
+    [InlineData("Reading time: 5 minutes")]
+    [InlineData("Estimated reading time: 1 hour.")]
+    [InlineData("Read time: 12 mins")]
+    [InlineData("阅读时间：5分钟")]
+    [InlineData("預計閱讀時間：5分鐘")]
+    public void CompleteRegistrationAndReadingTimeLabelsAreAutomaticMetadataOnly(string text)
+    {
+        Assert.False(PageTextEligibility.NeedsTranslation(text, "English"));
+        Assert.True(PageTextEligibility.NeedsTranslation(text, "English", explicitSelection: true));
+        Assert.False(PageTextEligibility.NeedsTranslation(text, "简体中文", foreignHanContext: true));
+        Assert.True(PageTextEligibility.NeedsTranslation(text, "简体中文", foreignHanContext: true, explicitSelection: true));
+    }
+
+    [Theory]
+    [InlineData("The display supports 1920x1080 at 60 fps.")]
+    [InlineData("Choose 4K for the next video.")]
+    [InlineData("The company registration number is AB-123456.")]
+    [InlineData("京ICP备12345678号-1 is the registration displayed on this page.")]
+    [InlineData("Reading time: 5 minutes to understand the experiment.")]
+    [InlineData("5 min read before you answer.")]
+    [InlineData("I read for 5 minutes.")]
+    [InlineData("Read time travel stories")]
+    [InlineData("IPC registration information")]
+    [InlineData("Jul 13")]
+    [InlineData("13 Jul")]
+    [InlineData("The report was published on October 9, 2026.")]
+    public void MetadataSyntaxNeverRemovesAdjacentProseOrLocalizableMonthLabels(string text)
+        => Assert.True(PageTextEligibility.NeedsTranslation(text, "简体中文"));
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

@@ -86,13 +86,17 @@
   const technicalAbbreviations = new Set([
     "AI", "CPU", "WTT", "WSBK", "APEC",
     "API", "GPU", "USB", "SSD", "RAM", "DNS", "SQL", "HTML", "CSS",
-    "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI"
+    "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI", "IPC"
   ]);
+  // Compact uppercase-number labels, not bare acronyms, names or English words.
+  // Only automatic metadata gates use this without surrounding Chinese evidence.
+  const structuredIdentifier = /^[A-Z]{1,4}[-_]?[0-9]{1,12}$/u;
   function alreadyTargetText(text, targetLanguage = "简体中文") {
     if (!/中文|Chinese|zh(?:-|$)/i.test(targetLanguage)) return false;
     // Match Core PageTextEligibility's per-node rules after NFKC. Only ASCII
     // uppercase runs of 1..4 letters (optionally with digits, e.g. R7) are
-    // candidates. Multi-letter runs must be known acronyms, keeping HELP and
+    // candidates. Multi-letter runs must be known acronyms or compact
+    // uppercase-number IDs (CR450, PAC-3), keeping HELP and
     // NO WAR eligible regardless of Han share. Space-separated runs must both
     // be known acronyms (AI CPU), not generic single-letter labels such as A B.
     // Other letters/combining marks keep mixed text eligible.
@@ -118,9 +122,9 @@
     }
     if (latinCount === 0) return hanCount > 0;
     let previous = null;
-    for (const run of source.matchAll(/[A-Z][A-Z0-9]*/gu)) {
-      const letters = run[0].replace(/[0-9]/gu, "");
-      if (letters.length > 1 && !technicalAbbreviations.has(letters)) return false;
+    for (const run of source.matchAll(/[A-Z][A-Z0-9]*(?:[-_][0-9]+)?/gu)) {
+      const letters = run[0].replace(/[^A-Z]/gu, "");
+      if (letters.length > 1 && !technicalAbbreviations.has(letters) && !structuredIdentifier.test(run[0])) return false;
       if (previous) {
         const gap = source.slice(previous.index + previous[0].length, run.index);
         if (/^\p{White_Space}+$/u.test(gap)
@@ -160,8 +164,9 @@
   function numericOrFormula(text) {
     if (/^[\p{N}\s.,，、:：;；/\\%％‰+＋\-−–—=＝×*÷()（）\[\]{}$€£¥￥°℃℉^²³<>≤≥≠∞√|]+$/u.test(text)) return true;
     // A numeric value and a known unit are metadata; "The price is $42" is prose.
-    if (/^[+\-−]?(?:\d[\d,.]*|\.\d+)\s*(?:%|°[cf]|℃|℉|usd|eur|gbp|jpy|cny|rmb|kg|mg|g|km|cm|mm|m|mph|km\/h|kb|mb|gb|tb|ms|s|hz|khz|mhz|ghz|px|dpi|pt|kcal|cal|w|kw|v|a|ml|l)$/iu.test(text)) return true;
-    if (/^(?:usd|eur|gbp|jpy|cny|rmb|kg|mg|km|cm|mm|mph|km\/h|kb|mb|gb|tb|ms|hz|khz|mhz|ghz|px|dpi|kcal|kw|ml|°[cf]|℃|℉)$/iu.test(text)) return true;
+    if (/^[+\-−]?(?:\d[\d,.]*|\.\d+)\s*(?:%|°[cf]|℃|℉|usd|eur|gbp|jpy|cny|rmb|kg|mg|g|km|cm|mm|m|mph|km\/h|kb|mb|gb|tb|ms|s|hz|khz|mhz|ghz|px|dpi|ppi|fps|bps|kbps|mbps|gbps|pt|kcal|cal|w|kw|v|a|ml|l)$/iu.test(text)) return true;
+    if (/^(?:usd|eur|gbp|jpy|cny|rmb|kg|mg|km|cm|mm|mph|km\/h|kb|mb|gb|tb|ms|hz|khz|mhz|ghz|px|dpi|ppi|fps|bps|kbps|mbps|gbps|kcal|kw|ml|°[cf]|℃|℉)$/iu.test(text)) return true;
+    if (/^(?:[1-9][0-9]{1,4}\s*[x×]\s*[1-9][0-9]{1,4}(?:\s*px)?|[1-9][0-9]{2,3}p|[248]k)$/iu.test(text)) return true;
     // Only single-letter variables are allowed, and an operator is required.
     // This keeps words, names and short dialogue out of the formula rule.
     const words = text.match(/\p{L}+/gu) || [];
@@ -174,6 +179,9 @@
     if (/^(?:(?:©|\(c\))\s*\d{0,4}|copyright\s*(?:©\s*)?\d{4})(?:\s*[-–]\s*\d{4})?\s*[^!?\n]{0,130}$/iu.test(text)) return true;
     if (/^all rights reserved\.?$/iu.test(text)) return true;
     if (/^(?:isbn(?:-1[03])?|issn|doi)\s*:?\s*(?:\d[\d\s./():-]*[\dx]|10\.\d{4,9}\/\S+)$/iu.test(text)) return true;
+    if (structuredIdentifier.test(text)) return true;
+    if (/^(?:[\u3400-\u9fff]{0,3}ICP\s*(?:备|備|证|證)\s*[0-9]{6,20}(?:号|號)?(?:-[0-9]{1,3})?|[\u3400-\u9fff]{1,3}公网安备\s*[0-9]{10,20}(?:号|號)?|(?:company\s+)?registration\s*(?:no\.?|number)\s*[:：]?\s*[A-Z]{0,4}-?[0-9]{4,20})$/iu.test(text)) return true;
+    if (/^(?:(?:(?:estimated\s+)?reading|read)\s+time\s*:\s*[0-9]{1,3}\s*(?:min(?:ute)?s?|hours?)\.?|[0-9]{1,3}(?:\s+|-)(?:min(?:ute)?s?|hours?)(?:\s+|-)read\.?|(?:预计|預計)?(?:阅读|閱讀)(?:时间|時間)?\s*[:：]?\s*[0-9]{1,3}\s*(?:分钟|分鐘|小时|小時))$/iu.test(text)) return true;
     // Credit syntax plus an actual provider is required. A bare person/publication
     // name, or a caption explaining what the photo shows, remains translatable.
     const provider = "(?:reuters|associated press|ap|afp|epa|epa-efe|getty images(?:\\/afp)?|shutterstock|unsplash|pexels|路透社|美联社|法新社|盖蒂|盖蒂图片)";

@@ -30,7 +30,7 @@ public static partial class PageTextEligibility
 
         if (Url().IsMatch(source) || Email().IsMatch(source) || Path().IsMatch(source)
             || Timestamp().IsMatch(source) || NamedDate().IsMatch(source)
-            || NumericUnit().IsMatch(source) || StandaloneUnit().IsMatch(source)
+            || NumericUnit().IsMatch(source) || StandaloneUnit().IsMatch(source) || Resolution().IsMatch(source)
             || IsFormula(source) || !source.EnumerateRunes().Any(Rune.IsLetter)) return false;
 
         if (!explicitSelection)
@@ -66,13 +66,14 @@ public static partial class PageTextEligibility
     {
         "AI", "CPU", "WTT", "WSBK", "APEC",
         "API", "GPU", "USB", "SSD", "RAM", "DNS", "SQL", "HTML", "CSS",
-        "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI"
+        "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI", "IPC"
     };
 
     // Keep these per-node rules in sync with page-auto-policy.js. Count Unicode
     // letters after NFKC, not digits, punctuation or emoji. Only ASCII uppercase
     // runs of 1..4 letters (optionally with digits, e.g. R7) are candidates.
-    // Multi-letter runs must be known acronyms, so HELP and NO WAR remain eligible
+    // Multi-letter runs must be known acronyms or compact uppercase-number IDs
+    // (CR450, PAC-3), so HELP and NO WAR remain eligible
     // regardless of Han share. Space-separated runs must both be known acronyms
     // (AI CPU); generic single-letter labels such as A B are not that evidence.
     // Lowercase, accented/other scripts and combining marks keep mixed text eligible.
@@ -118,7 +119,8 @@ public static partial class PageTextEligibility
         foreach (Match run in AbbreviationRuns().Matches(source))
         {
             var letters = string.Concat(run.Value.Where(character => character is >= 'A' and <= 'Z'));
-            if (letters.Length > 1 && !TechnicalAbbreviations.Contains(letters)) return false;
+            if (letters.Length > 1 && !TechnicalAbbreviations.Contains(letters)
+                && !StructuredIdentifier().IsMatch(run.Value)) return false;
             if (previous is not null)
             {
                 var gap = source[(previous.Index + previous.Length)..run.Index];
@@ -132,8 +134,13 @@ public static partial class PageTextEligibility
             || hanCount >= 6 && hanCount >= latinCount * 2);
     }
 
-    [GeneratedRegex(@"[A-Z][A-Z0-9]*", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"[A-Z][A-Z0-9]*(?:[-_][0-9]+)?", RegexOptions.CultureInvariant)]
     private static partial Regex AbbreviationRuns();
+
+    // Require a short uppercase prefix followed by digits, with no words/spaces.
+    // Automatic metadata only: explicit selection may still translate a label.
+    [GeneratedRegex(@"^[A-Z]{1,4}[-_]?[0-9]{1,12}$", RegexOptions.CultureInvariant)]
+    private static partial Regex StructuredIdentifier();
 
     private static bool IsFormula(string source)
     {
@@ -149,7 +156,9 @@ public static partial class PageTextEligibility
     private static bool IsMetadataOnly(string source)
     {
         if (source.Length > 180) return false;
-        if (Copyright().IsMatch(source) || Identifier().IsMatch(source)) return true;
+        if (Copyright().IsMatch(source) || Identifier().IsMatch(source)
+            || StructuredIdentifier().IsMatch(source) || Registration().IsMatch(source)
+            || ReadingTime().IsMatch(source)) return true;
         var prefix = CreditPrefix().Match(source);
         var rest = prefix.Success ? source[prefix.Length..] : source;
         var parts = rest.Split(['/', '|'], StringSplitOptions.TrimEntries);
@@ -173,11 +182,13 @@ public static partial class PageTextEligibility
     private static partial Regex Timestamp();
     [GeneratedRegex(@"^(?:" + MonthName + @"\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})|\d{1,2}(?:st|nd|rd|th)?\s+" + MonthName + @"\.?\s+\d{4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:[ap]m|utc|gmt|z)?)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex NamedDate();
-    [GeneratedRegex(@"^[+\-−]?(?:\d[\d,.]*|\.\d+)\s*(?:%|°[cf]|℃|℉|usd|eur|gbp|jpy|cny|rmb|kg|mg|g|km|cm|mm|m|mph|km/h|kb|mb|gb|tb|ms|s|hz|khz|mhz|ghz|px|dpi|pt|kcal|cal|w|kw|v|a|ml|l)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[+\-−]?(?:\d[\d,.]*|\.\d+)\s*(?:%|°[cf]|℃|℉|usd|eur|gbp|jpy|cny|rmb|kg|mg|g|km|cm|mm|m|mph|km/h|kb|mb|gb|tb|ms|s|hz|khz|mhz|ghz|px|dpi|ppi|fps|bps|kbps|mbps|gbps|pt|kcal|cal|w|kw|v|a|ml|l)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex NumericUnit();
     // A/I/m and other single letters may be dialogue; never gate them alone.
-    [GeneratedRegex(@"^(?:°[cf]|℃|℉|usd|eur|gbp|jpy|cny|rmb|kg|mg|km|cm|mm|mph|km/h|kb|mb|gb|tb|ms|hz|khz|mhz|ghz|px|dpi|kcal|kw|ml)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^(?:°[cf]|℃|℉|usd|eur|gbp|jpy|cny|rmb|kg|mg|km|cm|mm|mph|km/h|kb|mb|gb|tb|ms|hz|khz|mhz|ghz|px|dpi|ppi|fps|bps|kbps|mbps|gbps|kcal|kw|ml)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex StandaloneUnit();
+    [GeneratedRegex(@"^(?:[1-9][0-9]{1,4}\s*[x×]\s*[1-9][0-9]{1,4}(?:\s*px)?|[1-9][0-9]{2,3}p|[248]k)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex Resolution();
     [GeneratedRegex(@"^[\p{L}\p{N}\s.,:;/\\%+\-−=×*÷()\[\]{}^<>≤≥≠∞√|]+$", RegexOptions.CultureInvariant)]
     private static partial Regex FormulaCharacters();
     [GeneratedRegex(@"[\p{L}]+", RegexOptions.CultureInvariant)]
@@ -186,6 +197,10 @@ public static partial class PageTextEligibility
     private static partial Regex Copyright();
     [GeneratedRegex(@"^(?:isbn(?:-1[03])?|issn|doi)\s*:?\s*(?:\d[\d\s./():\-]*[\dx]|10\.\d{4,9}/\S+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Identifier();
+    [GeneratedRegex(@"^(?:[\u3400-\u9fff]{0,3}ICP\s*(?:备|備|证|證)\s*[0-9]{6,20}(?:号|號)?(?:-[0-9]{1,3})?|[\u3400-\u9fff]{1,3}公网安备\s*[0-9]{10,20}(?:号|號)?|(?:company\s+)?registration\s*(?:no\.?|number)\s*[:：]?\s*[A-Z]{0,4}-?[0-9]{4,20})$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex Registration();
+    [GeneratedRegex(@"^(?:(?:(?:estimated\s+)?reading|read)\s+time\s*:\s*[0-9]{1,3}\s*(?:min(?:ute)?s?|hours?)\.?|[0-9]{1,3}(?:\s+|-)(?:min(?:ute)?s?|hours?)(?:\s+|-)read\.?|(?:预计|預計)?(?:阅读|閱讀)(?:时间|時間)?\s*[:：]?\s*[0-9]{1,3}\s*(?:分钟|分鐘|小时|小時))$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ReadingTime();
     [GeneratedRegex(@"^(?:photo|image|illustration|credit|source|photograph)s?(?:\s+(?:credit|source))?\s*(?::|\bby\b)\s*", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex CreditPrefix();
     [GeneratedRegex(@"^(?:[\p{Lu}\p{Lt}][\p{L}\p{M}’'\-]*(?:\.)?)(?:\s+[\p{Lu}\p{Lt}][\p{L}\p{M}’'\-]*(?:\.)?){1,5}\.?$", RegexOptions.CultureInvariant)]

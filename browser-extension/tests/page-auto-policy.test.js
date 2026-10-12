@@ -12,6 +12,95 @@ test("social paragraphs skip only when Chinese reaches half of letters, preservi
 });
 const policy = require("../page-auto-policy.js");
 
+// Synthetic per-node regressions mirrored in Core, not a website corpus or page verdict.
+test("Chinese technical news requires lexically recognized runs even in long paragraphs", () => {
+  for (const text of [
+    "研究人员介绍，IPC用于描述处理器每个周期执行指令的能力，改进架构有助于提高计算效率。",
+    "报道介绍了PAC-3系统的技术升级，相关研究将继续关注设备性能、维护成本以及后续测试结果。",
+    "技术团队公布了CR450动车组的试验进展，车辆设计围绕运行效率和乘客体验持续改进。",
+    "国产AB-123设备完成了连续运行测试，研究团队正在核对记录并准备下一阶段的技术评估。",
+    "技术团队公布了ＣＲ４５０动车组的试验进展，车辆设计围绕运行效率和乘客体验持续改进。"
+  ]) {
+    for (const source of [text, text.repeat(8)]) {
+      for (const targetLanguage of ["简体中文", "zh-CN", "zh-Hant", "Chinese"]) {
+        assert.equal(policy.skipTranslationText(source, { targetLanguage }), "already_target_language", source);
+        assert.equal(policy.skipTranslationText(source, { targetLanguage, explicitSelection: true }), "already_target_language", source);
+        assert.equal(policy.skipTranslationText(source, { targetLanguage, foreignHanContext: true }), "", source);
+      }
+      assert.equal(policy.skipTranslationText(source, { targetLanguage: "English" }), "", source);
+    }
+  }
+});
+
+test("long Chinese surroundings do not suppress foreign words or dialogue", () => {
+  for (const text of [
+    "研究团队持续改进设备，HELP，这是外国访客发出的求助信息，请继续记录原文。",
+    "研究团队持续改进设备，STOP，这是外国访客发出的指令，请继续记录原文。",
+    "研究团队持续改进设备，NO WAR，这是外国访客发出的呼吁，请继续记录原文。",
+    "研究团队持续改进设备，XYZ是原文中的未知外语内容，请继续记录原文。",
+    "研究团队持续改进设备，Read the IPC guide，这是外国访客的建议，请继续记录原文。",
+    "研究团队持续改进设备，Alice介绍了CR450的新方案，请继续记录原文。",
+    "研究团队持续改进设备，PAC-3の説明需要结合日语原文进行理解。",
+    "研究团队持续改进设备，CR450ﾆｭｰｽ需要结合日语原文进行理解。",
+    "研究团队持续改进设备，AB12CDE是原文中的未知内容，请继续记录原文。"
+  ]) {
+    for (const source of [text, "研究团队继续记录设备运行情况。".repeat(50) + text]) {
+      assert.equal(policy.skipTranslationText(source), "", source);
+      assert.equal(policy.skipTranslationText(source, { explicitSelection: true }), "", source);
+    }
+  }
+});
+
+test("bare structured identifiers are automatic metadata only", () => {
+  for (const source of ["CCTV13", "CCTV-13", "CR450", "PAC-3", "AB_123", "R7", "ＡＢ－１２３"]) {
+    for (const targetLanguage of ["简体中文", "English", "ja-JP"]) {
+      assert.equal(policy.skipTranslationText(source, { targetLanguage }), "metadata", source);
+      assert.equal(policy.skipTranslationText(source, { targetLanguage, explicitSelection: true }), "", source);
+    }
+  }
+});
+
+test("identifier structure does not reject names nouns or sentences", () => {
+  for (const source of ["HELP", "STOP", "NO WAR", "IPC", "PAC", "CR", "Alice", "London", "Apple", "Quantum",
+    "AB12CDE", "MODEL123", "CR 450", "Help 2 people", "PAC-3 is a technical identifier.", "CR450：Read the report."])
+    assert.equal(policy.skipTranslationText(source), "", source);
+});
+
+test("complete resolution and unit labels remain noise even when selected", () => {
+  for (const source of ["1920x1080", "3840 × 2160 px", "１９２０ｘ１０８０", "1080p", "4K", "60 fps", "300 ppi", "100 Mbps", "FPS", "Gbps"]) {
+    assert.equal(policy.skipTranslationText(source), "numeric_or_formula", source);
+    assert.equal(policy.skipTranslationText(source, { targetLanguage: "English", explicitSelection: true }), "numeric_or_formula", source);
+  }
+});
+
+test("complete registration and reading time labels are automatic metadata only", () => {
+  for (const source of [
+    "京ICP备12345678号-1", "沪ICP证123456号", "粵ICP備12345678號-2", "京公网安备11010102012345号",
+    "Registration No. 123456", "Company registration number: AB-123456",
+    "5 min read", "5-minute read", "Reading time: 5 minutes", "Estimated reading time: 1 hour.", "Read time: 12 mins",
+    "阅读时间：5分钟", "預計閱讀時間：5分鐘"
+  ]) {
+    assert.equal(policy.skipTranslationText(source, { targetLanguage: "English" }), "metadata", source);
+    assert.equal(policy.skipTranslationText(source, { targetLanguage: "English", explicitSelection: true }), "", source);
+    assert.equal(policy.skipTranslationText(source, { foreignHanContext: true }), "metadata", source);
+    assert.equal(policy.skipTranslationText(source, { foreignHanContext: true, explicitSelection: true }), "", source);
+  }
+});
+
+test("metadata syntax never removes adjacent prose or localizable month labels", () => {
+  for (const source of [
+    "The display supports 1920x1080 at 60 fps.", "Choose 4K for the next video.",
+    "The company registration number is AB-123456.", "京ICP备12345678号-1 is the registration displayed on this page.",
+    "Reading time: 5 minutes to understand the experiment.", "5 min read before you answer.",
+    "I read for 5 minutes.", "Read time travel stories", "IPC registration information", "Jul 13", "13 Jul",
+    "The report was published on October 9, 2026."
+  ]) assert.equal(policy.skipTranslationText(source), "", source);
+  // These labels still use the existing local calendar path, not a new metadata veto.
+  assert.equal(policy.localCalendarText("Jul 13"), "7月13日");
+  assert.equal(policy.localCalendarText("13 Jul"), "7月13日");
+  assert.equal(policy.localCalendarText("October 9, 2026"), "2026年10月9日");
+});
+
 // Source-only synthetic news list, mirrored in PageTranslationDecisionTests.cs.
 const headlines = ["高质量发展创新成果集中发布", "国际合作交流重点项目正式启动",
   "绿色能源产业持续增长创新高", "科研团队公布最新重大实验成果", "AI技术推动制造产业转型升级"];
