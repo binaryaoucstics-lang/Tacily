@@ -151,6 +151,74 @@ public sealed class PageTextEligibilityTests
             Assert.True(PageTextEligibility.NeedsTranslation(text, target));
     }
 
+    // Synthetic computing/science boundaries; mirrored in the extension tests.
+    [Theory]
+    [InlineData("API")]
+    [InlineData("GPU")]
+    [InlineData("USB")]
+    [InlineData("SSD")]
+    [InlineData("RAM")]
+    [InlineData("DNS")]
+    [InlineData("SQL")]
+    [InlineData("HTML")]
+    [InlineData("CSS")]
+    [InlineData("JSON")]
+    [InlineData("XML")]
+    [InlineData("HTTP")]
+    [InlineData("TCP")]
+    [InlineData("UDP")]
+    [InlineData("PDF")]
+    [InlineData("DNA")]
+    [InlineData("RNA")]
+    [InlineData("MRI")]
+    public void CommonTechnicalAcronymsRequireReadableChineseContext(string acronym)
+    {
+        foreach (var text in new[] { $"中文说明{acronym}", $"中文技术说明方案 {acronym}" })
+        {
+            foreach (var target in new[] { "简体中文", "zh-CN", "zh-Hans", "zh-Hant", "Chinese", "繁体中文" })
+            {
+                Assert.False(PageTextEligibility.NeedsTranslation(text, target));
+                Assert.False(PageTextEligibility.NeedsTranslation(text, target, explicitSelection: true));
+                Assert.True(PageTextEligibility.NeedsTranslation(text, target, foreignHanContext: true));
+            }
+            foreach (var target in new[] { "English", "en-US", "ja-JP", "ko-KR", "fr-FR" })
+                Assert.True(PageTextEligibility.NeedsTranslation(text, target));
+        }
+        foreach (var text in new[] { acronym, $"{acronym}李明", $"Read the {acronym} guide for 中文说明.",
+            $"中文接口技术支持说明方案 USE {acronym}" })
+        {
+            Assert.True(PageTextEligibility.NeedsTranslation(text, "简体中文"));
+            Assert.True(PageTextEligibility.NeedsTranslation(text, "简体中文", explicitSelection: true));
+        }
+    }
+
+    [Theory]
+    [InlineData("API使用指南", false)]
+    [InlineData("API接口", true)]
+    [InlineData("中文说明方案 API", false)]
+    [InlineData("中文说明方 API", true)]
+    [InlineData("中文说明方案 HTTP", true)]
+    [InlineData("中文技术说明方案 HTTP", false)]
+    [InlineData("中文技术说明方 HTTP", true)]
+    [InlineData("中文接口技术支持说明方案API GPU", false)]
+    [InlineData("中文接口技术支持说明方API GPU", true)]
+    [InlineData("中文接口技术支持说明方案DNA/RNA", false)]
+    [InlineData("中文接口技术支持说明方DNA/RNA", true)]
+    [InlineData("GPU NEWS 中文接口技术支持说明方案", true)]
+    [InlineData("中文说明APIGPU", true)]
+    [InlineData("中文说明Api", true)]
+    [InlineData("中文说明ＡＰＩ", false)]
+    [InlineData("中文接口技术支持说明方案API2 GPU", true)]
+    [InlineData("中文技术说明方案APIの説明", true)]
+    [InlineData("中文技术说明方案GPU한", true)]
+    public void TechnicalAcronymsPreserveChineseRatiosAndForeignPhraseBoundaries(string text, bool needsTranslation)
+    {
+        Assert.Equal(needsTranslation, PageTextEligibility.NeedsTranslation(text, "简体中文"));
+        Assert.Equal(needsTranslation, PageTextEligibility.NeedsTranslation(text, "简体中文", explicitSelection: true));
+        Assert.True(PageTextEligibility.NeedsTranslation(text, "简体中文", foreignHanContext: true));
+        Assert.True(PageTextEligibility.NeedsTranslation(text, "English"));
+    }
+
     [Theory]
     [InlineData("\u0085APEC中国年", false)]
     [InlineData("APEC中国年\u0085", false)]
