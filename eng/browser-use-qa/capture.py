@@ -31,6 +31,16 @@ class CaptureError(RuntimeError):
     pass
 
 
+class BackendFailure(CaptureError):
+    """Control flow only: the original backend errors are already recorded."""
+
+
+def terminal_valid(event):
+    count = event.get("requestCount")
+    return (event.get("success") is True and not event.get("failedCount", 0)
+            and type(count) is int and count >= 0)
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -65,7 +75,13 @@ def semantic_signature(value):
         # remains skipped. Stability here means the decision is stable, not that
         # the site's authored content stopped changing. Failures/jobs are checked
         # separately and all source/geometry snapshots remain in the journal.
-        return encode([False, any(p.get("failed") for p in value["predictions"])])
+        # The adapter retains ordered events. Resets/reassessments between two
+        # idle samples must restart the quiet period even if both end in false.
+        activity = [[event["type"], event.get("value")] for event in value.get("events", [])
+                    if event["type"] in ("decision", "outbound") or
+                    (event["type"] == "status" and
+                     event.get("value", {}).get("state") in ("assessing", "waiting_for_page"))]
+        return encode([False, any(p.get("failed") for p in value["predictions"]), activity])
     nodes = sorted(encode([row.get(key) for key in
                           ("sourceText", "displayedText", "tag", "role")])
                    for row in value["nodes"])
@@ -466,17 +482,30 @@ def completion_gate(case, path):
     terminals = case.get("terminals", [])
     requests = case.get("requestIds", [])
     by_id = {event["id"]: event for event in terminals}
+    if any(r not in by_id or not terminal_valid(by_id[r]) for r in requests) or any(
+            not terminal_valid(event) for event in terminals):
+        reasons.append("terminal_evidence_missing")
+    if case.get("retractions"):
+        reasons.append("translation_retractions")
+    if any(p.get("failed") for p in case.get("predictions", [])):
+        reasons.append("node_failure")
+    final_state = case.get("finalState", {})
+    if any(final_state.get(key) for key in ("jobs", "pending", "scanning", "rpcPending")) or (
+            final_state and (type(final_state.get("pageDecision")) is not bool or
+                             (final_state.get("status") or {}).get("state") not in ("skipped", "completed"))):
+        reasons.append("production_work_unresolved")
     if case["expectedPageTranslation"]:
         if not case.get("liveTranslation"):
             reasons.append("live_translation_required")
-        if not requests or any(r not in by_id or by_id[r].get("success") is not True for r in requests):
+        if not requests and "terminal_evidence_missing" not in reasons:
             reasons.append("terminal_evidence_missing")
-        if not any(event.get("requestCount", 0) > 0 for event in terminals):
+        if not any(type(event.get("requestCount")) is int and event["requestCount"] > 0 for event in terminals):
             reasons.append("real_model_request_missing")
         if not case.get("predictions") or any(p.get("failed") or not p.get("completed") for p in case["predictions"]):
             reasons.append("node_completion_missing")
-    elif any(event.get("requestCount", 0) > 0 for event in terminals) or requests:
-        # Frontend-skipped cases use assess (rules only), never a translation message.
+    elif any(type(event.get("requestCount")) is int and event["requestCount"] > 0 for event in terminals):
+        # Native candidates may only assess rules. Actual model calls are proved
+        # by valid terminals, never inferred from candidate/RPC counts.
         reasons.append("unnecessary_translation_request")
     if case.get("simulation"):
         reasons.append("simulation_not_real_case")
@@ -551,6 +580,7 @@ class CaseCapture:
         previous_deadline = getattr(self.browser, "deadline", None)
         configured = False
         installed = False
+        backend_failed = False
 
         def save():
             atomic_json(path / "case.json", case, on_retry=log.append)
@@ -572,6 +602,8 @@ class CaseCapture:
                         predictionHistory=list(prediction_history.values()),
                         sourceObservations=list(source_observations.values()),
                         productionEligibility=value.get("productionEligibility", []),
+                        finalState={key: value.get(key) for key in
+                                    ("at", "jobs", "pending", "scanning", "rpcPending", "status", "pageDecision")},
                         pageDecision=value["pageDecision"],
                         retractions=[event for event in value["events"] if event["type"] == "retraction"])
             case["annotations"] = [{"sourceId": row["id"], "needTranslation": "unknown"} for row in case["sourceNodes"]]
@@ -592,7 +624,7 @@ class CaseCapture:
                                         "sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "fullPage": full})
             save()
 
-        def forward(phase=None):
+        def forward(phase=None, evidence_only=False, cleanup=False):
             frames = []
 
             def flush():
@@ -626,7 +658,7 @@ class CaseCapture:
             events_read = 0
 
             def receive():
-                nonlocal events_read
+                nonlocal events_read, backend_failed
                 for _ in range(FORWARD_EVENT_LIMIT - events_read):
                     check_deadline(deadline)
                     event = self.host.poll()
@@ -666,18 +698,26 @@ class CaseCapture:
                         # Do not retry an acknowledgement after a partially executed
                         # eval fails; that case is failed evidence, not a replay.
                         entry["acknowledged"] = True
+                        if wire.get("error"):
+                            backend_failed = True
+                            case["errors"].append(error_record(CaptureError("backend_packet_error")))
                         queue_frame(entry["rpcId"], packet, acknowledge)
                         if wire.get("error"):
                             flush()
-                            raise CaptureError("backend_packet_error")
                     if event["type"] == "terminal":
-                        flush()
                         entry["terminal"] = True
                         case["terminals"].append(event)
                         if event.get("success") is not True or event.get("failedCount", 0):
-                            raise CaptureError("backend_terminal_failed")
+                            backend_failed = True
+                            case["errors"].append(error_record(CaptureError("backend_terminal_failed")))
+                        if type(event.get("requestCount")) is not int or event["requestCount"] < 0:
+                            backend_failed = True
+                            case["errors"].append(error_record(CaptureError("backend_terminal_request_count_invalid")))
+                        flush()
                     if event["type"] == "assessment":
                         flush()
+                        if entry["action"] != "assess":
+                            raise CaptureError("host_unexpected_assessment")
                         case["localAssessment"] = event
                         entry["terminal"] = True
                 flush()
@@ -686,6 +726,11 @@ class CaseCapture:
             if not receive():
                 save()
                 return False  # Preserve the per-pass event bound; next pass drains first again.
+            if evidence_only:
+                save()
+                return None
+            if backend_failed and not cleanup:
+                raise BackendFailure("backend_failure_recorded")
             value = None
             collect = getattr(self.browser, "drain_sample", None)
             # Admit the first candidate via the cheap drain before a full DOM
@@ -722,6 +767,8 @@ class CaseCapture:
                     self.browser.qa("acknowledge", rpc_id, {"accepted": True})
             drained = receive()
             save()
+            if backend_failed and not cleanup:
+                raise BackendFailure("backend_failure_recorded")
             return value if drained else False
 
         def settle(phase):
@@ -735,6 +782,8 @@ class CaseCapture:
                 value = sample(phase, value)
                 check_deadline(deadline)
                 candidate_signature = semantic_signature(value)
+                if value["pageDecision"] is False:
+                    candidate_signature = encode([candidate_signature, len(case["requestIds"])])
                 candidate_geometry = geometry_signature(value)
                 geometry_changed = geometry is not None and candidate_geometry != geometry
                 geometry_changes += int(geometry_changed)
@@ -749,7 +798,10 @@ class CaseCapture:
                                             p.get("eligible") is False or p.get("completed") is True)
                                            for p in value["predictions"])
                 decision_known = type(value["pageDecision"]) is bool
-                done = idle and status_ready and terminals_complete and predictions_complete and decision_known
+                model_requests_zero = terminals_complete and all(
+                    terminal_valid(event) and event["requestCount"] == 0 for event in case["terminals"])
+                done = (idle and status_ready and terminals_complete and predictions_complete and decision_known
+                        and (value["pageDecision"] is not False or model_requests_zero))
                 unchanged = candidate_signature == signature
                 sampled_at = time.monotonic()
                 if done:
@@ -765,6 +817,7 @@ class CaseCapture:
                                "geometryChanged": geometry_changed, "geometryVaried": geometry_changes > 0,
                                "geometryChanges": geometry_changes, "idle": idle, "statusReady": status_ready,
                                "terminalsComplete": terminals_complete, "predictionsComplete": predictions_complete,
+                               "modelRequestsZero": model_requests_zero,
                                "pageDecisionKnown": decision_known, "layoutReviewRequired": True}
                 log.append({"kind": "stability", **observation})
                 case["stability"][phase] = observation
@@ -776,6 +829,47 @@ class CaseCapture:
                 geometry = candidate_geometry
                 time.sleep(min(self.poll_seconds, max(0, deadline - time.monotonic())))
             raise CaptureError("case_timeout_without_settlement")
+
+        def failed_evidence():
+            # No new candidates or retries: retain original ordered host events.
+            # Every operation uses the same case deadline, including screenshots.
+            def snapshot():
+                check_deadline(deadline)
+                case["failureSnapshot"] = sample("failure-final")
+                check_deadline(deadline)
+                save()
+
+            def attempt(action):
+                try:
+                    action()
+                    return True
+                except (CaptureError, OSError, ValueError, KeyError, TypeError) as error:
+                    case["errors"].append(error_record(error))
+                    check_deadline(deadline)
+                    return False
+
+            snapshot_available = attempt(snapshot)
+            phases = {shot["phase"] for shot in case["screenshots"]}
+            for phase, full in (("after", False), ("after-full", True)):
+                if snapshot_available and phase not in phases and (not full or self.full_screenshots):
+                    check_deadline(deadline)
+                    attempt(lambda: screenshot(phase, full=full))
+                    check_deadline(deadline)
+            while not all(entry["terminal"] for entry in pending.values()):
+                check_deadline(deadline)
+                forward(evidence_only=True)
+                if not all(entry["terminal"] for entry in pending.values()):
+                    time.sleep(min(self.poll_seconds, max(0, deadline - time.monotonic())))
+            # Also drain events queued after a terminal before taking final flags.
+            while forward(evidence_only=True) is False:
+                check_deadline(deadline)
+            snapshot_available = attempt(snapshot)
+            for phase, full in (("stable", False), ("stable-full", True)):
+                if snapshot_available and phase not in phases and (not full or self.full_screenshots):
+                    check_deadline(deadline)
+                    attempt(lambda: screenshot(phase, full=full))
+                    check_deadline(deadline)
+            attempt(snapshot)
 
         save()
         try:
@@ -854,19 +948,26 @@ class CaseCapture:
             case["settled"] = True
             case["semanticStable"] = True
         except (CaptureError, OSError, ValueError, KeyError, TypeError) as error:
-            case["errors"].append(error_record(error))
+            if not isinstance(error, BackendFailure):
+                case["errors"].append(error_record(error))
+            if backend_failed:
+                case["settled"] = case["semanticStable"] = False
+                try:
+                    failed_evidence()
+                except (CaptureError, OSError, ValueError, KeyError, TypeError) as evidence_error:
+                    case["errors"].append(error_record(evidence_error))
         finally:
             if installed:
                 try:
                     self.browser.evaluate("if(globalThis.__qaDisclosure){globalThis.__qaDisclosure.open=false;delete globalThis.__qaDisclosure}if(globalThis.__qaLayout){document.body.style.setProperty('max-width',globalThis.__qaLayout.value,globalThis.__qaLayout.priority);delete globalThis.__qaLayout}true")
                     self.browser.qa("dispose")
                     if configured:
-                        forward()
+                        forward(cleanup=True)
                 except (CaptureError, OSError, ValueError, KeyError, TypeError) as error:
                     case["errors"].append(error_record(error, "cleanup_"))
             case["captureFinished"] = True
             case["liveTranslation"] = case.get("capabilities", {}).get("live") is True and any(
-                event.get("requestCount", 0) > 0 for event in case["terminals"])
+                type(event.get("requestCount")) is int and event["requestCount"] > 0 for event in case["terminals"])
             case["evidenceReady"], case["completed"], reasons = completion_gate(case, path)
             case["blockedReason"] = ";".join(reasons)
             try:
