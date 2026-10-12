@@ -39,6 +39,74 @@ test("config rejects stale/noninteger generations and bounds worker preference",
   assert.equal(policy.normalizeConfig({ generation: 1, judgementMode: "Model" }).judgementMode, "program");
   assert.equal(policy.normalizeConfig({ generation: 1, judgementMode: "Hybrid" }).concurrency, 10);
 });
+
+test("Chinese prose share configuration defaults for old or malformed messages and clamps to 10–90", () => {
+  assert.equal(policy.normalizeConfig({ generation: 1 }).chineseProseShareThresholdPercent, 50);
+  for (const value of [null, undefined, NaN, Infinity, 20.5, "30", true, {}, [], Number.MAX_SAFE_INTEGER + 1])
+    assert.equal(policy.normalizeConfig({ generation: 1, chineseProseShareThresholdPercent: value }).chineseProseShareThresholdPercent, 50);
+  for (const [value, expected] of [[-1, 10], [0, 10], [10, 10], [35, 35], [90, 90], [100, 90]])
+    assert.equal(policy.normalizeConfig({ generation: 1, chineseProseShareThresholdPercent: value }).chineseProseShareThresholdPercent, expected);
+});
+
+test("body letter denominator includes all scripts and excludes headings, navigation, code and noise", () => {
+  const result = policy.summarize([
+    { text: "这是中文的正文 AI。", kind: "body" },
+    { text: "Hello мир Ω 한 カ 東京 𠀋", kind: "body" },
+    { text: "这是标题的文字，这里不属于正文。".repeat(10), kind: "heading" },
+    { text: "English title wording".repeat(10), kind: "title" },
+    { text: "English navigation wording".repeat(10), kind: "navigation" },
+    { text: "const EnglishCode = true", kind: "code" },
+    { text: "https://example.com/report", kind: "body" },
+    { text: "Copyright © 2026 Example Inc.", kind: "body" },
+    { text: "100 USD", kind: "body" }, { text: "123456789 😀！", kind: "body" }
+  ]).pageSummary;
+  assert.equal(result.hanProseCharacters, 7);
+  assert.equal(result.nonChineseProseCharacters, 16);
+  assert.equal(policy.localVerdict(result, "简体中文", 50), null);
+});
+
+test("Han symbols cannot inflate Chinese prose letters or make the denominator negative", () => {
+  const result = policy.summarize([
+    { text: "这是中文的正文。⼀⼁⼂⼃⼄⼅⼆⼇⼈⼉", kind: "body" },
+    { text: "Foreign prose.", kind: "body" }
+  ]).pageSummary;
+  assert.equal(result.hanCharacters, 17); // Preserve the existing script statistics.
+  assert.equal(result.hanProseCharacters, 7);
+  assert.equal(result.nonChineseProseCharacters, 12);
+  assert.equal(policy.localVerdict(result, "简体中文", 50), null);
+});
+
+test("the fixed default skips Chinese-dominant pages and equality but admits a foreign majority", () => {
+  const chinese = "这是中文的正文，可以保持原文。";
+  const english = "The article needs translation.";
+  const dominant = policy.summarize([{ text: chinese.repeat(4), kind: "body" }, { text: english, kind: "body" }]).pageSummary;
+  assert.equal(policy.localVerdict(dominant, "简体中文", 50).reason, "mixed_chinese_english");
+  assert.equal(policy.localVerdict(dominant, "English", 50), null);
+  const boundary = { totalCharacters: 24, hanProseCharacters: 6, nonChineseProseCharacters: 6, latinProseCharacters: 6 };
+  assert.equal(policy.localVerdict(boundary, "简体中文", 50).needsTranslation, false);
+  assert.equal(policy.localVerdict({ ...boundary, nonChineseProseCharacters: 7 }, "简体中文", 50), null);
+  assert.equal(policy.localVerdict({ ...boundary, hanProseCharacters: 5, nonChineseProseCharacters: 0 }, "简体中文", 50), null);
+});
+
+test("product custom thresholds use >= while omitted thresholds retain the fixed 50 default", () => {
+  const summary = { totalCharacters: 100, hanProseCharacters: 30, nonChineseProseCharacters: 70, latinProseCharacters: 70 };
+  assert.equal(policy.localVerdict(summary, "简体中文"), null);
+  assert.equal(policy.localVerdict(summary, "简体中文", 30).needsTranslation, false);
+  assert.equal(policy.localVerdict(summary, "简体中文", 31), null);
+  assert.equal(policy.localVerdict(summary, "简体中文", "30"), null);
+});
+
+test("legacy statistics fall back to Latin and kana without identifying Japanese Han as Chinese", () => {
+  const legacy = { totalCharacters: 100, hanCharacters: 60, latinCharacters: 40, kanaCharacters: 0 };
+  assert.equal(policy.localVerdict(legacy, "简体中文").needsTranslation, false);
+  assert.equal(policy.localVerdict({ ...legacy, latinCharacters: 80 }, "简体中文"), null);
+  assert.equal(policy.localVerdict({ ...legacy, kanaCharacters: 10 }, "简体中文"), null);
+  const japanese = policy.summarize([{ text: "東京の大学で日本語の文章を読みながら研究内容を説明します。".repeat(5), kind: "body" },
+    { text: "这是中文的正文，可以保持原文。", kind: "body" }]).pageSummary;
+  assert.equal(japanese.hanProseCharacters, 13);
+  assert.ok(japanese.nonChineseProseCharacters > japanese.hanProseCharacters);
+  assert.equal(policy.localVerdict(japanese, "简体中文", 50), null);
+});
 test("manual availability is an explicit boolean capability and defaults off", () => {
   assert.equal(policy.normalizeConfig({ generation: 1 }).manualAvailable, false);
   assert.equal(policy.normalizeConfig({ generation: 1, manualAvailable: true }).manualAvailable, true);
@@ -64,11 +132,12 @@ test("long source pieces keep every source character and prefer sentence boundar
   assert.ok(pieces[0].endsWith(". "));
   assert.ok(pieces.every(piece => !/[\uD800-\uDBFF]$/u.test(piece) && !/^[\uDC00-\uDFFF]/u.test(piece)));
 });
-test("full-page script counts catch mixed prose at the bottom without screenshot or model", () => {
+test("full-page script counts retain minority Chinese at the bottom without vetoing foreign prose", () => {
   const groups = Array.from({ length: 180 }, (_, index) => ({ text: index === 179 ? "这里是中文说明和英文混排内容" : "The page contains a substantive English paragraph about local translation.", kind: "body" }));
   const summary = policy.summarize(groups);
   assert.ok(summary.pageSummary.hanProseCharacters >= 6);
-  assert.equal(policy.localVerdict(summary.pageSummary, "简体中文").reason, "mixed_chinese_english");
+  assert.equal(policy.localVerdict(summary.pageSummary, "简体中文", 50), null);
+  assert.ok(summary.pageSummary.nonChineseProseCharacters > summary.pageSummary.hanProseCharacters);
   assert.ok(summary.samples.some(sample => /这里/u.test(sample.text)));
   assert.ok(summary.samples.length <= 64);
   assert.ok(summary.samples.reduce((sum, sample) => sum + sample.text.length, 0) <= 12000);
@@ -104,7 +173,7 @@ test("Chinese labels are retained deterministically but foreign kana and other s
   assert.equal(policy.hasLanguageText("Version 12.3 release notes"), true);
   assert.equal(policy.hasLanguageText("The price is $42 today."), true);
 });
-test("Chinese-majority paragraphs veto mixed pages while minority Chinese in a foreign paragraph remains eligible", () => {
+test("minority Chinese passages and inline notes on a foreign-dominant page remain eligible", () => {
   const english = "The English paragraph describes the complete local browser translation workflow. ".repeat(45);
   for (const chinese of ["这里的中文说明可以直接阅读", "这一段已经包含了可读的中文", "请保持这些已经可读的中文段落"]) {
     for (const text of [chinese + english, english.slice(0, 900) + chinese + english.slice(900), english + chinese]) {
@@ -114,7 +183,7 @@ test("Chinese-majority paragraphs veto mixed pages while minority Chinese in a f
     }
     const separate = policy.summarize([{ text: chinese, kind: "body" }, { text: english, kind: "body" }]);
     assert.equal(separate.pageSummary.hanProseCharacters, chinese.length);
-    assert.equal(policy.localVerdict(separate.pageSummary, "简体中文").reason, "mixed_chinese_english");
+    assert.equal(policy.localVerdict(separate.pageSummary, "简体中文", 50), null);
   }
   const onlyTwo = policy.summarize([{ text: english + "姓名", kind: "body" }]);
   assert.equal(policy.localVerdict(onlyTwo.pageSummary, "简体中文"), null);

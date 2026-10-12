@@ -115,6 +115,11 @@ function fixture(children = [], options = {}) {
   fixtures.add(result); return result;
 }
 function paragraph(text, top = 0) { const node = new Text(text), element = new Element("P", [node]); element.top = top; return { node, element }; }
+function trackTextWrites(node) {
+  let value = node.nodeValue; const writes = [];
+  Object.defineProperty(node, "nodeValue", { get: () => value, set: next => { writes.push(next); value = next; } });
+  return writes;
+}
 test("letter animation translates styled phrases once and restores every authored span", async () => {
   const source = "One API for every LLM, built for production";
   const spans = [...source].map((letter, index) => { const span = new Element("SPAN", [new Text(letter)]);
@@ -523,10 +528,10 @@ test("real visibility loss during the initial scan still retires it and never ad
   f.session.dispose();
 });
 
-test("revealing Chinese prose during the scan still blocks auto-translation whether it was already visited or not", async () => {
+test("revealing minority Chinese prose during the scan retains it while admitting the foreign-dominant page", async () => {
   for (const at of [0, 129]) {
     const paragraphs = Array.from({ length: 130 }, (_, index) => paragraph(`The public English paragraph ${index} explains a reliable browser translation workflow.`));
-    paragraphs[at] = paragraph("这里是完整的中文正文，当前混合语言页面不需要自动翻译。");
+    paragraphs[at] = paragraph("这里是完整的中文正文，这一段不需要自动翻译。");
     paragraphs[at].element.style.display = "none";
     const f = fixture(paragraphs.map(item => item.element)); let clock = 0, changed = false;
     f.environment.now = () => clock += 20;
@@ -535,8 +540,10 @@ test("revealing Chinese prose during the scan still blocks auto-translation whet
       f.session.mutated([{ type: "attributes", target: paragraphs[at].element, attributeName: "style" }]);
     } };
     await enabled(f); await tick();
-    assert.equal(f.candidates().length, 0);
-    assert.equal(f.decisions.at(-1).allowImages, false);
+    assert.equal(f.candidates().length, 1);
+    assert.ok(f.candidate().pageSummary.nonChineseProseCharacters > f.candidate().pageSummary.hanProseCharacters);
+    assert.ok(f.candidate().blocks.every(block => block.text !== paragraphs[at].node.nodeValue));
+    approved(f); assert.equal(f.decisions.at(-1).allowImages, true);
     f.session.dispose();
   }
 });
@@ -690,17 +697,84 @@ test("disclosure observer watches open state and final layout visibility events 
   callbacks.get("toggle")({ type: "toggle", target: new Element("DETAILS") }); assert.equal(mutations.length, count + 1);
   manager.dispose(); assert.equal(callbacks.size, 0);
 });
-test("below-fold Chinese mixed prose blocks both text and image translation locally", async () => {
+test("below-fold minority Chinese stays original while the foreign-dominant page proceeds", async () => {
   const first = paragraph("An English article with a long explanation about a browser page.");
   const bottom = paragraph("这段中文正文属于同一个中英混排页面，不需要翻译。", 9000);
   const f = fixture([first.element, bottom.element]); await enabled(f);
-  assert.equal(f.candidates().length, 0);
-  assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english");
-  assert.deepEqual(f.decisions.at(-1), { enabled: true, assessed: true, allowImages: false, generation: 1, revision: 1 }); f.session.dispose();
+  assert.equal(f.candidates().length, 1);
+  assert.deepEqual(f.candidate().blocks.map(block => block.text), [first.node.nodeValue]);
+  approved(f); finish(f); assert.equal(first.node.nodeValue, "中文译文");
+  assert.equal(bottom.node.nodeValue, "这段中文正文属于同一个中英混排页面，不需要翻译。");
+  assert.equal(f.decisions.at(-1).allowImages, true); f.session.dispose();
+});
+
+test("Chinese-dominant mixed body including below-fold prose blocks text and images at the fixed default", async () => {
+  const first = paragraph("An English article with a long explanation about a browser page.");
+  const bottom = paragraph("这段中文正文属于同一个中英混排页面，不需要翻译。".repeat(4), 9000);
+  const f = fixture([first.element, bottom.element]);
+  f.session.configure({ generation: 1, enabled: true, active: true, chineseProseShareThresholdPercent: 50 }); await tick();
+  assert.equal(f.candidates().length, 0); assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english");
+  assert.equal(f.decisions.at(-1).allowImages, false); assert.ok(first.node.nodeValue.startsWith("An English")); f.session.dispose();
 });
 test("Chinese-only page keeps native text while allowing independent image judgement", async () => {
   const f = fixture([paragraph("这是中文正文，不需要翻译。图片中的外语仍然可以单独判断和翻译。").element]); await enabled(f);
   assert.equal(f.candidates().length, 0); assert.equal(f.decisions.at(-1).allowImages, true); f.session.dispose();
+});
+
+test("threshold-only changes refresh automatic admission and retire stale decisions without changing cache identity", async () => {
+  const english = paragraph("The article needs translation."), chinese = paragraph("这是中文的正文，可以保持原文。".repeat(4));
+  const f = fixture([english.element, chinese.element]);
+  const config = { generation: 1, enabled: true, active: true, cacheScope: "a".repeat(64), cacheEpoch: 2, chineseProseShareThresholdPercent: 50 };
+  f.session.configure(config); await tick(); assert.equal(f.candidates().length, 0); assert.equal(f.session.inspect().rememberedDecisions, 1);
+  f.session.configure({ ...config, chineseProseShareThresholdPercent: 90 });
+  assert.equal(f.session.inspect().rememberedDecisions, 0); await tick(); assert.equal(f.candidates().length, 1);
+  const first = f.candidate();
+  f.session.receive(message(first, "pageAutoAssessment", { needsTranslation: false, allowImages: false, reason: "not_needed" }));
+  assert.equal(f.session.inspect().rememberedDecisions, 1);
+  f.session.configure({ ...config, chineseProseShareThresholdPercent: 80 }); await tick();
+  assert.equal(f.candidates().length, 2); const old = f.candidate(); approved(f);
+  f.session.configure(config); await tick();
+  assert.equal(f.session.receive(message(old, "pageAutoTranslations", { updates: [{ id: old.blocks[0].id, text: "过时结果", complete: true }], finished: true })), false);
+  assert.equal(f.candidates().length, 2); assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english");
+  assert.equal(english.node.nodeValue, "The article needs translation."); assert.equal(chinese.node.nodeValue, "这是中文的正文，可以保持原文。".repeat(4));
+  assert.equal(f.session.inspect().config.generation, 1); assert.equal(f.session.inspect().config.cacheScope, config.cacheScope);
+  assert.equal(f.session.inspect().config.cacheEpoch, 2); f.session.dispose();
+});
+
+test("lowering only the product threshold stops new admission without retracting completed unchanged text", async () => {
+  const english = paragraph("The article needs translation."), chinese = paragraph("这是中文的正文，可以保持原文。".repeat(4));
+  const f = fixture([english.element, chinese.element]);
+  const config = { generation: 1, enabled: true, active: true, chineseProseShareThresholdPercent: 90 };
+  f.session.configure(config); await tick(); approved(f); finish(f, f.candidate(), "正文已经完成翻译。");
+  const writes = trackTextWrites(english.node);
+  f.session.configure({ ...config, chineseProseShareThresholdPercent: 50 }); await tick();
+  assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english"); assert.equal(f.decisions.at(-1).allowImages, false);
+  assert.equal(f.candidates().length, 1); assert.equal(english.node.nodeValue, "正文已经完成翻译。");
+  assert.deepEqual(writes, []); assert.equal(chinese.node.nodeValue, "这是中文的正文，可以保持原文。".repeat(4)); f.session.dispose();
+});
+
+test("a threshold change across a cache-stable generation cannot reuse the previous native judgement", async () => {
+  const item = paragraph("This foreign body paragraph should be assessed again after the threshold changes."), f = fixture([item.element]);
+  const config = { generation: 1, enabled: true, active: true, cacheScope: "a".repeat(64), cacheEpoch: 0 };
+  f.session.configure(config); await tick();
+  f.session.receive(message(f.candidate(), "pageAutoAssessment", { needsTranslation: false, allowImages: false, reason: "not_needed" }));
+  f.session.configure({ ...config, generation: 2, chineseProseShareThresholdPercent: 30 }); await tick();
+  assert.equal(f.candidates().length, 2); assert.equal(f.candidate().generation, 2); f.session.dispose();
+});
+
+test("threshold-only changes preserve accepted manual streams with automatic translation enabled or disabled", async () => {
+  for (const enabled of [true, false]) {
+    const chinese = paragraph("这是中文的正文，可以保持原文。".repeat(4)), english = paragraph("The article needs translation.");
+    const f = fixture([chinese.element, english.element]); await manualReady(f, enabled);
+    f.session.control("manual-page"); await tick(); const candidate = f.candidate(), revision = f.session.inspect().revision;
+    f.session.receive(message(candidate, "pageAutoTranslations", { updates: [{ id: candidate.blocks[0].id, text: "手动前缀" }] }));
+    const config = f.session.inspect().config;
+    f.session.configure({ ...config, chineseProseShareThresholdPercent: 90 }); await tick();
+    assert.equal(f.session.inspect().revision, revision); assert.equal(english.node.nodeValue, "手动前缀");
+    assert.equal(f.sent.some(packet => packet.type === "pageAutoCancel" && packet.requestId === candidate.requestId), false);
+    finish(f, candidate, "手动完整译文"); assert.equal(english.node.nodeValue, "手动完整译文");
+    assert.equal(chinese.node.nodeValue, "这是中文的正文，可以保持原文。".repeat(4)); f.session.dispose();
+  }
 });
 
 test("view-mode visibility evidence requires actual translated text and survives original view", async () => {
@@ -943,13 +1017,36 @@ test("numeric placeholders becoming English or Japanese prose are discovered and
     assert.ok(f.session.inspect().revision > oldRevision); assert.ok(f.candidate().blocks.some(block => block.text === next)); f.session.dispose();
   }
 });
-test("numeric placeholder becoming Chinese prose reassesses a now mixed page using original English", async () => {
+test("numeric placeholder becoming dominant Chinese prose stops admission and retains the completed English translation", async () => {
   const body = paragraph("The existing English article needs translation until Chinese prose is loaded.");
-  const placeholder = paragraph("0"), f = fixture([body.element, placeholder.element]); await enabled(f); approved(f); finish(f);
-  placeholder.node.nodeValue = "这是后来加载的中文正文，当前页面已经成为中英混排，应当保持原文而不要继续自动翻译。";
+  const placeholder = paragraph("0"), f = fixture([body.element, placeholder.element]); await enabled(f);
+  const writes = trackTextWrites(body.node); approved(f); finish(f);
+  const chinese = "这是后来加载的中文正文，当前页面中文占比超过阈值，应当保持原文而不要继续自动翻译。".repeat(3);
+  placeholder.node.nodeValue = chinese;
   f.session.mutated([{ type: "characterData", target: placeholder.node }]); await tick();
   assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english"); assert.equal(f.decisions.at(-1).allowImages, false);
-  assert.equal(f.candidates().length, 1); assert.ok(body.node.nodeValue.startsWith("The existing English")); f.session.dispose();
+  assert.equal(f.candidates().length, 1); assert.equal(body.node.nodeValue, "中文译文"); assert.equal(placeholder.node.nodeValue, chinese);
+  assert.deepEqual(writes, ["中文译文"]); f.session.dispose();
+});
+
+test("unrelated dominant Chinese additions preserve every published English stream value and block new automatic requests", async () => {
+  const body = paragraph("An unchanged English article keeps streaming while unrelated Chinese prose is added."), f = fixture([body.element]);
+  await enabled(f); const candidate = f.candidate(); approved(f);
+  const writes = trackTextWrites(body.node);
+  assert.equal(f.session.receive(message(candidate, "pageAutoTranslations", { updates: [{ id: candidate.blocks[0].id, text: "正在翻译" }] })), true);
+  const chinese = paragraph("这是后来加载的中文正文，当前页面中文占比超过阈值，应当保持原文而不要继续自动翻译。".repeat(6));
+  const foreign = paragraph("This newly added foreign paragraph must wait for automatic page admission.");
+  f.body.append(chinese.element, foreign.element);
+  f.session.mutated([{ type: "childList", target: f.body, addedNodes: [chinese.element, foreign.element], removedNodes: [] }]); await tick();
+  assert.equal(f.session.inspect().revision, candidate.revision); assert.equal(body.node.nodeValue, "正在翻译");
+  assert.equal(f.sent.some(packet => packet.type === "pageAutoCancel"), false); assert.equal(f.candidates().length, 1);
+  assert.equal(f.session.receive(message(candidate, "pageAutoTranslations", { updates: [{ id: candidate.blocks[0].id, text: "正在翻译正文" }] })), true);
+  assert.equal(finish(f, candidate, "正文译文已完成。"), true); await tick();
+  assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english"); assert.equal(f.decisions.at(-1).allowImages, false);
+  assert.equal(body.node.nodeValue, "正文译文已完成。"); assert.equal(f.candidates().length, 1);
+  assert.deepEqual(writes, ["正在翻译", "正在翻译正文", "正文译文已完成。"]);
+  assert.equal(chinese.node.nodeValue, "这是后来加载的中文正文，当前页面中文占比超过阈值，应当保持原文而不要继续自动翻译。".repeat(6));
+  assert.equal(foreign.node.nodeValue, "This newly added foreign paragraph must wait for automatic page admission."); f.session.dispose();
 });
 test("translated node externally becoming numeric is retired without restarting peer paragraphs", async () => {
   const first = paragraph("This English paragraph is replaced by a numeric live value later.");
@@ -1312,7 +1409,7 @@ test("manual controls require explicit bridge permission and do not auto-start w
 });
 
 test("manual whole-page bypasses mixed/short page veto but filters native metadata and preserves meaningful short names", async () => {
-  const keep = ["这是不需要翻译的中文正文，保持原样。", "https://example.invalid/keep", "qa.test@example.invalid", "Sarah Meyssonnier / Reuters", "2026-10-09", "E = mc²", "1 2 3"];
+  const keep = ["这是不需要翻译的中文正文，保持原样。".repeat(10), "https://example.invalid/keep", "qa.test@example.invalid", "Sarah Meyssonnier / Reuters", "2026-10-09", "E = mc²", "1 2 3"];
   const items = [...keep.map(paragraph), paragraph("Help!"), paragraph("Alice"), paragraph("An English article must be translated on an explicitly requested mixed page.")], f = fixture(items.map(item => item.element));
   await manualReady(f, true); assert.equal(f.candidates().length, 0); assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english");
   f.session.control("manual-page"); await tick(); const candidate = f.candidate();

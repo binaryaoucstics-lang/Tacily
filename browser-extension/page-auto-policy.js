@@ -3,6 +3,9 @@
   const maximumBlockCharacters = 900;
   const maximumBatchCharacters = 32768;
   const maximumBatchBlocks = 48;
+  function normalizeChineseProseShareThreshold(value) {
+    return Number.isSafeInteger(value) ? Math.max(10, Math.min(90, value)) : 50;
+  }
   function normalizeConfig(value) {
     if (!value || !Number.isSafeInteger(value.generation) || value.generation < 0) return null;
     if (Object.hasOwn(value, "cacheScope") && (typeof value.cacheScope !== "string"
@@ -12,6 +15,7 @@
       generation: value.generation, targetLanguage: String(value.targetLanguage || "简体中文").slice(0, 64),
       cacheScope: (value.cacheScope || "").toLowerCase(), cacheEpoch: value.cacheEpoch ?? 0,
       judgementMode: "program",
+      chineseProseShareThresholdPercent: normalizeChineseProseShareThreshold(value.chineseProseShareThresholdPercent),
       siteMode: ["allow", "block"].includes(value.siteMode) ? value.siteMode : "default",
       concurrency: Math.max(1, Math.min(10, Number.isInteger(value.concurrency) ? value.concurrency : 10)) };
   }
@@ -209,11 +213,17 @@
     const prose = meaningful.filter(group => group.text.trim().length >= 24);
     const proseCounts = counted.filter(item => (!item.group.kind || item.group.kind === "body") && item.group.text.trim().length >= 12)
       .map(item => item.counts);
+    const bodyProse = counted.filter(item => (!item.group.kind || item.group.kind === "body")
+      && !skipTranslationText(item.group.text, { foreignHanContext: true }));
+    const hanProseCharacters = bodyProse.filter(item => chineseProse(item.group.text))
+      .reduce((sum, item) => sum + (item.group.text.match(/\p{L}/gu) || []).filter(character => han.test(character)).length, 0);
     const summary = { ...counts,
       // This is Chinese evidence, not all Han glyphs: Japanese paragraphs often
       // contain many Han characters alongside kana and must not trip the hard gate.
-      hanProseCharacters: counted.filter(item => (!item.group.kind || item.group.kind === "body") && chineseProse(item.group.text))
-        .reduce((sum, item) => sum + item.counts.hanCharacters, 0),
+      hanProseCharacters,
+      // Every other readable body letter counts, including Japanese Han, kana,
+      // Cyrillic and Latin within a Chinese paragraph. Noise is not prose.
+      nonChineseProseCharacters: bodyProse.reduce((sum, item) => sum + (item.group.text.match(/\p{L}/gu) || []).length, 0) - hanProseCharacters,
       latinProseCharacters: proseCounts.reduce((sum, count) => sum + count.latinCharacters, 0),
       kanaProseCharacters: proseCounts.reduce((sum, count) => sum + count.kanaCharacters, 0), proseBlocks: prose.length,
       sourceHash: stableHash(groups.map(group => group.text).join("\n")) };
@@ -228,19 +238,21 @@
     }
     return { pageSummary: summary, samples: sampled };
   }
-  function localVerdict(summary, targetLanguage) {
+  function localVerdict(summary, targetLanguage, chineseProseShareThresholdPercent = 50) {
     if (!summary) return { needsTranslation: false, reason: "too_little_prose" };
     const chineseTarget = /中文|Chinese|zh(?:-|$)/i.test(targetLanguage || "简体中文");
     if (!chineseTarget) return null;
-    const hanProse = summary.hanProseCharacters ?? summary.hanCharacters;
+    const hanProse = summary.hanProseCharacters
+      ?? (summary.kanaCharacters > 0 || summary.hangulCharacters > 0 ? 0 : summary.hanCharacters);
     const latinProse = summary.latinProseCharacters ?? summary.latinCharacters;
-    // Japanese naturally contains Han; do not confuse a Japanese paragraph with
-    // a Chinese/English page. Actual Han + Latin prose is conservatively skipped.
-    if (hanProse >= 12 && latinProse >= 12)
-      return { needsTranslation: false, reason: "mixed_chinese_english" };
+    const nonChineseProse = summary.nonChineseProseCharacters
+      ?? ((latinProse || 0) + (summary.kanaProseCharacters ?? summary.kanaCharacters ?? 0) + (summary.hangulCharacters || 0));
+    // Identified Chinese prose must reach the configured share of body letters.
+    // Keep the established image policy for skipped mixed and Chinese-only pages.
+    if (hanProse >= 6 && hanProse * 100 >= (hanProse + nonChineseProse)
+        * normalizeChineseProseShareThreshold(chineseProseShareThresholdPercent))
+      return { needsTranslation: false, reason: latinProse >= 12 ? "mixed_chinese_english" : "already_target_language" };
     if (summary.kanaCharacters > 0 || summary.hangulCharacters > 0) return null;
-    if (hanProse >= 6 && hanProse >= latinProse)
-      return { needsTranslation: false, reason: "already_target_language" };
     if (summary.totalCharacters < 24) return { needsTranslation: false, reason: "too_little_prose" };
     return null;
   }
@@ -268,7 +280,7 @@
     return String(text).split(/\r\n|[\r\n]/u).filter(line => !socialChineseParagraph(line, targetLanguage)).join("\n");
   }
   const api = { maximumBlockCharacters, maximumBatchCharacters, maximumBatchBlocks,
-    normalizeConfig, splitText, languageCounts, stableHash, isTimestamp, hasLanguageText, alreadyTargetText, skipTranslationText, localCalendarText, summarize, localVerdict, chineseProse, isSocialFeed, socialChineseParagraph, socialForeignText };
+    normalizeConfig, normalizeChineseProseShareThreshold, splitText, languageCounts, stableHash, isTimestamp, hasLanguageText, alreadyTargetText, skipTranslationText, localCalendarText, summarize, localVerdict, chineseProse, isSocialFeed, socialChineseParagraph, socialForeignText };
   root.ScreenTranslatorPageAutoPolicy = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);
