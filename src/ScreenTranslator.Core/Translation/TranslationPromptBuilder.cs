@@ -81,12 +81,23 @@ internal static class TranslationPromptBuilder
         return new(systemPrompt, content);
     }
 
-    private sealed record PageSourceFacts(string[] NumericLiterals, string[]? DecadeLiterals, bool IsPartial);
+    private sealed record PageSourceFacts(string[] NumericLiterals, string[]? DecadeLiterals, string[]? DateLiterals, bool IsPartial);
 
     // Lexical excerpts only, not validation or normalized calendar claims. Keep
     // the phase with its decade; a bare number cannot convey that source wording.
     private static readonly Regex PageDecadeLiterals = new(
         @"(?<![\p{L}\p{N}_.+])(?:(?:early|mid|late)[\s-]+)?[0-9]{3}0['’]?s\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+    // Verbatim excerpts only, including the ambiguous order of numeric dates.
+    // Longer range forms precede single dates so neither endpoint is omitted.
+    private static readonly Regex PageDateLiterals = new(
+        @"(?<![\p{L}\p{N}./／．－-])(?:\d{1,2}\s*([/／.．－-])\s*\d{1,2}\s*\1\s*\d{4}(?![\p{N}./／．－-])"
+        + @"|\d{4}[-/]\d{1,2}[-/]\d{1,2}(?!\d)"
+        + @"|(?:" + PageCalendarText.EnglishMonthPattern + @")\b\.?\s+\d{1,2}(?:st|nd|rd|th)?\b"
+        + @"(?:\s*(?:[-–—]|to\b)\s*(?:(?:" + PageCalendarText.EnglishMonthPattern + @")\b\.?\s+)?\d{1,2}(?:st|nd|rd|th)?\b)?(?:\s*,?\s*\d{4}(?!\d))?)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+    private static readonly Regex TruncatedDateSuffix = new(
+        @"^\s*(?:(?:[-–—]|to\b|,)\s*)?\d*\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
 
     private static PageSourceFacts? PageSourceFactsFromText(string? text)
@@ -144,8 +155,23 @@ internal static class TranslationPromptBuilder
             decades.Add(match.Value);
             decadeCharacters += match.Length;
         }
-        return literals.Count == 0 && decades.Count == 0 && !partial ? null
-            : new(literals.ToArray(), decades.Count == 0 ? null : decades.ToArray(), partial);
+        var dates = new List<string>();
+        var dateCharacters = 0;
+        foreach (Match match in PageDateLiterals.Matches(text[..limit]))
+        {
+            var end = match.Index + match.Length;
+            if (limit < text.Length && (end == limit
+                && (char.IsLetterOrDigit(text[limit]) || text[limit] is '_' or '/' or '.' or '-')
+                || end < limit && TruncatedDateSuffix.IsMatch(text[end..limit])))
+            { partial = true; continue; }
+            if (match.Length > maxLiteralCharacters) { partial = true; continue; }
+            if (dates.Count == maxLiterals || dateCharacters + match.Length > maxTotalCharacters)
+            { partial = true; break; }
+            dates.Add(match.Value);
+            dateCharacters += match.Length;
+        }
+        return literals.Count == 0 && decades.Count == 0 && dates.Count == 0 && !partial ? null
+            : new(literals.ToArray(), decades.Count == 0 ? null : decades.ToArray(), dates.Count == 0 ? null : dates.ToArray(), partial);
     }
 
     private static bool IsNumericSeparator(char value) => value is '.' or ',' or ':' or '/' or '-';
