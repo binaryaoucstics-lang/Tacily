@@ -8,16 +8,53 @@
   // Latest actual producer view per independent source, including views between
   // controller polls. Bounds limit additional evidence, never production work.
   const producerObservations = new Map();
+  // Intern immutable work/piece values across atomic members and source rows.
+  // Source snapshots already live in the independent version registry; retain
+  // references to those exact versions instead of a second copy in every row.
+  const observationValues = new Map(), observationValueKeys = new Map();
+  let observationValueSerial = 0;
   // Independent traversal advances even while admission is reset. Keep the
   // latest source version plus versions referenced by retained producer views.
   const sourceVersions = new Map();
   let sourceVersionCharacters = 0, sourceVersionDropped = 0;
   const scheduledScans = new Set();
   const observationLimit = 2048, observationCharacterLimit = 2000000;
-  let observationCharacters = 0, observationDropped = 0, sampleSequence = 0;
+  let observationCharacters = 64, observationDropped = 0, sampleSequence = 0;
   let serial = 0, session, observer, probeTimer, status = null, probeJob = null;
   const document = root.document;
   const timestamp = () => new Date().toISOString();
+  function internObservationValue(value) {
+    const serialized = JSON.stringify(value);
+    let entry = observationValueKeys.get(serialized);
+    if (!entry) {
+      const id = ++observationValueSerial;
+      entry = { id, serialized, size: serialized.length + String(id).length + 4, references: 0 };
+      observationValueKeys.set(serialized, entry); observationValues.set(id, entry);
+      observationCharacters += entry.size;
+    }
+    entry.references++;
+    return entry.id;
+  }
+  function releaseObservation(entry) {
+    observationCharacters -= entry.size;
+    for (const id of entry.references) {
+      const value = observationValues.get(id);
+      if (--value.references === 0) {
+        observationCharacters -= value.size;
+        observationValues.delete(id); observationValueKeys.delete(value.serialized);
+      }
+    }
+  }
+  function expandedObservation(entry) {
+    const row = JSON.parse(entry.serialized);
+    const [sourceVersion, ownerVersion] = entry.versions;
+    row.source = sourceVersion.source;
+    row.sourceText = row.source.sourceText;
+    row.representedSource = ownerVersion?.source || null;
+    row.work = JSON.parse(observationValues.get(row.work).serialized);
+    row.pieces = row.pieces.map(id => JSON.parse(observationValues.get(id).serialized));
+    return JSON.parse(JSON.stringify(row));
+  }
   function locator(node) {
     const parts = [];
     for (let current = node; current && current !== document; ) {
@@ -282,29 +319,29 @@
         const sourceVersion = sourceVersions.get(id)?.version;
         const ownerVersion = sourceVersions.get(represented.get(id))?.version;
         const reference = version => version ? { at: version.at, sequence: version.sequence } : null;
-        const value = { sourceId: id, sourceText: sources.get(id).sourceText,
-          source: { ...sources.get(id) }, phase, at, sequence,
+        const value = { sourceId: id, phase, at, sequence,
           sourceObservation: reference(sourceVersion),
           representedSourceObservation: reference(ownerVersion),
           rendered: visibleRows.get(id)?.rendered === true,
           representedBy: represented.get(id) || null,
-          representedSource: represented.has(id) ? { ...sources.get(represented.get(id)) } : null,
           pageDecision: state.assessed,
           work, eligible: idle || pieces.length ? eligibleSources.has(id) : null, pieces };
         // Detach snapshots from mutable DOM/session state and returned samples.
-        const serialized = JSON.stringify(value), size = serialized.length;
         const old = producerObservations.get(id);
-        if (old) { observationCharacters -= old.size; producerObservations.delete(id); }
-        if (size <= observationCharacterLimit) {
-          while (producerObservations.size >= observationLimit
-              || observationCharacters + size > observationCharacterLimit) {
-            const oldest = producerObservations.keys().next().value;
-            observationCharacters -= producerObservations.get(oldest).size;
-            producerObservations.delete(oldest); observationDropped++;
-          }
-          producerObservations.set(id, { serialized, size,
-            versions: [sourceVersion, ownerVersion].filter(Boolean) }); observationCharacters += size;
-        } else observationDropped++;
+        if (old) { releaseObservation(old); producerObservations.delete(id); }
+        if (!sourceVersion || represented.has(id) && !ownerVersion) { observationDropped++; continue; }
+        value.work = internObservationValue(work);
+        value.pieces = pieces.map(internObservationValue);
+        const serialized = JSON.stringify(value), size = serialized.length + 1;
+        const entry = { serialized, size, references: [value.work, ...value.pieces],
+          versions: [sourceVersion, ownerVersion].filter(Boolean) };
+        observationCharacters += size;
+        producerObservations.set(id, entry);
+        while (producerObservations.size > observationLimit || observationCharacters > observationCharacterLimit) {
+          const oldest = producerObservations.keys().next().value;
+          releaseObservation(producerObservations.get(oldest));
+          producerObservations.delete(oldest); observationDropped++;
+        }
       }
     }
     const versions = new Map();
@@ -320,11 +357,25 @@
       }
       independentSourceObservations.push(JSON.parse(JSON.stringify(version))); versionCharacters += size;
     }
+    // Small/legacy consumers still see full rows. Large captures use the same
+    // observations with explicit version and value references. Count the value
+    // table as retained characters too; interning never hides actual loss.
+    let producerRows = [], expandedCharacters = 0, compact = false;
+    for (const entry of producerObservations.values()) {
+      const row = expandedObservation(entry);
+      expandedCharacters += JSON.stringify(row).length;
+      if (expandedCharacters > observationCharacterLimit) { compact = true; break; }
+      producerRows.push(row);
+    }
+    const transport = compact ? { schemaVersion: 1, values: Object.fromEntries(
+      Array.from(observationValues.values(), entry => [entry.id, JSON.parse(entry.serialized)])) } : null;
+    if (compact) producerRows = Array.from(producerObservations.values(), entry => JSON.parse(entry.serialized));
     return { at, finalUrl: root.location.href, title: document.title,
       viewport: { width: root.innerWidth, height: root.innerHeight, scrollX: root.scrollX, scrollY: root.scrollY },
       nodes, sourceNodes: Array.from(sources.values(), value => ({ ...value,
         currentlyRendered: currentSources.has(value.id) })), predictions, productionEligibility, status,
-      producerObservations: Array.from(producerObservations.values(), value => JSON.parse(value.serialized)),
+      producerObservations: producerRows,
+      ...(transport ? { producerObservationTransport: transport } : {}),
       producerObservationDropped: observationDropped,
       independentSourceObservations,
       independentSourceObservationDropped: sourceVersionDropped + versionOverflow,
