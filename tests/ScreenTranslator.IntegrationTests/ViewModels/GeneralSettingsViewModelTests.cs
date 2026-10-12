@@ -5,6 +5,76 @@ namespace ScreenTranslator.IntegrationTests.ViewModels;
 public sealed class GeneralSettingsViewModelTests
 {
     [Fact]
+    public void Chinese_Prose_Share_Threshold_Defaults_To_50_And_Offers_Every_Allowed_Percent()
+    {
+        var viewModel = new GeneralSettingsViewModel();
+
+        Assert.Equal(50, viewModel.BrowserChineseProseShareThresholdPercent);
+        Assert.Equal(Enumerable.Range(10, 81), viewModel.BrowserChineseProseShareThresholdPercentChoices);
+        Assert.Contains(viewModel.BrowserChineseProseShareThresholdPercent, viewModel.BrowserChineseProseShareThresholdPercentChoices);
+    }
+
+    [Fact]
+    public void Chinese_Prose_Share_Threshold_Notifies_Only_When_The_Value_Changes()
+    {
+        var viewModel = new GeneralSettingsViewModel();
+        var changes = new List<string?>();
+        viewModel.PropertyChanged += (_, args) => changes.Add(args.PropertyName);
+
+        viewModel.BrowserChineseProseShareThresholdPercent = 63;
+        viewModel.BrowserChineseProseShareThresholdPercent = 63;
+
+        Assert.Equal(63, viewModel.BrowserChineseProseShareThresholdPercent);
+        Assert.Equal([nameof(GeneralSettingsViewModel.BrowserChineseProseShareThresholdPercent)], changes);
+    }
+
+    [Theory]
+    [InlineData(int.MinValue, 10)]
+    [InlineData(9, 10)]
+    [InlineData(10, 10)]
+    [InlineData(51, 51)]
+    [InlineData(90, 90)]
+    [InlineData(91, 90)]
+    [InlineData(int.MaxValue, 90)]
+    public void Chinese_Prose_Share_Threshold_Clamps_Values_And_Notifies_Once(int value, int expected)
+    {
+        var viewModel = new GeneralSettingsViewModel();
+        var changes = new List<string?>();
+        viewModel.PropertyChanged += (_, args) => changes.Add(args.PropertyName);
+
+        viewModel.BrowserChineseProseShareThresholdPercent = value;
+        viewModel.BrowserChineseProseShareThresholdPercent = value;
+
+        Assert.Equal(expected, viewModel.BrowserChineseProseShareThresholdPercent);
+        Assert.Equal([nameof(GeneralSettingsViewModel.BrowserChineseProseShareThresholdPercent)], changes);
+    }
+
+    [Fact]
+    public void Chinese_Prose_Share_Threshold_Does_Not_Notify_When_Normalized_Value_Is_Unchanged()
+    {
+        var viewModel = new GeneralSettingsViewModel();
+        var changes = new List<string?>();
+        viewModel.PropertyChanged += (_, args) => changes.Add(args.PropertyName);
+
+        viewModel.BrowserChineseProseShareThresholdPercent = 50;
+        Assert.Empty(changes);
+
+        viewModel.BrowserChineseProseShareThresholdPercent = 10;
+        changes.Clear();
+        viewModel.BrowserChineseProseShareThresholdPercent = 9;
+        viewModel.BrowserChineseProseShareThresholdPercent = int.MinValue;
+        Assert.Equal(10, viewModel.BrowserChineseProseShareThresholdPercent);
+        Assert.Empty(changes);
+
+        viewModel.BrowserChineseProseShareThresholdPercent = 90;
+        changes.Clear();
+        viewModel.BrowserChineseProseShareThresholdPercent = 91;
+        viewModel.BrowserChineseProseShareThresholdPercent = int.MaxValue;
+        Assert.Equal(90, viewModel.BrowserChineseProseShareThresholdPercent);
+        Assert.Empty(changes);
+    }
+
+    [Fact]
     public void Domain_Editors_Normalize_Valid_Entries_And_Report_Invalid_Input_Without_Saving_It()
     {
         var model = new GeneralSettingsViewModel { BrowserTranslationWhitelistText = "https://Example.com/page\nexample.com\nbad domain.com" };

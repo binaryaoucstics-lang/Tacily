@@ -234,7 +234,7 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Margin="0,0,24,0">
                             <TextBlock Text="全自动翻译 Chrome 网页" Style="{StaticResource SettingLabelStyle}" />
-                            <TextBlock Text="网页加载后在本机判断是否需要翻译，自动处理网页文字；图片按下方策略处理。目标为中文时，中文或中英混排正文会跳过。"
+                            <TextBlock Text="网页加载后在本机判断是否需要翻译，自动处理网页文字；图片按下方策略处理。目标为中文时，按下方中文正文占比阈值判断是否跳过自动翻译。"
                                        TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" />
                         </StackPanel>
                         <ui:ToggleSwitch x:Name="BrowserAutoPageToggle" Grid.Column="1"
@@ -252,7 +252,25 @@
                         <TextBlock Text="页面语言判断" VerticalAlignment="Center" Style="{StaticResource SettingLabelStyle}" />
                         <TextBlock x:Name="BrowserPageJudgementLabel" Grid.Column="1" Text="程序规则（固定）" VerticalAlignment="Center" />
                     </Grid>
-                    <TextBlock Text="根据可读正文、文字脚本和常用词判断，持续观察动态加载。无需语言模型。中文及有可读中文段落的双语页面保留原页；少量中文名称或导航标签不阻止外语正文翻译。"
+                    <TextBlock Text="根据可读正文、文字脚本和常用词判断，持续观察动态加载。无需语言模型。中外文混合页面按中文正文占比判断；页面需要翻译时，已可读的中文段落仍保留原文。少量中文名称或导航标签不阻止外语正文翻译。"
+                               TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
+                    <Grid Margin="0,14,0,0" IsEnabled="{Binding BrowserAutoPageTranslationEnabled}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="150" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="中文正文占比阈值" VerticalAlignment="Center" Style="{StaticResource SettingLabelStyle}" />
+                        <ComboBox x:Name="BrowserChineseProseShareThresholdCombo" Grid.Column="1"
+                                  ItemsSource="{Binding BrowserChineseProseShareThresholdPercentChoices}"
+                                  SelectedItem="{Binding BrowserChineseProseShareThresholdPercent, Mode=TwoWay}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StringFormat={}{0}%}" />
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </Grid>
+                    <TextBlock Text="仅在目标语言为中文时生效。中文正文占比 = 已识别中文正文文字数 ÷（已识别中文正文文字数 + 非中文正文文字数），不含数字和标点。达到或超过阈值时跳过整页自动翻译；低于阈值时继续语言判断。默认 50%，可选 10%–90%。"
                                TextWrapping="Wrap" Style="{StaticResource SettingDescriptionStyle}" Margin="0,8,0,0" />
                     <Grid Margin="0,14,0,0" IsEnabled="{Binding BrowserAutoPageTranslationEnabled}">
                         <Grid.ColumnDefinitions>

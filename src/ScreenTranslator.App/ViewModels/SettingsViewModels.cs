@@ -96,6 +96,10 @@ public sealed class GeneralSettingsViewModel : ObservableObject
         set => SetProperty(ref _browserAutoPageTranslationEnabled, value);
     }
 
+    public ObservableCollection<int> BrowserChineseProseShareThresholdPercentChoices { get; } = new(
+        Enumerable.Range(PageTranslationDecision.MinimumChineseProseShareThresholdPercent,
+            PageTranslationDecision.MaximumChineseProseShareThresholdPercent - PageTranslationDecision.MinimumChineseProseShareThresholdPercent + 1));
+
     public int BrowserChineseProseShareThresholdPercent
     {
         get => _browserChineseProseShareThresholdPercent;
