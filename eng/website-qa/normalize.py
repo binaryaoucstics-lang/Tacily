@@ -405,7 +405,11 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
             or len(set(requests)) != len(requests)):
         issues.append("invalid_request_identities")
         requests = []
-    if any(r not in terminal_ids for r in requests) or any(i not in requests for i in terminal_ids):
+    # Concurrent native work can finish in a different order from admission.
+    # Require a bijection (duplicates/invalid IDs are blocked above), keeping
+    # the original terminal sequence and each request's identity untouched.
+    if (len(requests) != len(terminal_ids)
+            or set(requests) != {i for i in terminal_ids if isinstance(i, str)}):
         issues.append("request_terminal_identity_mismatch")
     if case.get("expectedPageTranslation") is True:
         if (not capabilities or capabilities.get("live") is not True
@@ -413,7 +417,10 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
                 or not counts_valid or result["requestCount"] == 0):
             issues.append("missing_live_translation_evidence")
     elif case.get("expectedPageTranslation") is False:
-        if requests or result["requestCount"] != 0:
+        # Native request identities include local assessments. Only the original
+        # terminal model-call counts establish unnecessary cloud translation;
+        # invalid/missing/failed terminals remain blocking through checks above.
+        if result["requestCount"] != 0:
             issues.append("unnecessary_translation_request")
     else:
         issues.append("invalid_expected_page_translation")

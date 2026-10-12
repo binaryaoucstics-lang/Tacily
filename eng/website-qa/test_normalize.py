@@ -341,6 +341,225 @@ class NormalizationTests(unittest.TestCase):
         self.review["pageAnnotation"]["needTranslation"] = False
         self.review["annotations"][0]["needTranslation"] = False
 
+    def negative_native_assessment(self):
+        self.skipped_candidate()
+        self.case["requestIds"] = ["native-1", "native-2"]
+        self.case["terminals"] = [
+            {"type": "terminal", "id": identity, "caseId": SITE["id"],
+             "requestCount": 0, "success": True, "failedCount": 0, "cacheHits": 0}
+            for identity in self.case["requestIds"]]
+
+    def normalize_preserving_originals(self):
+        self.save()
+        originals = {p: p.read_bytes() for p in [self.case_path, self.review_path,
+                     *(self.attempt / s["path"] for s in self.case["screenshots"])]}
+        result = normalize_case(self.case_path, self.review_path, self.output, self.root)
+        self.assertEqual(result, json.loads(self.output.read_text(encoding="utf-8")))
+        self.assertEqual(self.case, result["provenance"]["rawCapture"])
+        self.assertEqual(self.review, result["provenance"]["rawReview"])
+        self.assertEqual(hashlib.sha256(originals[self.case_path]).hexdigest(),
+                         result["provenance"]["caseSha256"])
+        self.assertEqual(hashlib.sha256(originals[self.review_path]).hexdigest(),
+                         result["provenance"]["reviewSha256"])
+        self.assertEqual([self.case["capabilities"], *self.case["terminals"]], result["hostEvents"])
+        self.assertEqual(self.case["requestIds"], result["requestIds"])
+        self.assertEqual(self.case["sourceHead"], result["sourceHead"])
+        self.assertEqual(self.case["sourceHashes"], result["sourceHashes"])
+        self.assertEqual(self.case["errors"], result["errors"])
+        for path, content in originals.items():
+            self.assertEqual(content, path.read_bytes())
+        return result
+
+    def test_negative_native_zero_calls_roundtrip_preserves_predictions_and_truth(self):
+        self.negative_native_assessment()
+        for completed, blocked in [(False, "screenshot_review_pending"), (True, "")]:
+            with self.subTest(capture_completed=completed):
+                self.case.update(completed=completed, blockedReason=blocked)
+                result = self.normalize_preserving_originals()
+                self.assertTrue(result["completed"])
+                self.assertEqual([], result["normalizationIssues"])
+                self.assertEqual(0, result["requestCount"])
+                self.assertFalse(result["liveTranslation"])
+                self.assertFalse(result["pageAnnotation"]["needTranslation"])
+                self.assertFalse(result["annotations"][0]["needTranslation"])
+                self.assertEqual({"nodeId": "s1", "eligible": True, "completed": False,
+                                  "failed": False, "pieceIds": ["p1", "p2"]}, result["predictions"][0])
+                stats, accepted, reasons = _score_case(
+                    result, {**SITE, "expectedPageTranslation": False}, self.root)
+                self.assertTrue(accepted, reasons)
+                self.assertEqual(1, stats["FP"])
+                self.assertEqual(0, stats["unnecessaryRequests"])
+                self.output.unlink()
+
+    def test_negative_native_actual_calls_roundtrip_remain_failure(self):
+        self.negative_native_assessment()
+        self.case["terminals"][0]["requestCount"] = 2
+        self.case["terminals"][1]["requestCount"] = 3
+        result = self.normalize_preserving_originals()
+        self.assertEqual(5, result["requestCount"])
+        self.assert_blocked(result, "unnecessary_translation_request")
+        self.assertEqual(5, _score_case(
+            result, {**SITE, "expectedPageTranslation": False}, self.root)[0]["unnecessaryRequests"])
+
+    def concurrent_native_requests(self, expected):
+        if not expected:
+            self.skipped_candidate()
+        self.case["requestIds"] = ["r1", "r2"]
+        # r2 finishes before r1; counts stay attached to their original IDs.
+        self.case["terminals"] = [
+            {"type": "terminal", "id": identity, "caseId": SITE["id"],
+             "requestCount": count, "success": True, "failedCount": 0, "cacheHits": 0}
+            for identity, count in zip(("r2", "r1"), (3, 2) if expected else (0, 0))]
+
+    def test_concurrent_out_of_order_terminals_roundtrip_accepts_both_page_types(self):
+        baseline_case, baseline_review = deepcopy(self.case), deepcopy(self.review)
+        for expected in (False, True):
+            with self.subTest(expected=expected):
+                self.case, self.review = deepcopy(baseline_case), deepcopy(baseline_review)
+                self.concurrent_native_requests(expected)
+                result = self.normalize_preserving_originals()
+                self.assertTrue(result["completed"])
+                self.assertEqual([], result["normalizationIssues"])
+                self.assertEqual(["r1", "r2"], result["requestIds"])
+                self.assertEqual(["r2", "r1"], [e["id"] for e in result["terminals"]])
+                self.assertEqual(["r2", "r1"], [e["id"] for e in result["hostEvents"][1:]])
+                self.assertEqual({"r1": 2, "r2": 3} if expected else {"r1": 0, "r2": 0},
+                                 {e["id"]: e["requestCount"] for e in result["hostEvents"][1:]})
+                self.assertEqual(5 if expected else 0, result["requestCount"])
+                stats, accepted, reasons = _score_case(
+                    result, {**SITE, "expectedPageTranslation": expected}, self.root)
+                self.assertTrue(accepted, reasons)
+                self.assertEqual(0, stats["unnecessaryRequests"])
+                self.assertEqual(0 if expected else 1, stats["FP"])
+                self.assertEqual(expected, result["pageAnnotation"]["needTranslation"])
+                self.assertEqual(expected, result["annotations"][0]["needTranslation"])
+                self.assertTrue(result["predictions"][0]["eligible"])
+                self.assertEqual(expected, result["predictions"][0]["completed"])
+                self.output.unlink()
+
+    def test_concurrent_terminal_identity_failures_roundtrip_block_both_page_types(self):
+        baseline_case, baseline_review = deepcopy(self.case), deepcopy(self.review)
+        for expected in (False, True):
+            for kind, issue in [("missing", "request_terminal_identity_mismatch"),
+                                ("extra", "request_terminal_identity_mismatch"),
+                                ("unmatched", "request_terminal_identity_mismatch"),
+                                ("duplicate", "duplicate_or_invalid_terminal_id"),
+                                ("invalid_id", "duplicate_or_invalid_terminal_id"),
+                                ("duplicate_request", "invalid_request_identities"),
+                                ("failed", "failed_or_invalid_terminal")]:
+                with self.subTest(expected=expected, kind=kind):
+                    self.case, self.review = deepcopy(baseline_case), deepcopy(baseline_review)
+                    self.concurrent_native_requests(expected)
+                    if kind == "missing":
+                        self.case["terminals"].pop()
+                    elif kind == "extra":
+                        self.case["terminals"].append({**self.case["terminals"][0], "id": "r3"})
+                    elif kind == "unmatched":
+                        self.case["terminals"][0]["id"] = "r3"
+                    elif kind == "duplicate":
+                        self.case["terminals"][1] = deepcopy(self.case["terminals"][0])
+                    elif kind == "invalid_id":
+                        self.case["terminals"][0]["id"] = ["r2"]
+                    elif kind == "duplicate_request":
+                        self.case["requestIds"] = ["r1", "r1", "r2"]
+                    else:
+                        self.case["terminals"][0].update(success=False, failedCount=1)
+                    result = self.normalize_preserving_originals()
+                    self.assert_blocked(result, issue)
+                    self.output.unlink()
+
+    def test_negative_native_missing_duplicate_and_mismatched_terminals_roundtrip_fail(self):
+        for kind, issue in [("missing", "request_terminal_identity_mismatch"),
+                            ("duplicate", "duplicate_or_invalid_terminal_id"),
+                            ("wrong_id", "request_terminal_identity_mismatch"),
+                            ("wrong_case", "host_event_identity_mismatch"),
+                            ("wrong_type", "host_event_type_mismatch"),
+                            ("duplicate_request", "invalid_request_identities")]:
+            with self.subTest(kind=kind):
+                self.negative_native_assessment()
+                if kind == "missing":
+                    self.case["terminals"] = []
+                elif kind == "duplicate":
+                    self.case["terminals"][1] = deepcopy(self.case["terminals"][0])
+                elif kind == "wrong_id":
+                    self.case["terminals"][0]["id"] = "other-native"
+                elif kind == "wrong_case":
+                    self.case["terminals"][0]["caseId"] = "other-case"
+                elif kind == "wrong_type":
+                    self.case["terminals"][0]["type"] = "assessment"
+                else:
+                    self.case["requestIds"] *= 2
+                result = self.normalize_preserving_originals()
+                self.assertEqual(0, result["requestCount"])
+                self.assert_blocked(result, issue)
+                self.output.unlink()
+
+    def test_negative_native_malformed_and_failed_terminals_roundtrip_fail(self):
+        patches = [({"requestCount": value}, "invalid_terminal_request_count")
+                   for value in (None, True, False, "0", -1, 0.0)]
+        patches += [(None, "invalid_terminal_request_count"),
+                    ({"success": False}, "failed_or_invalid_terminal"),
+                    ({"success": 1}, "failed_or_invalid_terminal"),
+                    ({"failedCount": 1}, "failed_or_invalid_terminal"),
+                    ({"failedCount": False}, "failed_or_invalid_terminal"),
+                    ({"cacheHits": None}, "failed_or_invalid_terminal")]
+        for patch, issue in patches:
+            with self.subTest(patch=patch):
+                self.negative_native_assessment()
+                if patch is None:
+                    del self.case["terminals"][0]["requestCount"]
+                else:
+                    self.case["terminals"][0].update(patch)
+                result = self.normalize_preserving_originals()
+                if issue == "invalid_terminal_request_count":
+                    self.assertIsNone(result["requestCount"])
+                else:
+                    self.assertEqual(0, result["requestCount"])
+                self.assert_blocked(result, issue)
+                self.output.unlink()
+
+    def test_negative_native_zero_calls_do_not_clear_original_failure_evidence(self):
+        self.negative_native_assessment()
+        baseline_case, baseline_review = deepcopy(self.case), deepcopy(self.review)
+        for kind, issue in [("error", "capture_errors"),
+                            ("pending", "production_work_unresolved"),
+                            ("unsettled", "capture_not_successfully_finished"),
+                            ("failed_node", "node_not_completed:s1"),
+                            ("unreviewed_retraction", "unreviewed_retraction"),
+                            ("confirmed_retraction", "confirmed_retraction"),
+                            ("unknown_label", "unknown_node_label:s1"),
+                            ("omission", "confirmed_omission:s1")]:
+            with self.subTest(kind=kind):
+                self.case, self.review = deepcopy(baseline_case), deepcopy(baseline_review)
+                if kind == "error":
+                    self.case["errors"] = [{"code": "native_assessment_failed"}]
+                elif kind == "pending":
+                    self.case["blockedReason"] += ";production_work_unresolved"
+                    self.case["evidenceReady"] = False
+                    self.case["finalState"] = {"pending": 1, "rpcPending": 1}
+                elif kind == "unsettled":
+                    self.case["settled"] = False
+                elif kind == "failed_node":
+                    self.case["predictions"][0]["failed"] = True
+                elif kind.endswith("retraction"):
+                    self.case["retractions"] = [{"sourceId": "s1", "type": "retraction",
+                                                  "sourceUnchanged": True}]
+                    if kind == "confirmed_retraction":
+                        self.review["retractions"] = [{"eventIndex": 0, "confirmed": True,
+                                                       "sourceUnchanged": True}]
+                elif kind == "unknown_label":
+                    self.review["annotations"] = []
+                else:
+                    self.review["annotations"][0]["needTranslation"] = True
+                result = self.normalize_preserving_originals()
+                self.assertEqual(0, result["requestCount"])
+                self.assert_blocked(result, issue)
+                self.output.unlink()
+
+    def test_positive_native_zero_calls_still_requires_live_model(self):
+        self.case["terminals"][0]["requestCount"] = 0
+        self.assert_blocked(self.normalize_preserving_originals(), "missing_live_translation_evidence")
+
     def test_negative_finished_page_preserves_untranslated_eligible_candidates(self):
         self.skipped_candidate()
         for completed, blocked in [(False, "screenshot_review_pending"), (True, "")]:
