@@ -134,6 +134,36 @@ class AtomicEvidenceTests(Fixture):
 
 
 class CliTests(Fixture):
+    def test_drain_sample_is_one_synchronous_wrapper_call_and_keeps_pending_snapshot(self):
+        calls = []
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        script = """
+const expression = require('node:fs').readFileSync(0, 'utf8');
+let pending = 1;
+globalThis.__websiteQa = {
+  sample: phase => ({phase, rpcPending: pending}),
+  drain: () => { pending = 0; return [{rpcId:'r', message:{type:'pageAutoCandidate'}}]; }
+};
+process.stdout.write(JSON.stringify({data:{result:eval(expression)}}));
+"""
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            self.assertEqual(Path(argv[1]), capture.WRAPPER)
+            self.assertIs(kwargs["shell"], False)
+            return subprocess.run([node, "-e", script], input=argv[-1], capture_output=True,
+                                  text=True, encoding="utf-8", timeout=10)
+        cli = capture.BrowserCli("combined-test", self.journal, runner)
+        value = cli.drain_sample('after"中文😀')
+        self.assertEqual(value["sample"], {"phase": 'after"中文😀', "rpcPending": 1})
+        self.assertEqual(value["outbound"][0]["rpcId"], "r")
+        self.assertEqual(len(calls), 1)
+        for result in ({}, {"sample": {}, "outbound": {}}, {"sample": None, "outbound": []}):
+            cli.runner = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0,
+                capture.encode({"data": {"result": result}}), "")
+            with self.assertRaisesRegex(capture.CaptureError, "adapter_lost_or_invalid"):
+                cli.drain_sample("after")
+
     def test_only_wrapper_list_arguments_and_json_layouts(self):
         calls = []
         def runner(argv, **kwargs):
@@ -705,6 +735,7 @@ class WorkflowTests(Fixture):
         class MockBrowser:
             probe = capture.BrowserCli.probe
             deliver_batch = capture.BrowserCli.deliver_batch
+            drain_sample = capture.BrowserCli.drain_sample
             def __init__(self):
                 self.configured = False
                 self.outgoing = []
@@ -724,6 +755,10 @@ class WorkflowTests(Fixture):
                 self.calls.append(("inject", len(source)))
             def evaluate(self, expression):
                 self.calls.append(("eval", expression))
+                prefix = "(()=>{const q=globalThis.__websiteQa;return {sample:q.sample("
+                if expression.startswith(prefix):
+                    phase = json.loads(expression[len(prefix):expression.index("),outbound:q.drain()")])
+                    return {"sample": self.qa("sample", phase), "outbound": self.qa("drain")}
                 if expression.startswith("(()=>{const q=globalThis.__websiteQa;for(const [rpcId,packet,ack] of "):
                     prefix = "(()=>{const q=globalThis.__websiteQa;for(const [rpcId,packet,ack] of "
                     frames = json.loads(expression[len(prefix):expression.rindex("){if(ack)")])
@@ -1260,7 +1295,9 @@ class WorkflowTests(Fixture):
             result, browser, host, rows = self.scripted_case(events, browser=browser, poll_hook=poll_hook, case_timeout=.25)
         self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
         self.assertEqual(host.polls, 3)
-        self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 3)
+        # The first poll checks the queue before the CLI/outbound round trip.
+        # It is empty; the next two actual packets consume the remaining budget.
+        self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 2)
         self.assertEqual(browser.delivered, [])
         self.assertEqual(browser.deadline, 99)
         self.assertFalse(result["settled"])
@@ -1270,6 +1307,7 @@ class WorkflowTests(Fixture):
     def test_existing_qa_only_browser_interface_still_delivers_and_acks_once(self):
         browser = self.browser()
         browser.deliver_batch = None
+        browser.drain_sample = None
         packets = ['{"type":"pageAutoTranslations","finished":false}',
                    '{"type":"pageAutoTranslations","finished":true}']
         def events(request, requests):
@@ -1292,6 +1330,95 @@ class WorkflowTests(Fixture):
         self.assertEqual(browser.delivered, packets)
         self.assertEqual(sum(call[0] == "acknowledge" for call in browser.calls), 1)
         self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 3)
+
+    def test_queued_completion_precedes_slow_cli_drain_and_dom_sample(self):
+        for combined in (False, True):
+            with self.subTest(combined=combined):
+                clock, drains = [1.0], [0]
+                browser = self.browser()
+                if not combined:
+                    browser.drain_sample = None
+                original_qa = browser.qa
+                def qa(method, *args):
+                    if method == "drain" and browser.configured:
+                        drains[0] += 1
+                        if drains[0] == 2:
+                            # Offline stand-in for an expensive wrapper/DOM call.
+                            # Queued completion must have reached receive first.
+                            self.assertTrue(browser.done)
+                            clock[0] += .4
+                    return original_qa(method, *args)
+                browser.qa = qa
+                packet = ' { "type": "pageAutoTranslations", "finished": true }\n'
+                def events(request, requests):
+                    return [None, self.packet_event(request, packet), self.terminal_event(request)]
+                def sleep(seconds):
+                    clock[0] += seconds
+                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                        mock.patch.object(capture.time, "sleep", sleep):
+                    result, browser, _, rows = self.scripted_case(events, browser=browser,
+                        run_id="host-first-" + str(combined), case_timeout=2)
+                self.assertEqual(result["errors"], [])
+                self.assertTrue(result["settled"])
+                self.assertEqual(browser.delivered, [packet])
+                configured = next(i for i, call in enumerate(browser.calls) if call[0] == "configure")
+                drain_calls = [i for i, call in enumerate(browser.calls) if call[0] == "drain" and i > configured]
+                delivery = next(i for i, call in enumerate(browser.calls) if call[0] == "deliver")
+                self.assertLess(delivery, drain_calls[1])
+                self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 2)
+                combined_calls = [call for call in browser.calls if call[0] == "eval"
+                                  and "outbound:q.drain()" in call[1]]
+                self.assertEqual(bool(combined_calls), combined)
+                self.assertFalse(result["completed"])  # Synthetic transport never certifies a website.
+
+    def test_frontend_timer_failure_survives_successful_late_terminal_and_cancel_ack(self):
+        clock, expired = [1.0], [False]
+        browser = self.browser()
+        original_qa = browser.qa
+        def qa(method, *args):
+            if method == "deliver" and expired[0]:
+                # Production rejects updates for an expired job. Preserve the
+                # original packet and failed source rather than restoring success.
+                browser.calls.append((method, *args))
+                browser.delivered.append(args[1])
+                return False
+            value = original_qa(method, *args)
+            if method == "sample" and expired[0]:
+                value["status"] = {"state": "failed", "reason": "translation_timeout"}
+                value["events"] = [{"type": "status", "value": value["status"]}]
+            return value
+        browser.qa = qa
+        packet = '{"type":"pageAutoTranslations","finished":true}'
+        def events(request, requests):
+            if request["action"] == "cancel":
+                return []  # Same-case late cancellation has no extra terminal.
+            return [None, self.packet_event(request, packet), self.terminal_event(request, elapsedMilliseconds=667)]
+        def sleep(seconds):
+            clock[0] += seconds
+            if not expired[0]:
+                expired[0] = browser.done = True
+                browser.predictions[0].update(completed=False, failed=True)
+                browser.outgoing.append({"rpcId": "cancel-rpc", "message": {
+                    "type": "pageAutoCancel", "requestId": "req1", "reason": "translation_timeout"}})
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(capture.time, "sleep", sleep):
+            result, browser, host, rows = self.scripted_case(events, browser=browser,
+                run_id="frontend-timeout", case_timeout=.03)
+        self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
+        self.assertEqual(browser.delivered, [packet])
+        self.assertEqual(len(result["terminals"]), 1)
+        self.assertTrue(result["terminals"][0]["success"])
+        cancelled = next(request for request in host.requests if request["action"] == "cancel")
+        original = next(request for request in host.requests if request["action"] == "message")
+        self.assertEqual(cancelled["id"], original["id"])
+        self.assertEqual(cancelled["message"]["reason"], "translation_timeout")
+        self.assertEqual(result["cancellations"][0]["id"], original["id"])
+        self.assertTrue(any(row["kind"] == "sample" and row["value"]["status"].get("reason")
+                            == "translation_timeout" for row in rows))
+        self.assertTrue(result["predictions"][0]["failed"])
+        self.assertFalse(result["settled"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
 
     def test_finished_frame_without_host_terminal_cannot_settle_or_complete(self):
         clock = [1.0]

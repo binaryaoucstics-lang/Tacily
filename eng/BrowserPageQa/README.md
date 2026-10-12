@@ -25,8 +25,12 @@ dotnet eng/BrowserPageQa/bin/Release/net8.0-windows10.0.19041.0/BrowserPageQa.dl
 {"schemaVersion":1,"id":"translation","caseId":"case-001","action":"cancel"}
 ```
 
-`cancel` 的 id 指向原 message 请求，caseId 必须一致；未知/已完成请求返回错误。
-取消结果归属原请求，只在生产任务真正退出后输出一次失败 terminal。
+`cancel` 的 id 指向已接纳的原 message 请求，caseId 必须完全一致（区分大小写）。
+活动请求在完成结果确定前收到取消，仍只在生产任务真正退出后输出一次失败 terminal。
+完成结果已确定或请求已退出时，同 case 的晚到/重复取消幂等，不输出新 packet、error 或 terminal，
+不改变原成功或失败结果。保留的关联只有 id/caseId，受现有每进程 100,000 个非取消 id 上限约束。
+未知、跨 case、capabilities/assess 或未接纳的 message 取消仍返回 `unknown_request`；
+所有非取消请求仍不可复用 id。完成和取消在同一锁内确定归属，退出后的取消不访问已释放的 token source。
 最多同时接纳十个 message，与生产页面配置的十个并发 job 对齐；共享生产服务的十个 provider 执行槽，超限返回 `busy`。
 每行最多 1 Mi 个 UTF-16 字符，每进程最多 100,000 个非取消 id；嵌套/重复字段及
 生产候选边界无效时拒绝。输入 EOF 等待已接纳请求结束；Ctrl+C 取消并清理自己的任务。
@@ -66,6 +70,10 @@ worker 仅运行离线验收。主控负责在已授权环境准备构建资源�
 真实候选包含公开页面内容，只应在主控明确授权的真实运行中提交。
 主控将原始 JSONL/stdout/stderr 和退出码保存到忽略证据目录，并核验身份匹配及 terminal 完整性。
 模拟 self-test、可访问页面、零请求跳过不能替代需要翻译页面的真实模型与逐节点证据。
+
+离线回归覆盖已退出 message 的重复/跨 case 取消、非 message 和 busy 拒绝、活动取消失败，
+以及终止输出暂停期间取消和 shutdown 的竞态（始终只有一个原 terminal）。CLI 侧另保留前端
+`translation_timeout`、晚到成功 terminal 和原取消帧；幂等取消不代表前端完成，不修改生产计时器。
 
 ## 运行中版本与磁盘预设不一致
 

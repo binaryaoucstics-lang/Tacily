@@ -24,6 +24,9 @@ internal sealed class JsonlHost : IAsyncDisposable
     private readonly object _gate = new();
     private readonly Dictionary<string, Work> _active = new(StringComparer.Ordinal);
     private readonly HashSet<string> _usedIds = new(StringComparer.Ordinal);
+    // Only admitted messages can be cancelled. This history shares the existing
+    // 100,000 non-cancel admission bound; it retains no candidate or token source.
+    private readonly Dictionary<string, string> _messageCases = new(StringComparer.Ordinal);
     private readonly AsyncLocal<Work?> _current = new();
     private readonly ConcurrentDictionary<DocumentKey, PageTranslationAssessment> _documentAssessments = new();
     private readonly BrowserPageTranslationCache _cache = new();
@@ -86,8 +89,9 @@ internal sealed class JsonlHost : IAsyncDisposable
                 bool found;
                 lock (_gate)
                 {
-                    found = _active.TryGetValue(id, out var work) && work.CaseId == caseId;
-                    if (found) work!.Cancellation.Cancel();
+                    found = _messageCases.TryGetValue(id, out var originalCase) && originalCase == caseId;
+                    if (found && _active.TryGetValue(id, out var work) && !work.Finalizing)
+                        work.Cancellation.Cancel();
                 }
                 if (!found) await ErrorAsync(id, caseId, "unknown_request");
                 return;
@@ -111,6 +115,7 @@ internal sealed class JsonlHost : IAsyncDisposable
                 {
                     if (_active.Count >= MaximumActiveRequests) { work.Cancellation.Dispose(); throw new HostException("busy"); }
                     _active.Add(id, work);
+                    _messageCases.Add(id, caseId);
                     work.Task = Task.Run(() => ExecuteSafelyAsync(work));
                 }
                 return;
@@ -198,12 +203,13 @@ internal sealed class JsonlHost : IAsyncDisposable
     private async Task ExecuteAsync(Work work)
     {
         var watch = Stopwatch.StartNew(); var success = false; string? failure = null;
+        var token = work.Cancellation.Token;
         _current.Value = work;
         try
         {
-            work.Cancellation.Token.ThrowIfCancellationRequested();
+            token.ThrowIfCancellationRequested();
             work.Settings = await SettingsAsync();
-            work.Cancellation.Token.ThrowIfCancellationRequested();
+            token.ThrowIfCancellationRequested();
             // Admission is an empty valid production translations frame. The transport metadata
             // lets the bridge resolve session.send with { accepted: true }; no invented frame type.
             await PacketAsync(work, new("pageAutoTranslations"), accepted: true);
@@ -220,23 +226,26 @@ internal sealed class JsonlHost : IAsyncDisposable
                     Parallelism = Math.Clamp(settings.BrowserPageTranslationConcurrency, 1, 10),
                     // Memory cache belongs to this immutable settings snapshot and this host only.
                     CacheScope = "browser-page-qa-session", ExplicitSelection = work.Candidate.ManualMode == "selection",
-                }, async (update, token) =>
+                }, async (update, updateToken) =>
                 {
-                    token.ThrowIfCancellationRequested();
+                    updateToken.ThrowIfCancellationRequested();
                     work.Updates[update.Id] = update;
                     await PacketAsync(work, new("pageAutoTranslations", Updates: [update]));
-                }, work.Cancellation.Token);
+                }, token);
                 work.RequestCount = result.RequestCount; work.CacheHits = result.CacheHits; work.FailedCount = result.FailedCount;
                 success = result.FailedCount == 0 && result.CompletedCount == work.Candidate.Blocks.Count;
                 if (!success) failure = "translation_incomplete";
             }
             else success = true;
-            work.Cancellation.Token.ThrowIfCancellationRequested();
+            // Commit completion under the same lock as cancellation. A cancel
+            // before this point wins; after it, final delivery is idempotent.
+            lock (_gate) { token.ThrowIfCancellationRequested(); work.Finalizing = true; }
         }
         catch (Exception error)
         {
             success = false;
-            failure = error is OperationCanceledException && work.Cancellation.IsCancellationRequested ? "cancelled"
+            lock (_gate) work.Finalizing = true;
+            failure = error is OperationCanceledException && token.IsCancellationRequested ? "cancelled"
                 : error is HostException host ? host.Code : PageAutoFailure.Code(error);
             work.CacheHits = work.Updates.Values.Count(update => update.FromCache && update.IsComplete && !update.Failed);
             // Explicitly restore every unfinished source; streamed prefixes never count as complete.
@@ -313,7 +322,15 @@ internal sealed class JsonlHost : IAsyncDisposable
 
     internal void CancelAll()
     {
-        lock (_gate) { _stopping = true; foreach (var work in _active.Values) work.Cancellation.Cancel(); }
+        lock (_gate)
+        {
+            _stopping = true;
+            // Cancellation callbacks may retire work synchronously. Snapshot
+            // enumeration and recheck membership before touching a token source.
+            foreach (var work in _active.Values.ToArray())
+                if (_active.TryGetValue(work.Id, out var current) && ReferenceEquals(current, work) && !work.Finalizing)
+                    work.Cancellation.Cancel();
+        }
         _shutdown.Cancel();
     }
 
@@ -347,6 +364,7 @@ internal sealed class JsonlHost : IAsyncDisposable
         public int RequestCount;
         public int CacheHits;
         public int FailedCount;
+        public bool Finalizing;
     }
 
     private sealed class CountedProvider(ITranslationProvider inner, Work work) : ITranslationProvider, IStreamingTranslationProvider

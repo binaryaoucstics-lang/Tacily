@@ -102,6 +102,7 @@
       const record = block.record;
       const sourceId = identity(record.node, record.source), matched = sources.has(sourceId);
       const sourceIds = Array.from(new Set((block.atomicRecords || [record])
+        .filter(member => String(member.source ?? "").trim().length > 0)
         .map(member => identity(member.node, member.source))));
       const allMatched = matched && sourceIds.every(id => sources.has(id));
       predictions.push({ id: block.id, sourceId, sourceIds,

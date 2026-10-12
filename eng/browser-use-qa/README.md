@@ -54,6 +54,8 @@ python eng/browser-use-qa/capture.py `
 
 ### 帧批量传送与期限
 
+每轮先核验并交付已经排队的 host 事件，再调用 CLI 做 outbound drain 或 DOM 采样；同轮发送请求后再检查 host 队列。首个候选先通过轻量 drain 接纳，后续语义等待将 sample 与 drain 合为一次同步 eval，保留原 `qa`、`sample`、`drain` 和批量交付接口。采样值反映当时的真实生产状态，之后到达的完成帧不会改写该快照；仍按下一轮实际状态和期限等待。两个 host 队列检查合计最多 1000 个事件，额度用尽时下一轮继续优先交付，不先做昂贵采样。
+
 转发只合并已经到达的 host 帧，不额外等待凑批。每批最多 32 帧，且将 RPC ID、原始 packet、首次确认标志及同步 JavaScript 执行包装全部 JSON 编码后计算 UTF-16 字节数，完整 eval 表达式不得超过 20000 bytes。同一批保持原事件顺序，各 RPC 仅在首次帧之前调用一次 `acknowledge`，随后每个原始帧调用 `deliver`；跨批和交错 RPC 也不重复确认。执行是同步循环，不把 Promise 或 `{}` 作为传送成功。单个 packet 过大时，通过既有 `inject` 分块存入数据，再用小表达式一次交给 `deliver`；不会截断、重写或重新序列化该原始帧字符串，数据也不会作为 JavaScript 执行。存储的数据在交付表达式的 finally 中清除。
 
 速度改善来自减少包装器/CLI 进程调用：以离线回归中的 102 个较小合成帧为例，旧逻辑需要 204 次确认/交付调用，现在为 4 次批量 eval。真实包大小、到达时序和大包分块会影响实际调用数；这不是实际网站、真实模型或语料验证成功的结论。stdout 原行及每个 `host_event` 仍分别记录、flush/fsync；关联 ID、case ID、packet 错误与 terminal 失败仍核验。遇到错误先交付此前有效的已排队帧，错误 packet 本身也保持原样交付，然后记录失败，不用批量传送掩盖错误或生成完成证据。
@@ -67,6 +69,7 @@ python eng/browser-use-qa/capture.py `
 - before：配置翻译前独立遍历实际渲染的文本节点，包含代码、日期、按钮、数字等，不以生产 eligible 过滤。采集标签、角色、Range 几何、文档坐标和首屏标记。开放 Shadow DOM、slot 可读；关闭 Shadow DOM、跨域 iframe 无法读取，人工审核需记录这些遗漏。
 - sourceNodes：身份分配与可见证据独立；只有首次确认实际 rendered 的完整行（标签、角色、几何等）才加入历史，不收录 SCRIPT/STYLE/隐藏文本的占位项。已观察的译文消失为空白时保留此前合法位置；已在任一阶段显示过的节点后来隐藏或脱离仍保留最后完整行。保留原文；用 DOM locator、源版本和节点关联分配稳定 ID，相同位置与原文的节点替换可保持 ID。生产 record 的保留原文用于翻译后追踪，不能让译文替代原文。来源改变使用新 ID。ID 只在当前文档 attempt 内稳定，不能声称跨加载稳定。
 - predictions：生产 blocks 的实际 eligible、completed、failed、local/fromCache 及 sourceId。生产预测不能创建可见源证据；未独立观察到的源标记 `sourceEvidence=unmatched` 和 `auditIssue=source_not_independently_visible`，不得记为完整待审核证据或完成。后来实际显示后可匹配，其先前 unmatched 状态保留在阶段日志中。`productionEligibility` 另列当前可见候选是否对应生产 block；原始阶段快照均在日志中，便于核对动态 eligibility。独立 annotations 初始全部为 unknown，不能算正确。
+- 原子 block 的 `sourceIds` 只排除源文为空或全为 JavaScript trim 空白的成员，保留所有非空成员的身份。当前显示为空、隐藏或脱离不能作为过滤理由；未独立可见的非空成员仍使整个预测 unmatched。不会改写生产 atomicRecords、文本或 eligibility。
 - screenshots：before、after、stable、scroll-before、scroll-after、return-after、reflow-after。实际滚动约一屏，再返回顶部；存在关闭 details 时额外展开/还原并截图。重排通过临时设置 body max-width 为 viewport 的 80% 触发真实换行，保存并恢复原 inline 值及 priority；同时派发 resize 检查生产监听器。没有改浏览器窗口尺寸的能力，因此这不是 viewport resize 测试。
 - 可选 `--full-screenshots`（别名 `--full`）另外捕获 before-full、after-full、stable-full，通过同一包装器调用 `screenshot <path> --full`。保留原首屏/滚动截图，完整页截图有独立 phase、文件、时间、viewport、SHA-256 与 `fullPage=true`；启用时缺少任一完整页截图不能记 evidenceReady，审核须对所有 phase 单独投票且核对原始哈希。选项冻结在 run 配置中；改变选项或源文件须创建新 run ID，原失败 attempt 不修改。完整页截图仍需人工检查长页的正文、裁切、重叠和重排，不证明无限滚动内容已经加载完毕。
 - 每个阶段等待生产无 jobs/pending/scanning/rpcPending、实际 skipped/completed 状态、boolean pageDecision、全部已发请求成功终止且无 failed，再要求语义连续不变达到 stable_seconds（默认 2 秒）。只有 `pageDecision=true` 才要求当前 eligible 预测均 completed；`pageDecision=false` 时允许保留 `eligible=true, completed=false, failed=false` 的未翻译候选，原标志不改写，候选识别准确率另行评分。负例仍要求零候选翻译请求，任一 failed、未解决任务、缺失/失败 terminal 都不能通过。语义签名使用当前 `nodes` 的源文/显示文本/标签/角色多重集，以及当前生产预测的源文/文本、eligible/completed/failed 和源证据匹配标志、pageDecision；保留重复行数量，忽略顺序、时间戳、坐标、locator 和仅用于 bookkeeping 的 ID/groupId。实际文本或数量变化会重新计时。使用当前节点而非累计 sourceNodes 历史判定，以免相同内容的新身份不断替换阻止语义稳定。

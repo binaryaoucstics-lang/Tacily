@@ -81,6 +81,27 @@ state.blocks.get("block-1").atomicRecords = [record, { node: button, source: but
 sample = qa.sample("atomic-members");
 assert.deepEqual(Array.from(sample.predictions[0].sourceIds), [sourceId, sample.nodes[2].id]);
 assert.equal(sample.productionEligibility.find(row => row.sourceId === sample.nodes[2].id).eligible, true);
+// Production atomic records may include empty separators. They must not allocate
+// source membership that the independent visible collector can never observe.
+const blank = text("P", " \t\n\u00a0");
+const empty = text("P", "");
+const atomic = state.blocks.get("block-1");
+atomic.atomicRecords.push({ node: blank, source: blank.nodeValue }, { node: empty, source: "" });
+sample = qa.sample("blank-atomic-members");
+assert.deepEqual(Array.from(sample.predictions[0].sourceIds), [sourceId, sample.nodes[2].id]);
+assert.equal(sample.predictions[0].sourceEvidence, "matched");
+assert.ok(sample.sourceNodes.every(row => String(row.sourceText).trim()));
+// A nonblank source remains a member even when hidden, detached, or currently
+// displayed as blank. Membership cannot manufacture independent visibility.
+atomic.atomicRecords.push({ node: neverVisible, source: neverVisible.nodeValue });
+const retainedSource = neverVisible.nodeValue;
+neverVisible.nodeValue = "";
+sample = qa.sample("nonblank-unmatched-atomic-member");
+assert.equal(sample.predictions[0].sourceIds.length, 3);
+assert.equal(sample.predictions[0].sourceEvidence, "unmatched");
+assert.equal(sample.predictions[0].auditIssue, "source_not_independently_visible");
+assert.ok(!sample.sourceNodes.some(row => row.id === sample.predictions[0].sourceIds[2]));
+neverVisible.nodeValue = retainedSource;
 delete state.blocks.get("block-1").atomicRecords;
 assert.equal(sample.nodes[3].firstSeen, firstSeen);
 assert.equal(sample.productionEligibility.find(row => row.sourceId === sample.nodes[0].id).eligible, false);
