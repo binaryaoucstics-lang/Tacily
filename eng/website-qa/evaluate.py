@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 
 SPLITS = ("development", "holdout")
+COVERAGE_SCOPES = ("strict", "automatic-page")
 THRESHOLDS = {"independentDomains": 100, "nodeAccuracy": .95,
               "nodePrecision": .95, "pageAccuracy": .97,
               "completedHoldoutDomains": 30}
@@ -105,6 +106,20 @@ def _count(value):
     return type(value) is int and value >= 0
 
 
+def _coverage_metadata(coverage_scope):
+    if not isinstance(coverage_scope, str) or coverage_scope not in COVERAGE_SCOPES:
+        raise ValueError("coverage_scope must be strict or automatic-page")
+    return {"schemaVersion": 1, "mode": coverage_scope}
+
+
+def _case_scope_matches(case, coverage_scope):
+    if "coverageScope" not in case:
+        return coverage_scope == "strict"
+    metadata = case["coverageScope"]
+    return (isinstance(metadata, dict) and type(metadata.get("schemaVersion")) is int
+            and metadata["schemaVersion"] == 1 and metadata.get("mode") == coverage_scope)
+
+
 def _metric(numerator, denominator):
     return numerator / denominator if denominator else None
 
@@ -120,7 +135,8 @@ def _empty():
             "completedNegativeDomains": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0,
             "unknownNodes": 0, "unknownPredictions": 0, "unknownPages": 0, "pageCorrect": 0,
             "pageTotal": 0, "annotatedPositiveNodes": 0,
-            "translatedPositiveNodes": 0, "confirmedOmissions": 0,
+            "translatedPositiveNodes": 0, "unTranslatedPositiveNodes": 0,
+            "policySkippedPositiveNodes": 0, "confirmedOmissions": 0,
             "confirmedRetractions": 0, "unnecessaryRequests": 0}
 
 
@@ -152,10 +168,13 @@ def _quality_gates(stats):
     }
 
 
-def _score_case(case, site, evidence_root):
+def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
     """Admissible evidence may expose errors even when a run is incomplete."""
+    _coverage_metadata(coverage_scope)
     stats = _empty()
     reasons = []
+    if not _case_scope_matches(case, coverage_scope):
+        reasons.append("coverage_scope_metadata_mismatch")
     required = ("id", "registeredDomain", "url", "category", "language",
                 "expectedPageTranslation", "split")
     if any(case.get(k) != site[k] or type(case.get(k)) is not type(site[k]) for k in required):
@@ -203,6 +222,9 @@ def _score_case(case, site, evidence_root):
     if any(e.get("caseId") != site["id"] or not isinstance(e.get("id"), str)
            or not e["id"] for e in events):
         reasons.append("host_event_case_identity_mismatch")
+    if coverage_scope == "automatic-page" and any(
+            e.get("type") not in ("capabilities", "terminal") for e in events):
+        reasons.append("invalid_host_event_type")
     capabilities = [e for e in events if e.get("type") == "capabilities"]
     terminals = [e for e in events if e.get("type") == "terminal"]
     if len({e.get("id") for e in terminals if isinstance(e.get("id"), str)}) != len(terminals):
@@ -220,15 +242,26 @@ def _score_case(case, site, evidence_root):
         e.get("success") is True and e.get("failedCount") == 0
         and type(e.get("failedCount")) is int and _count(e.get("cacheHits"))
         for e in terminals)
-    if site["expectedPageTranslation"] and not capabilities:
+    automatic_negative = coverage_scope == "automatic-page" and not site["expectedPageTranslation"]
+    if (site["expectedPageTranslation"] or automatic_negative) and not capabilities:
         reasons.append("missing_live_capabilities")
     if site["expectedPageTranslation"] and (
             not terminal_ok or not _count(request_count) or request_count == 0):
         reasons.append("missing_live_request_or_successful_terminal")
+    # Automatic skips require live capabilities plus a successful local/native
+    # zero-call terminal. Neither declaration alone establishes the exemption.
+    if automatic_negative and not terminal_ok:
+        reasons.append("missing_or_invalid_zero_call_terminal")
     # Mock evidence and incomplete screenshots cannot contribute correct results.
     # A live run with an unsuccessful terminal remains auditable for omissions
     # and retractions, but cannot be completed.
-    fatal = set(reasons) - {"missing_live_request_or_successful_terminal"}
+    fatal = set(reasons) - {"missing_live_request_or_successful_terminal",
+                           "missing_or_invalid_zero_call_terminal"}
+    if automatic_negative:
+        # Missing capabilities block completion and policy credit, but the
+        # independent labels still expose genuine omissions. Explicit non-live
+        # declarations and malformed event identities/counts stay fatal.
+        fatal.discard("missing_live_capabilities")
     if fatal:
         return stats, False, reasons
 
@@ -277,6 +310,14 @@ def _score_case(case, site, evidence_root):
         stats["unnecessaryRequests"] = request_count
         if request_count:
             reasons.append("unnecessary_translation_requests")
+    policy_skip = (coverage_scope == "automatic-page" and not reasons
+                   and site["expectedPageTranslation"] is False
+                   and page_known and page_label["needTranslation"] is False
+                   and case.get("pageDecision") is False and request_count == 0
+                   and capabilities and all(e.get("live") is True for e in capabilities)
+                   and terminal_ok and case.get("completed") is True
+                   and isinstance(case.get("errors"), list) and not case["errors"]
+                   and case.get("blockedReason") in (None, ""))
     for node_id in node_ids:
         label = labels.get(node_id, {})
         prediction = predicted.get(node_id, {})
@@ -310,8 +351,12 @@ def _score_case(case, site, evidence_root):
             stats["annotatedPositiveNodes"] += 1
             stats["translatedPositiveNodes"] += int(translated)
             if not translated:
-                stats["confirmedOmissions"] += 1
-                reasons.append("confirmed_omission:" + node_id)
+                stats["unTranslatedPositiveNodes"] += 1
+                if policy_skip and prediction_ok and not prediction["failed"] and not contradictory:
+                    stats["policySkippedPositiveNodes"] += 1
+                else:
+                    stats["confirmedOmissions"] += 1
+                    reasons.append("confirmed_omission:" + node_id)
     if site["expectedPageTranslation"] and not stats["annotatedPositiveNodes"]:
         reasons.append("positive_page_without_positive_node_labels")
     retractions = case.get("retractions")
@@ -338,8 +383,9 @@ def _score_case(case, site, evidence_root):
     return stats, completed, list(dict.fromkeys(reasons))
 
 
-def evaluate(manifest, cases, evidence_root):
+def evaluate(manifest, cases, evidence_root, *, coverage_scope="strict"):
     """Return an auditable report; no files are changed and no network is used."""
+    coverage_metadata = _coverage_metadata(coverage_scope)
     sites, corpus = validate_sites(manifest)
     if not isinstance(cases, list) or not all(isinstance(c, dict) for c in cases):
         raise ValueError("cases must be an array of objects")
@@ -357,6 +403,8 @@ def evaluate(manifest, cases, evidence_root):
         site = by_id.get(case.get("id"))
         if site is None:
             records.append({"index": index, "id": case.get("id"), "completed": False,
+                            "counts": {k: 0 for k in ("annotatedPositiveNodes", "translatedPositiveNodes",
+                                       "unTranslatedPositiveNodes", "policySkippedPositiveNodes")},
                             "reasons": ["case_not_in_fixed_manifest"]})
             continue
         for name in ("overall", site["split"]):
@@ -364,7 +412,8 @@ def evaluate(manifest, cases, evidence_root):
         if domain_counts[site["registeredDomain"]] > 1:
             stats, completed, reasons = _empty(), False, ["duplicate_registered_domain_attempts"]
         else:
-            stats, completed, reasons = _score_case(case, site, evidence_root)
+            stats, completed, reasons = _score_case(case, site, evidence_root,
+                                                     coverage_scope=coverage_scope)
         for name in ("overall", site["split"]):
             for key, value in stats.items():
                 groups[name][key] += value
@@ -373,7 +422,9 @@ def evaluate(manifest, cases, evidence_root):
                         "evidenceAccepted": bool(stats["evidenceDomains"]),
                         "completed": completed, "reasons": reasons,
                         "counts": {k: stats[k] for k in ("TP", "TN", "FP", "FN", "unknownNodes",
-                                  "unknownPredictions", "confirmedOmissions", "confirmedRetractions", "unnecessaryRequests")}})
+                                  "unknownPredictions", "annotatedPositiveNodes", "translatedPositiveNodes",
+                                  "unTranslatedPositiveNodes", "policySkippedPositiveNodes",
+                                  "confirmedOmissions", "confirmedRetractions", "unnecessaryRequests")}})
     submitted = {c.get("id") for c in cases if c.get("id") in by_id}
     missing = [s["id"] for s in sites if s["id"] not in submitted]
     for stats in groups.values():
@@ -386,7 +437,8 @@ def evaluate(manifest, cases, evidence_root):
     achieved = (gates["corpusRequirements"] and gates["independentDomains"]
                 and gates["completedHoldoutDomains"]
                 and all(gates["overall"].values()) and all(gates["holdout"].values()))
-    return {"schemaVersion": 1, "achieved": achieved, "thresholds": THRESHOLDS,
+    return {"schemaVersion": 1, "coverageScope": coverage_metadata,
+            "achieved": achieved, "thresholds": THRESHOLDS,
             "corpus": corpus, "groups": groups, "gates": gates,
             "missingCases": missing, "cases": records,
             "evidenceTrust": "Local files and independent reviewer/live-host declarations; "
@@ -398,6 +450,8 @@ def main(argv=None):
     parser.add_argument("--sites", type=Path, default=Path(__file__).with_name("sites.json"))
     parser.add_argument("--cases", type=Path, required=True, help="JSON array or schemaVersion=1/cases envelope")
     parser.add_argument("--evidence-root", type=Path, required=True, help="Only screenshots inside this directory are read")
+    parser.add_argument("--coverage-scope", choices=COVERAGE_SCOPES, default="strict")
+    parser.add_argument("--output", type=Path, help="Exclusively create a new report file; use distinct files for each scope")
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(args.sites.read_text(encoding="utf-8-sig"))
@@ -405,13 +459,20 @@ def main(argv=None):
         if isinstance(cases, dict):
             if cases.get("schemaVersion") != 1:
                 raise ValueError("case envelope requires schemaVersion=1")
+            if "coverageScope" in cases and not _case_scope_matches(cases, args.coverage_scope):
+                raise ValueError("case envelope coverage_scope_metadata_mismatch")
             cases = cases.get("cases")
-        report = evaluate(manifest, cases, args.evidence_root)
+        report = evaluate(manifest, cases, args.evidence_root, coverage_scope=args.coverage_scope)
+        serialized = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
+        if args.output is not None:
+            with args.output.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(serialized + "\n")
     except (OSError, ValueError, TypeError, KeyError) as error:
         print(json.dumps({"schemaVersion": 1, "achieved": False,
+                          "coverageScope": _coverage_metadata(args.coverage_scope),
                           "error": str(error)}, ensure_ascii=False))
         return 2
-    print(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
+    print(serialized)
     return 0 if report["achieved"] else 1
 
 
