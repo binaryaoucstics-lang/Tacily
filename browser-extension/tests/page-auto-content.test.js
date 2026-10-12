@@ -1,6 +1,6 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict");
-const { extractPageSnapshot, createPageAutoSession, selectedTextSlices, canonicalSource, createRenderedTextTester, createOpenRootObserver, pageRouteKey } = require("../page-auto-content.js");
+const { permitted, extractPageSnapshot, createPageAutoSession, selectedTextSlices, canonicalSource, createRenderedTextTester, createOpenRootObserver, pageRouteKey } = require("../page-auto-content.js");
 const fixtures = new Set();
 test("a minority Chinese inline fragment is judged with its full foreign paragraph rather than in isolation", async () => {
   const chinese = new Text("中文介绍"), foreign = new Text(" explains the new image translation feature and how readers can use the browser toolbar.");
@@ -638,6 +638,154 @@ test("new accordion answers stream after initial completion and recreated answer
   assert.equal(first.node.nodeValue, "中文译文"); f.session.dispose();
 });
 
+function renderedGeometry(f, rectangles = () => [line()]) {
+  let selected;
+  f.document.defaultView = { getComputedStyle: element => element.style };
+  f.document.createRange = () => ({ selectNodeContents: node => { selected = node; }, collapse() {},
+    getClientRects: () => selected?.nodeType === 3 ? rectangles(selected) : [] });
+  f.environment.isRenderedText = createRenderedTextTester(f.document);
+}
+function hiddenNavigation(text, display = "block") {
+  const node = new Text(text), link = new Element("A", [node], { href: "#science" });
+  const element = new Element("NAV", [link], { hidden: "" }); element.hidden = true;
+  element.style = { display, visibility: "visible", opacity: "1" };
+  return { node, link, element };
+}
+
+test("CSS-rendered HTML hidden navigation is extracted without changing body-only page evidence or authored attributes", async () => {
+  const nav = hiddenNavigation("Explore the latest scientific discoveries");
+  const body = paragraph("This English article describes the latest discoveries for every reader.");
+  const f = fixture([body.element, nav.element]); renderedGeometry(f);
+  nav.element.style.display = "none"; const before = await extractPageSnapshot(f.environment);
+  nav.element.style.display = "block"; const after = await extractPageSnapshot(f.environment);
+  assert.equal(permitted(nav.node, f.environment.getStyle), true);
+  assert.deepEqual(after.blocks.map(block => block.text), [body.node.nodeValue, nav.node.nodeValue]);
+  assert.equal(after.records.find(record => record.node === nav.node).groupKind, "navigation");
+  assert.deepEqual(after.pageSummary, before.pageSummary);
+  assert.equal(after.blocks[0].sourceGroupHash, before.blocks[0].sourceGroupHash);
+  assert.equal(after.samples.find(sample => sample.text === nav.node.nodeValue).kind, "navigation");
+  assert.equal(nav.element.hidden, true); assert.equal(nav.element.getAttribute("hidden"), "");
+  assert.equal(nav.link.getAttribute("href"), "#science"); f.session.dispose();
+});
+
+test("HTML hidden requires style evidence and CSS overrides retain all nonrendering and protected-content exclusions", async () => {
+  const cases = [
+    { name: "hidden without computed display", style: {}, allowed: false },
+    { name: "default hidden", style: { display: "none" }, allowed: false },
+    { name: "attribute without reflected property", property: false, style: {}, allowed: false },
+    { name: "until-found without content visibility evidence", hidden: "until-found", style: { display: "block" }, allowed: false },
+    { name: "until-found default", hidden: "until-found", style: { display: "block", contentVisibility: "hidden" }, allowed: false },
+    { name: "until-found with CSS rendering override", hidden: "until-found", style: { display: "block", contentVisibility: "visible" }, allowed: true },
+    { name: "CSS-hidden content", style: { display: "block", contentVisibility: "hidden" }, allowed: false },
+    { name: "hidden visibility", style: { display: "block", visibility: "hidden" }, allowed: false },
+    { name: "collapsed visibility", style: { display: "block", visibility: "collapse" }, allowed: false },
+    { name: "transparent ancestor", style: { display: "block", opacity: "0" }, allowed: false },
+    { name: "aria-hidden ancestor", attributes: { "aria-hidden": "true" }, allowed: false },
+    { name: "editable ancestor", editable: true, allowed: false },
+    { name: "code ancestor", tag: "CODE", allowed: false },
+    { name: "editing field", tag: "TEXTAREA", allowed: false },
+    { name: "closed details answer", tag: "DETAILS", allowed: false },
+    { name: "translator interface", attributes: { "data-screen-translator": "status" }, allowed: false },
+    { name: "display contents override", style: { display: "contents" }, allowed: true }
+  ];
+  for (const entry of cases) {
+    const node = new Text("This public English text has positive range dimensions.");
+    const element = new Element(entry.tag || "DIV", [new Element("P", [node])], { hidden: entry.hidden || "", ...entry.attributes });
+    element.hidden = entry.property ?? entry.hidden ?? true; element.isContentEditable = entry.editable;
+    element.style = entry.style || { display: "block" };
+    const f = fixture([element]); renderedGeometry(f);
+    assert.equal(permitted(node, f.environment.getStyle), entry.allowed, entry.name);
+    assert.equal((await extractPageSnapshot(f.environment)).blocks.length, entry.allowed ? 1 : 0, entry.name);
+    assert.equal(element.getAttribute("hidden"), entry.hidden || "", entry.name); f.session.dispose();
+  }
+});
+
+test("a visible hidden navigation session translates once and admits later text and link mutations", async () => {
+  const nav = hiddenNavigation("Explore the latest scientific discoveries"), body = paragraph("This English article supplies readable body evidence for automatic translation.");
+  const f = fixture([body.element, nav.element]); renderedGeometry(f);
+  await enabled(f); const initial = f.candidate();
+  assert.deepEqual(initial.blocks.map(block => block.text), [body.node.nodeValue, nav.node.nodeValue]);
+  approved(f); finish(f, initial, "已完成的译文");
+  assert.equal(nav.node.nodeValue, "已完成的译文"); const bodyWrites = trackTextWrites(body.node);
+  const revision = f.session.inspect().revision;
+  f.session.mutated([{ type: "attributes", target: nav.element, attributeName: "hidden" }]);
+  f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+  assert.equal(f.candidates().length, 1); assert.equal(f.session.inspect().revision, revision);
+  const added = new Text("Read about upcoming research missions"), link = new Element("A", [added], { href: "#missions" });
+  nav.element.append(link); f.session.mutated([{ type: "childList", target: nav.element, addedNodes: [link], removedNodes: [] }]); await tick();
+  assert.equal(f.candidates().length, 2); assert.deepEqual(f.candidate().blocks.map(block => block.text), [added.nodeValue]);
+  approved(f); finish(f, f.candidate(), "新任务译文");
+  nav.node.nodeValue = "Explore newly discovered scientific results";
+  f.session.mutated([{ type: "characterData", target: nav.node }]); await tick();
+  assert.equal(f.candidates().length, 3); assert.deepEqual(f.candidate().blocks.map(block => block.text), [nav.node.nodeValue]);
+  approved(f); finish(f, f.candidate(), "新的发现译文");
+  assert.equal(added.nodeValue, "新任务译文"); assert.equal(nav.element.hidden, true);
+  assert.equal(nav.link.getAttribute("href"), "#science"); assert.deepEqual(bodyWrites, []); f.session.dispose();
+});
+
+test("hidden navigation CSS reveal queues after the active body stream and hide/show preserves published source identity", async () => {
+  const nav = hiddenNavigation("Explore the latest scientific discoveries", "none"), source = nav.node.nodeValue;
+  const body = paragraph("This English article continues streaming while its navigation becomes rendered.");
+  const f = fixture([body.element, nav.element]); renderedGeometry(f);
+  await enabled(f); const initial = f.candidate(); approved(f);
+  f.session.receive(message(initial, "pageAutoTranslations", { updates: [{ id: initial.blocks[0].id, text: "正文前缀" }] }));
+  nav.element.style.display = "block";
+  f.session.mutated([{ type: "attributes", target: nav.element, attributeName: "class" }]); await tick();
+  assert.equal(f.candidates().length, 1); assert.equal(f.session.inspect().revision, initial.revision);
+  assert.equal(body.node.nodeValue, "正文前缀"); assert.equal(f.sent.some(packet => packet.type === "pageAutoCancel"), false);
+  finish(f, initial, "正文完成译文"); const bodyWrites = trackTextWrites(body.node); await tick();
+  assert.equal(f.candidates().length, 2); const shown = f.candidate();
+  assert.deepEqual(shown.blocks.map(block => block.text), [source]); approved(f); finish(f, shown, "导航完成译文");
+  const navWrites = trackTextWrites(nav.node);
+  nav.element.style.display = "none"; f.session.mutated([{ type: "attributes", target: nav.element, attributeName: "style" }]); await tick();
+  nav.element.style.display = "block"; f.session.mutated([{ type: "attributes", target: nav.element, attributeName: "style" }]); await tick();
+  assert.equal(f.candidates().length, 2); assert.equal(f.session.inspect().records.get(nav.node).source, source);
+  assert.equal(f.session.inspect().records.get(nav.node).groupHash, shown.blocks[0].sourceGroupHash);
+  assert.deepEqual(navWrites, []); assert.deepEqual(bodyWrites, []);
+  nav.element.style.display = "none"; f.session.mutated([{ type: "attributes", target: nav.element, attributeName: "style" }]); await tick();
+  nav.node.nodeValue = "Read the revised scientific discoveries";
+  f.session.mutated([{ type: "characterData", target: nav.node }]); await tick(); assert.equal(f.candidates().length, 2);
+  nav.element.style.display = "block"; f.session.mutated([{ type: "attributes", target: nav.element, attributeName: "style" }]); await tick();
+  assert.equal(f.candidates().length, 3); assert.deepEqual(f.candidate().blocks.map(block => block.text), [nav.node.nodeValue]);
+  assert.notEqual(f.candidate().blocks[0].sourceGroupHash, shown.blocks[0].sourceGroupHash);
+  approved(f); finish(f); assert.deepEqual(bodyWrites, []); assert.equal(nav.element.getAttribute("hidden"), ""); f.session.dispose();
+});
+
+test("scroll geometry reveals CSS-overridden hidden navigation once while genuine hidden menus stay unsubmitted", async () => {
+  const nav = hiddenNavigation("Explore the latest scientific discoveries"), hidden = hiddenNavigation("Read a genuinely hidden menu", "none");
+  const found = hiddenNavigation("Search-only content should stay folded"); found.element.hidden = "until-found";
+  found.element.setAttribute("hidden", "until-found"); found.element.style.contentVisibility = "hidden";
+  const body = paragraph("This loaded below-fold English body paragraph remains eligible for translation.", 9000);
+  const f = fixture([body.element, nav.element, hidden.element, found.element]); let visible = false;
+  nav.element.style.overflowX = "hidden";
+  nav.element.getBoundingClientRect = () => line(0, 0, 500, 60);
+  renderedGeometry(f, node => [node === nav.node ? line(visible ? 10 : -500, 10, 300) : line(10, node === body.node ? 9000 : 10)]);
+  await enabled(f); assert.deepEqual(f.candidate().blocks.map(block => block.text), [body.node.nodeValue]);
+  approved(f); finish(f, f.candidate(), "下方正文译文"); const bodyWrites = trackTextWrites(body.node);
+  visible = true; f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+  assert.equal(f.candidates().length, 2); const next = f.candidate(); assert.deepEqual(next.blocks.map(block => block.text), [nav.node.nodeValue]);
+  approved(f); finish(f, next, "导航译文"); const navWrites = trackTextWrites(nav.node);
+  visible = false; f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+  visible = true; f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+  const secret = hidden.element.append(new Text("New hidden menu content must never translate"));
+  f.session.mutated([{ type: "childList", target: hidden.element, addedNodes: [secret], removedNodes: [] },
+    { type: "attributes", target: found.element, attributeName: "hidden" }]); await tick();
+  assert.equal(f.candidates().length, 2); assert.equal(hidden.node.nodeValue, "Read a genuinely hidden menu");
+  assert.equal(found.node.nodeValue, "Search-only content should stay folded"); assert.deepEqual(bodyWrites, []); assert.deepEqual(navWrites, []);
+  f.session.dispose();
+});
+
+test("CSS-overridden hidden still needs positive unclipped text ranges", async () => {
+  const nav = hiddenNavigation("Explore the latest scientific discoveries"), f = fixture([nav.element]);
+  for (const rects of [[], [line(10, 10, 0, 24)], [line(10, 10, 300, 0)]]) {
+    renderedGeometry(f, () => rects); assert.equal((await extractPageSnapshot(f.environment)).blocks.length, 0);
+  }
+  nav.element.style.overflowY = "clip"; nav.element.getBoundingClientRect = () => line(0, 0, 500, 0);
+  renderedGeometry(f); assert.equal((await extractPageSnapshot(f.environment)).blocks.length, 0);
+  nav.element.getBoundingClientRect = () => line(0, 20, 500, 50);
+  assert.equal((await extractPageSnapshot(f.environment)).blocks.length, 1); f.session.dispose();
+});
+
 test("closed native details expose only the summary and opening queues their newly visible answer", async () => {
   const answer = paragraph("The folded public English answer should be translated only after the disclosure opens.");
   const summary = new Element("SUMMARY", [new Text("How does the free trial work?")]);
@@ -683,6 +831,123 @@ test("text range proof respects zero-height overflow clipping without rejecting 
   assert.equal(rendered(clipped.node), false); assert.equal(rendered(bottom.node), true); f.session.dispose();
 });
 
+test("rectangular CSS clips exclude nonrendering labels while retaining partial prose and real small text", async () => {
+  const cases = [
+    { name: "empty legacy clip", style: { position: "absolute", clip: "rect(0px, 0px, 0px, 0px)" }, allowed: false },
+    { name: "empty whitespace legacy clip", style: { position: "fixed", clip: "rect(0px 0px 0px 0px)" }, allowed: false },
+    { name: "collapsed inset", style: { clipPath: "inset(50%)" }, allowed: false },
+    { name: "asymmetric collapsed inset", style: { clipPath: "inset(10px 70% 10px 30%)" }, allowed: false },
+    { name: "tiny overflow aperture", style: { overflow: "hidden" }, box: line(10, 10, 1, 1), allowed: false },
+    { name: "tiny legacy aperture", style: { position: "absolute", clip: "rect(0px, 1px, 1px, 0px)" }, allowed: false },
+    { name: "tiny inset aperture", style: { clipPath: "inset(0px 399px 59px 0px)" }, allowed: false },
+    { name: "partial legacy clip", style: { position: "absolute", clip: "rect(auto, 120px, auto, 0px)" }, allowed: true },
+    { name: "partial inset", style: { clipPath: "inset(0 60% 0 0)" }, allowed: true },
+    { name: "partial overflow", style: { overflow: "hidden" }, box: line(10, 10, 40, 60), allowed: true },
+    { name: "one letter dialogue", text: "I", style: { overflow: "hidden" }, box: line(10, 10, 8, 20), range: line(10, 10, 8, 20), allowed: true },
+    { name: "unclipped positive area", style: {}, range: line(10, 10, 1, 1), allowed: true },
+    { name: "small text fits its box", style: { overflow: "hidden" }, box: line(10, 10, 1, 1), range: line(10, 10, 1, 1), allowed: true },
+    { name: "static legacy clip has no effect", style: { position: "static", clip: "rect(0px, 0px, 0px, 0px)" }, allowed: true },
+    { name: "display contents has no clipping box", style: { display: "contents", overflow: "hidden", clipPath: "inset(50%)" }, box: line(0, 0, 0, 0), allowed: true }
+  ];
+  for (const entry of cases) {
+    const item = paragraph(entry.text || "This label has a text range but needs actual rendered area."), f = fixture([item.element]);
+    item.element.style = entry.style; item.element.getBoundingClientRect = () => entry.box || line(10, 10, 400, 60);
+    renderedGeometry(f, () => [entry.range || line()]);
+    assert.equal(f.environment.isRenderedText(item.node), entry.allowed, entry.name);
+    const snapshot = await extractPageSnapshot(f.environment);
+    assert.equal(snapshot.records.some(record => record.node === item.node), entry.allowed, entry.name);
+    if (!entry.allowed) { assert.equal(snapshot.blocks.length, 0, entry.name); assert.equal(snapshot.pageSummary.proseBlocks, 0, entry.name); }
+    f.session.dispose();
+  }
+});
+
+test("combined clips follow composed slots, scaled boxes and multiple actual line ranges", async () => {
+  const item = paragraph("A partly visible line of ordinary prose remains readable."), slot = new Element("SLOT"), host = new Element("DIV");
+  item.element.assignedSlot = slot; slot.getRootNode = () => ({ host });
+  host.style = { overflow: "hidden" }; host.getBoundingClientRect = () => line(100, 100, 1, 100);
+  slot.style = { clipPath: "inset(0 0 99px 0)" }; slot.getBoundingClientRect = () => line(100, 100, 100, 100);
+  const f = fixture([item.element]); renderedGeometry(f, () => [line(100, 100)]);
+  assert.equal(f.environment.isRenderedText(item.node), false, "nested constraints leave only a 1x1 aperture");
+  host.getBoundingClientRect = () => line(100, 100, 100, 100); slot.style.clipPath = "none";
+  renderedGeometry(f, () => [line(-500, 100), line(100, 100, 40)]);
+  assert.equal(f.environment.isRenderedText(item.node), true, "a later line is visibly rendered");
+  host.style = { position: "absolute", clip: "rect(0px, 50px, 30px, 0px)" };
+  host.offsetWidth = 100; host.offsetHeight = 100; host.getBoundingClientRect = () => line(100, 100, 200, 200);
+  renderedGeometry(f, () => [line(175, 110, 20)]);
+  assert.equal(f.environment.isRenderedText(item.node), true, "local CSS lengths scale into actual range coordinates");
+  host.style.clip = "rect(0px, 20px, 30px, 0px)";
+  assert.equal(f.environment.isRenderedText(item.node), false); f.session.dispose();
+});
+
+test("document overflow keeps below-fold prose but an authored document clip still hides it", async () => {
+  const item = paragraph("Loaded English prose below the fold still contributes to the full body summary.", 9000), f = fixture([item.element]);
+  f.body.style = { overflow: "hidden" }; f.body.getBoundingClientRect = () => line(0, 0, 500, 800);
+  renderedGeometry(f, () => [line(10, 9000)]);
+  assert.equal((await extractPageSnapshot(f.environment)).blocks.length, 1);
+  f.body.style.clipPath = "inset(50%)";
+  assert.equal((await extractPageSnapshot(f.environment)).blocks.length, 0);
+  f.body.style.clipPath = "none";
+  assert.equal((await extractPageSnapshot(f.environment)).blocks.length, 1); f.session.dispose();
+});
+
+test("clipped labels stay out of active sessions, reveal once and never retract unchanged completed prose", async () => {
+  const styles = [
+    { position: "absolute", clip: "rect(0px, 0px, 0px, 0px)" },
+    { clipPath: "inset(50%)" },
+    { overflow: "hidden" }
+  ];
+  for (const style of styles) {
+    const body = paragraph("The main English article must complete while a nonrendering label is excluded.");
+    const label = paragraph("Open the latest science reports"), original = label.node.nodeValue;
+    label.element.style = { ...style }; let tiny = !!style.overflow;
+    label.element.getBoundingClientRect = () => line(10, 10, tiny ? 1 : 400, tiny ? 1 : 60);
+    const f = fixture([body.element, label.element]); renderedGeometry(f);
+    await enabled(f); const initial = f.candidate();
+    assert.deepEqual(initial.blocks.map(block => block.text), [body.node.nodeValue]); approved(f);
+    const added = new Text("Read the public mission overview"); label.element.append(added);
+    f.session.mutated([{ type: "childList", target: label.element, addedNodes: [added], removedNodes: [] }]); await tick();
+    assert.equal(f.candidates().length, 1); assert.equal(f.session.inspect().revision, initial.revision);
+    label.element.style = {}; tiny = false;
+    f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]); await tick();
+    assert.equal(f.candidates().length, 1); assert.equal(f.sent.some(packet => packet.type === "pageAutoCancel"), false);
+    finish(f, initial, "正文完成译文"); const bodyWrites = trackTextWrites(body.node); await tick();
+    assert.equal(f.candidates().length, 2); const shown = f.candidate();
+    assert.equal(shown.blocks.map(block => block.text).join(""), original + added.nodeValue);
+    approved(f); finish(f, shown, "标签完成译文"); const labelWrites = trackTextWrites(label.node);
+    label.element.style = { ...style }; tiny = !!style.overflow;
+    f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]); await tick();
+    label.element.style = {}; tiny = false;
+    f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]);
+    f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+    assert.equal(f.candidates().length, 2); assert.deepEqual(bodyWrites, []); assert.deepEqual(labelWrites, []);
+    assert.equal(f.session.inspect().records.get(label.node).source, original); f.session.dispose();
+  }
+});
+
+test("an incremental extraction resets clip evidence on reveal without admitting stale clipped labels", async () => {
+  const body = Array.from({ length: 40 }, () => paragraph("This ordinary English body remains eligible during a sliced extraction."));
+  const label = paragraph("Read more public reports"); label.element.style = { clipPath: "inset(50%)" };
+  label.element.getBoundingClientRect = () => line(10, 10, 400, 60);
+  const f = fixture([label.element, ...body.map(item => item.element)]); let checkedWhileClipped = false;
+  renderedGeometry(f, node => { if (node === label.node) checkedWhileClipped = true; return [line()]; });
+  let time = 0, resume, entered;
+  f.environment.now = () => time += 20; const ready = new Promise(resolve => { entered = resolve; });
+  const held = new Promise(resolve => { resume = resolve; }); let first = true;
+  f.environment.yieldWork = () => { if (!first || !checkedWhileClipped) return Promise.resolve(); first = false; entered(); return held; };
+  f.session.configure({ generation: 1, enabled: true, active: true }); await ready;
+  assert.equal(checkedWhileClipped, true); assert.equal(f.sent.length, 0);
+  label.element.style.clipPath = "none";
+  f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]);
+  resume(); await tick(); const initial = f.candidate();
+  assert.ok(initial.blocks.some(block => block.text === label.node.nodeValue)); approved(f); finish(f); await tick();
+  const writes = trackTextWrites(body[0].node);
+  label.element.style.clipPath = "inset(50%)";
+  f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]); await tick();
+  label.element.style.clipPath = "none";
+  f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]); await tick();
+  assert.equal(f.candidates().length, 1); assert.deepEqual(writes, []); assert.equal(label.node.nodeValue, "中文译文"); f.session.dispose();
+});
+
 test("disclosure observer watches open state and final layout visibility events and removes its listeners when disabled", () => {
   const callbacks = new Map(), mutations = [], watched = [];
   const document = { addEventListener: (type, fn) => callbacks.set(type, fn), removeEventListener: type => callbacks.delete(type) };
@@ -719,6 +984,116 @@ test("Chinese-dominant mixed body including below-fold prose blocks text and ima
 test("Chinese-only page keeps native text while allowing independent image judgement", async () => {
   const f = fixture([paragraph("这是中文正文，不需要翻译。图片中的外语仍然可以单独判断和翻译。").element]); await enabled(f);
   assert.equal(f.candidates().length, 0); assert.equal(f.decisions.at(-1).allowImages, true); f.session.dispose();
+});
+
+test("local mixed-page rejection stays assessed through Chinese carousel, visibility and scroll changes then admits new foreign body", async () => {
+  const english = paragraph("An English article needs a full body language assessment.");
+  let carousel = paragraph("这是轮播新闻正文，已经可以直接阅读，更新新闻不应反复清除页面判定。".repeat(5), 9000);
+  const menu = paragraph("这是可展开的中文菜单，页面仍然主要使用中文。"), f = fixture([english.element, carousel.element, menu.element]);
+  assert.equal(f.session.inspect().assessed, null); assert.equal(f.decisions.at(-1)?.assessed, undefined);
+  await enabled(f);
+  const revision = f.session.inspect().revision, decisions = f.decisions.length;
+  assert.equal(f.decisions.at(-1).assessed, true); assert.equal(f.decisions.at(-1).allowImages, false);
+  for (let index = 0; index < 6; index++) {
+    carousel.node.nodeValue = `这是第${index}条轮播新闻，国内新闻正文已经可以直接阅读，内容变化仍应重新计算正文。`.repeat(5);
+    f.session.mutated([{ type: "characterData", target: carousel.node }]); await tick();
+    assert.equal(f.session.inspect().records.get(carousel.node).source, carousel.node.nodeValue);
+    const replacement = paragraph(`这是第${index}条新加载的轮播正文，中文占优且不需要翻译。`.repeat(5), 9000);
+    carousel.node.isConnected = false; f.body.childNodes = [english.element, menu.element]; f.body.append(replacement.element);
+    f.session.mutated([{ type: "childList", target: f.body, addedNodes: [replacement.element], removedNodes: [carousel.element] }]);
+    carousel = replacement; await tick();
+    menu.element.style.display = index % 2 ? "block" : "none";
+    f.session.mutated([{ type: "attributes", target: menu.element, attributeName: "style" }]); await tick();
+    menu.element.style.transform = `translateX(${index}px)`;
+    f.session.mutated([{ type: "attributes", target: menu.element, attributeName: "style" }]);
+    f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+    assert.equal(f.session.inspect().assessed, false); assert.equal(f.session.inspect().revision, revision);
+    assert.equal(f.decisions.length, decisions); assert.equal(f.statuses.at(-1).detail, "mixed_chinese_english");
+    assert.equal(f.sent.length, 0); assert.equal(f.session.inspect().jobs, 0); assert.equal(f.session.inspect().pending, 0);
+  }
+  carousel.node.nodeValue = "New foreign reporting now supplies most of the full body evidence and must enter automatic translation. ".repeat(8);
+  f.session.mutated([{ type: "characterData", target: carousel.node }]); await tick();
+  assert.equal(f.candidates().length, 1); const candidate = f.candidate();
+  assert.ok(candidate.revision > revision); assert.equal(f.session.inspect().assessed, null);
+  assert.equal(f.decisions.at(-1).assessed, false);
+  assert.deepEqual(candidate.pageSummary, (await extractPageSnapshot(f.environment)).pageSummary);
+  assert.ok(candidate.blocks.some(block => block.text.startsWith("New foreign reporting")));
+  approved(f); finish(f); const writes = trackTextWrites(english.node);
+  carousel.node.nodeValue = "这条新轮播新闻使页面回到中文占优，已经发布且原文未变的译文必须保留。".repeat(10);
+  f.session.mutated([{ type: "characterData", target: carousel.node }]); await tick();
+  const rejectedRevision = f.session.inspect().revision, rejectedDecisions = f.decisions.length;
+  carousel.node.nodeValue = "这是下一条已经可读的中文轮播新闻，不应撤回旁边已经完成的英文正文译文。".repeat(10);
+  f.session.mutated([{ type: "characterData", target: carousel.node }]); await tick();
+  f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+  assert.equal(f.candidates().length, 1); assert.equal(f.session.inspect().revision, rejectedRevision);
+  assert.equal(f.decisions.length, rejectedDecisions); assert.equal(english.node.nodeValue, "中文译文");
+  assert.deepEqual(writes, []); assert.equal(f.decisions.at(-1).allowImages, false); f.session.dispose();
+});
+
+test("local rejection publishes changed image admission and explicit lifecycle or manual controls still clear it", async () => {
+  const chinese = paragraph("这是已经可读的中文正文，轮播更新不需要翻译。".repeat(5)), f = fixture([chinese.element]);
+  await manualReady(f, true);
+  const revision = f.session.inspect().revision, count = f.decisions.length;
+  chinese.node.nodeValue = "这是另一条中文正文，保持已经验证的本地判定。".repeat(5);
+  f.session.mutated([{ type: "characterData", target: chinese.node }]); await tick();
+  assert.equal(f.decisions.length, count); assert.equal(f.session.inspect().revision, revision);
+  assert.equal(f.decisions.at(-1).allowImages, true);
+  const english = paragraph("This English body remains a minority of the readable page."); f.body.append(english.element);
+  f.session.mutated([{ type: "childList", target: f.body, addedNodes: [english.element], removedNodes: [] }]); await tick();
+  assert.equal(f.decisions.at(-1).assessed, true); assert.equal(f.decisions.at(-1).allowImages, false);
+  assert.equal(f.decisions.length, count + 1); assert.equal(f.candidates().length, 0);
+  f.session.control("pause"); assert.equal(f.session.inspect().assessed, null); assert.equal(f.decisions.at(-1).assessed, false);
+  f.session.control("resume"); await tick(); assert.equal(f.session.inspect().assessed, false);
+  assert.equal(f.decisions.at(-1).assessed, true); assert.equal(f.candidates().length, 0);
+  f.session.control("manual-page"); await tick(); assert.equal(f.candidates().length, 1);
+  assert.equal(f.candidate().manualMode, "page"); finish(f); assert.equal(english.node.nodeValue, "中文译文"); f.session.dispose();
+});
+
+test("incremental negative rescans keep valid admission while CSS reveals fresh foreign-majority evidence", async () => {
+  const chinese = Array.from({ length: 40 }, () => paragraph("这是已经可读的新闻正文，轮播变化仍应完整核对语言。", 9000));
+  const foreignSource = "This long foreign article is loaded but remains hidden until the reader expands the section. ".repeat(20);
+  const foreign = paragraph(foreignSource);
+  foreign.element.style.display = "none";
+  const f = fixture([...chinese.map(item => item.element), foreign.element]); let time = 0;
+  f.environment.now = () => ++time;
+  function holdNextSlice() {
+    let release, entered; const blocked = new Promise(resolve => { release = resolve; });
+    const ready = new Promise(resolve => { entered = resolve; }); let first = true;
+    f.environment.yieldWork = () => { if (!first) return Promise.resolve(); first = false; entered(); return blocked; };
+    return { ready, release };
+  }
+  let slice = holdNextSlice();
+  f.session.configure({ generation: 1, enabled: true, active: true, chineseProseShareThresholdPercent: 50 }); await slice.ready;
+  assert.equal(f.session.inspect().assessed, null); assert.equal(f.decisions.at(-1).assessed, false); assert.equal(f.sent.length, 0);
+  slice.release(); await tick();
+  const revision = f.session.inspect().revision, decisions = f.decisions.length;
+  assert.equal(f.session.inspect().assessed, false); assert.equal(f.decisions.at(-1).assessed, true);
+  slice = holdNextSlice(); chinese[0].node.nodeValue = "这是第一条更新后的中文新闻，仍然已经可以直接阅读。";
+  f.session.mutated([{ type: "characterData", target: chinese[0].node }]); await slice.ready;
+  chinese[1].node.nodeValue = "这是扫描期间刚刚变化的中文新闻，需要下一次完整扫描。";
+  f.session.mutated([{ type: "characterData", target: chinese[1].node }]);
+  assert.equal(f.session.inspect().revision, revision); assert.equal(f.decisions.length, decisions);
+  slice.release(); await tick();
+  assert.equal(f.session.inspect().records.get(chinese[1].node).source, chinese[1].node.nodeValue);
+  assert.equal(f.session.inspect().assessed, false); assert.equal(f.session.inspect().revision, revision);
+  assert.equal(f.decisions.length, decisions); assert.equal(f.sent.length, 0);
+  foreign.element.style.display = "block";
+  f.session.mutated([{ type: "attributes", target: foreign.element, attributeName: "style" }]); await tick();
+  assert.equal(f.candidates().length, 1); assert.ok(f.candidate().blocks.every(block => block.text.startsWith("This long foreign article")));
+  assert.deepEqual(f.candidate().pageSummary, (await extractPageSnapshot(f.environment)).pageSummary);
+  assert.ok(f.candidate().pageSummary.hanProseCharacters > 0); approved(f); finish(f);
+  assert.match(foreign.node.nodeValue, /^(?:中文译文\s*)+$/u);
+  assert.equal(f.session.inspect().records.get(foreign.node).source, foreignSource); f.session.dispose();
+});
+
+test("a native negative assessment still retires changed foreign evidence for a fresh decision", async () => {
+  const item = paragraph("This original foreign body is rejected by the native decision service."), f = fixture([item.element]);
+  await enabled(f); const old = f.candidate();
+  f.session.receive(message(old, "pageAutoAssessment", { needsTranslation: false, allowImages: false, reason: "not_needed" }));
+  item.node.nodeValue = "Entirely new foreign body evidence requires another native assessment and translation.";
+  f.session.mutated([{ type: "characterData", target: item.node }]); await tick();
+  assert.equal(f.candidates().length, 2); assert.equal(f.session.inspect().assessed, null);
+  assert.ok(f.candidate().revision > old.revision); approved(f); finish(f); assert.equal(item.node.nodeValue, "中文译文"); f.session.dispose();
 });
 
 test("threshold-only changes refresh automatic admission and retire stale decisions without changing cache identity", async () => {

@@ -55,16 +55,27 @@
       }
     }
   }
+  function renderingStylePermitted(element, style, fragmentGroups) {
+    const hidden = element.hidden || element.hasAttribute?.("hidden");
+    // HTML hidden's default display:none can be overridden by authored CSS.
+    // Require computed style evidence; range geometry is checked by callers.
+    if (hidden && !style?.display) return false;
+    // Until-found uses content-visibility:hidden rather than display:none.
+    // Display alone therefore cannot prove that its contents are revealed.
+    const untilFound = element.hidden === "until-found" || element.getAttribute?.("hidden")?.toLowerCase() === "until-found";
+    if (untilFound && !style?.contentVisibility) return false;
+    return style?.display !== "none" && style?.visibility !== "hidden" && style?.visibility !== "collapse"
+      && style?.contentVisibility !== "hidden" && (style?.opacity !== "0" || decorativeFragment(element, fragmentGroups));
+  }
   function permitted(node, getStyle, fragmentGroups) {
     if (unrenderedLightNode(node) || hiddenByClosedDetails(node)) return false;
     for (let parent = composedParent(node); parent; parent = composedParent(parent)) {
       if (typeof parent.tagName !== "string") continue;
       if (unrenderedLightNode(parent)) return false;
-      if (excludedTags.has(parent.tagName) || parent.isContentEditable || parent.hidden
+      if (excludedTags.has(parent.tagName) || parent.isContentEditable
           || parent.getAttribute?.("aria-hidden") === "true" || parent.hasAttribute?.("data-screen-translator")) return false;
       const style = getStyle(parent);
-      if (style?.display === "none" || style?.visibility === "hidden" || style?.visibility === "collapse"
-          || style?.opacity === "0" && !decorativeFragment(parent, fragmentGroups)) return false;
+      if (!renderingStylePermitted(parent, style, fragmentGroups)) return false;
     }
     return true;
   }
@@ -248,8 +259,9 @@
     function style(element) {
       if (!styles.has(element)) {
         const value = getStyle(element);
-        styles.set(element, { display: value?.display, visibility: value?.visibility, opacity: value?.opacity,
-          overflow: value?.overflow, overflowX: value?.overflowX, overflowY: value?.overflowY });
+        styles.set(element, { display: value?.display, visibility: value?.visibility, opacity: value?.opacity, contentVisibility: value?.contentVisibility,
+          overflow: value?.overflow, overflowX: value?.overflowX, overflowY: value?.overflowY,
+          position: value?.position, clip: value?.clip, clipPath: value?.clipPath });
       }
       return styles.get(element);
     }
@@ -263,12 +275,24 @@
       let inherited = parent ? clipping.get(parent) : [];
       for (let index = path.length - 1; index >= 0; index--) {
         const current = path[index];
-        // Below-fold loaded prose remains readable outside the document scrollport.
-        if (current !== document.body && current !== document.documentElement) {
-          const value = style(current);
+        const value = style(current);
+        if (value.display !== "contents") {
           const x = ["hidden", "clip"].includes(value.overflowX || value.overflow);
           const y = ["hidden", "clip"].includes(value.overflowY || value.overflow);
-          if (x || y) { const rect = bounds(current); if (rect) inherited = [...inherited, { bounds: rect, x, y }]; }
+          // Below-fold prose may lie outside the document scrollport. Authored
+          // rect/inset clips still apply there; display:contents has no box.
+          if ((x || y) && current !== document.body && current !== document.documentElement) {
+            const rect = bounds(current); if (rect) inherited = [...inherited, { bounds: rect, x, y }];
+          }
+          const legacy = ["absolute", "fixed"].includes(value.position) && /^rect\(/iu.test(value.clip || "");
+          const inset = /^inset\(/iu.test(value.clipPath || "");
+          if (legacy || inset) {
+            const rect = bounds(current);
+            for (const css of [legacy && value.clip, inset && value.clipPath]) {
+              const clipped = rectangularClipBounds(css, rect, current);
+              if (clipped) inherited = [...inherited, { bounds: clipped, x: true, y: true }];
+            }
+          }
         }
         clipping.set(current, inherited);
       }
@@ -276,12 +300,45 @@
     }
     return { style, bounds, clips, reset() { styles = new WeakMap(); rectangles = new WeakMap(); clipping = new WeakMap(); } };
   }
+  function rectangularClipBounds(css, rect, element) {
+    if (!css || !rect || ![rect.left, rect.right, rect.top, rect.bottom].every(Number.isFinite)) return null;
+    // Computed rect/inset lengths are local to the border box. Percentages use
+    // its actual extent; pixel lengths also follow an ordinary scaled box.
+    const width = rect.right - rect.left, height = rect.bottom - rect.top;
+    const scaleX = element.offsetWidth > 0 ? width / element.offsetWidth : 1;
+    const scaleY = element.offsetHeight > 0 ? height / element.offsetHeight : 1;
+    function length(token, extent, scale, auto) {
+      if (token === "auto") return auto;
+      const match = /^(-?(?:\d+(?:\.\d*)?|\.\d+))(px|%)?$/iu.exec(token);
+      if (!match || !match[2] && Number(match[1]) !== 0) return NaN;
+      return Number(match[1]) * (match[2] === "%" ? extent / 100 : scale);
+    }
+    const legacy = /^rect\(([^()]+)\)$/iu.exec(css);
+    const inset = /^inset\(([^()]+)\)(?:\s+border-box)?$/iu.exec(css);
+    if (!legacy && !inset) return null;
+    let tokens = (legacy || inset)[1].trim().toLowerCase().split(legacy ? /[\s,]+/u : /\s+/u);
+    if (legacy && tokens.length !== 4 || inset && (tokens.length < 1 || tokens.length > 4)) return null;
+    if (inset) tokens = [tokens[0], tokens[1] || tokens[0], tokens[2] || tokens[0], tokens[3] || tokens[1] || tokens[0]];
+    const offsets = tokens.map((token, index) => length(token, index % 2 ? width : height, index % 2 ? scaleX : scaleY,
+      legacy ? [0, width, height, 0][index] : NaN));
+    if (!offsets.every(Number.isFinite)) return null;
+    const [top, right, bottom, left] = offsets;
+    return { left: rect.left + left, top: rect.top + top,
+      right: legacy ? rect.left + right : rect.right - right,
+      bottom: legacy ? rect.top + bottom : rect.bottom - bottom };
+  }
   function createRenderedTextTester(document) {
     const range = document.createRange();
     return (node, layout) => {
       try {
         if (hiddenByClosedDetails(node)) return false;
         const clips = (layout || createScanLayout(document)).clips(composedParent(node));
+        let apertureLeft = -Infinity, apertureRight = Infinity, apertureTop = -Infinity, apertureBottom = Infinity;
+        for (const clip of clips) {
+          if (clip.x) { apertureLeft = Math.max(apertureLeft, clip.bounds.left); apertureRight = Math.min(apertureRight, clip.bounds.right); }
+          if (clip.y) { apertureTop = Math.max(apertureTop, clip.bounds.top); apertureBottom = Math.min(apertureBottom, clip.bounds.bottom); }
+        }
+        const tinyAperture = apertureRight - apertureLeft <= 1 && apertureBottom - apertureTop <= 1;
         range.selectNodeContents(node);
         for (const bounds of range.getClientRects()) {
           if (!(bounds.width > 0 && bounds.height > 0)) continue;
@@ -290,7 +347,11 @@
             if (clip.x) { left = Math.max(left, clip.bounds.left); right = Math.min(right, clip.bounds.right); }
             if (clip.y) { top = Math.max(top, clip.bounds.top); bottom = Math.min(bottom, clip.bounds.bottom); }
           }
-          if (!clips.length || right > left && bottom > top) return true;
+          // A larger glyph range reduced to a 1x1 accessibility aperture does
+          // not display readable text. Do not impose a minimum on real layout
+          // or reject an ordinary partly visible line at a larger clip edge.
+          const cropped = left > bounds.left || right < bounds.right || top > bounds.top || bottom < bounds.bottom;
+          if (right > left && bottom > top && !(tinyAperture && cropped)) return true;
         }
       } catch { /* Detached source nodes are not eligible. */ }
       finally {
@@ -399,11 +460,10 @@
         if (eligibility.has(parent)) { allowed = eligibility.get(parent); break; }
         path.push(parent);
         if (unrenderedLightNode(parent)) { allowed = false; break; }
-        if (excludedTags.has(parent.tagName) || parent.isContentEditable || parent.hidden
+        if (excludedTags.has(parent.tagName) || parent.isContentEditable
             || parent.getAttribute?.("aria-hidden") === "true" || parent.hasAttribute?.("data-screen-translator")) { allowed = false; break; }
         const style = layout.style(parent);
-        if (style?.display === "none" || style?.visibility === "hidden" || style?.visibility === "collapse"
-            || style?.opacity === "0" && !decorativeFragment(parent, fragmentGroups)) { allowed = false; break; }
+        if (!renderingStylePermitted(parent, style, fragmentGroups)) { allowed = false; break; }
       }
       for (const element of path) eligibility.set(element, allowed);
       return allowed;
@@ -611,7 +671,7 @@
     let manualImageRequest = null;
     const annotations = new Map(), ownedNodes = new WeakSet();
     const completedGroups = new Map(), decisionMemo = new Map();
-    let completedCharacters = 0, decisionCharacters = 0, snapshotKey = null;
+    let completedCharacters = 0, decisionCharacters = 0, snapshotKey = null, localRejection = null;
     let routeKey = pageRouteKey(environment.getLocation?.() || document.location?.href);
     const maximumCompletedCharacters = 8 * 1024 * 1024, maximumCompletedGroups = 16384;
     function groupKey(groupRecords) {
@@ -773,7 +833,7 @@
           void send({ type: "pageAutoCancel", ...identity(requestId), reason });
       }
       for (const job of jobs.values()) clearTimeout(job.deadline);
-      jobs.clear(); queue = []; assessed = null; firstRequestId = null;
+      jobs.clear(); queue = []; assessed = null; firstRequestId = null; localRejection = null;
       if (restoreText) restore();
       if (!preserveProgress) for (const record of records.values()) for (const piece of record.pieces) {
         piece.value = piece.source; piece.complete = false; piece.failed = false;
@@ -855,7 +915,12 @@
           isCurrent: () => active() && atRevision === revision }, records);
         if (!active() || atRevision !== revision) return;
         if (snapshot.fragmentDelay > 0) scheduleScan(snapshot.fragmentDelay);
-        if (snapshotKey !== null && snapshotKey !== snapshot.sourceSignature && assessed !== null) {
+        // Always judge the fresh full-body summary. Changed readable carousel
+        // prose can keep the same local rejection without retiring a decision
+        // that made no requests; a changed rule result still leaves that state.
+        const verdict = manualMode || config.siteMode === "allow" ? null : policy.localVerdict(snapshot.pageSummary, config.targetLanguage, config.chineseProseShareThresholdPercent);
+        const sameLocalRejection = assessed === false && !!verdict && localRejection?.reason === verdict.reason;
+        if (snapshotKey !== null && snapshotKey !== snapshot.sourceSignature && assessed !== null && !sameLocalRejection) {
           // A deferred layout/addition scan has no live jobs. Reassess changed
           // authored evidence, retaining already committed paragraph values.
           assessed = null; firstRequestId = null; revision++; viewChanged();
@@ -876,15 +941,17 @@
         for (const record of snapshot.records) if (record.node.nodeValue !== record.source
             || record.pieces.some(piece => piece.value !== piece.source)) write(record);
         renderBilingual();
-        const verdict = manualMode || config.siteMode === "allow" ? null : policy.localVerdict(snapshot.pageSummary, config.targetLanguage, config.chineseProseShareThresholdPercent);
         if (verdict) {
           assessed = false; queue = [];
           // Page admission governs new work. Added Chinese prose or a changed
           // threshold must keep published translations of unchanged source.
           // Source invalidation and explicit original/pause controls own rollback.
           rememberDecision(snapshotKey, { needsTranslation: false, allowImages: verdict.reason !== "mixed_chinese_english", reason: verdict.reason });
-          decision(true, verdict.reason !== "mixed_chinese_english"); notify("skipped", verdict.reason); return;
+          localRejection = verdict;
+          if (!sameLocalRejection) decision(true, verdict.reason !== "mixed_chinese_english");
+          notify("skipped", verdict.reason); return;
         }
+        localRejection = null;
         const remembered = manualMode || config.siteMode === "allow" ? null : decisionMemo.get(snapshotKey);
         if (remembered) {
           assessed = remembered.needsTranslation; decision(true, remembered.allowImages);
@@ -1536,18 +1603,24 @@
       }
       if (changed) {
         const selectionChanged = manualRunning && manualMode === "selection";
-        // Lazy additions and visibility changes must not repeatedly abort a
-        // preparation walk or unrelated streams on a loading/animated page.
-        if (!selectionChanged && jobs.size && [...jobs.values()].some(job => job.ids.size)
+        if (!manualMode && assessed === false && localRejection && !jobs.size) {
+          // No native work needs cancellation. Keep the last valid local verdict
+          // during collection, then reevaluate all current body evidence. Even
+          // invalidated carousel groups must not publish an unknown decision on
+          // every frame or restart an otherwise continuing extraction walk.
+          if (scanning) scanAgain = true; else scheduleScan();
+        } else if (!selectionChanged && jobs.size && [...jobs.values()].some(job => job.ids.size)
             || !invalidated && !selectionChanged && (scanning || jobs.size)) {
+          // Lazy additions and visibility changes must not repeatedly abort a
+          // preparation walk or unrelated streams on a loading/animated page.
           // A ticker/carousel retires only its own paragraph IDs. Keep other
           // paragraphs in the admitted batch flowing, then scan the new source.
           scanAgain = true;
         } else {
-        cancel(selectionChanged ? "selection_changed" : "page_changed", false, true);
-        if (selectionChanged) {
-          manualRunning = false; selectedRanges = null; selectionSources = null; selectionPending = true; notify("selection_changed");
-        } else scheduleScan();
+          cancel(selectionChanged ? "selection_changed" : "page_changed", false, true);
+          if (selectionChanged) {
+            manualRunning = false; selectedRanges = null; selectionSources = null; selectionPending = true; notify("selection_changed");
+          } else scheduleScan();
         }
       }
       renderBilingual();
