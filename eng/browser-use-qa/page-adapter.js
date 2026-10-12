@@ -44,6 +44,26 @@
   function composedParent(node) {
     return node.assignedSlot || node.parentElement || node.parentNode?.host || node.getRootNode?.().host;
   }
+  // This is independent source geometry, not the production rendered-text test.
+  // Zero extents are known empty geometry; absent, contradictory or non-finite
+  // coordinates are unknown and must not authorize retained blank evidence.
+  function normalizeRect(rect) {
+    if (!rect) return null;
+    function axis(origin, start, end, extent) {
+      const values = [origin, start, end, extent];
+      if (values.some(value => value !== undefined && !Number.isFinite(value))) return null;
+      const position = start ?? origin, size = extent ?? (end - position);
+      if (!Number.isFinite(position) || !Number.isFinite(size) || size < 0
+          || !Number.isFinite(position + size)) return null;
+      const agrees = (a, b) => Math.abs(a - b) <= Number.EPSILON * 8 * Math.max(1, Math.abs(a), Math.abs(b));
+      if (origin !== undefined && !agrees(origin, position)
+          || end !== undefined && !agrees(end, position + size)) return null;
+      return [position, size];
+    }
+    const horizontal = axis(rect.x, rect.left, rect.right, rect.width);
+    const vertical = axis(rect.y, rect.top, rect.bottom, rect.height);
+    return horizontal && vertical ? { x: horizontal[0], y: vertical[0], width: horizontal[1], height: vertical[1] } : null;
+  }
   function intersect(rect, bounds) {
     const x = Math.max(rect.x, bounds.left), y = Math.max(rect.y, bounds.top);
     const right = Math.min(rect.x + rect.width, bounds.right), bottom = Math.min(rect.y + rect.height, bounds.bottom);
@@ -52,12 +72,10 @@
   function length(value, size) {
     if (value === "0") return 0;
     if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)(px|%)$/.test(value)) return null;
-    return parseFloat(value) * (value.endsWith("%") ? size / 100 : 1);
+    const result = parseFloat(value) * (value.endsWith("%") ? size / 100 : 1);
+    return Number.isFinite(result) ? result : null;
   }
   function clippingBounds(element, style) {
-    const box = element.getBoundingClientRect?.();
-    if (!box) return [];
-    const left = box.x ?? box.left, top = box.y ?? box.top;
     const bounds = [];
     // The document scrollport is deliberately not a visual-source boundary:
     // loaded below-fold prose is evidence even before scrolling to it.
@@ -70,45 +88,60 @@
     const overflowBox = !["inline", "contents"].includes(style.display);
     const clipX = paint || overflowBox && !rootOverflow && clips(style.overflowX || style.overflow);
     const clipY = paint || overflowBox && !rootOverflow && clips(style.overflowY || style.overflow);
+    const clip = ["absolute", "fixed"].includes(style.position) && /^(?:rect)\((.*)\)$/.exec(style.clip || "");
+    const inset = /^inset\((.*?)\)(?:\s+border-box)?$/.exec(style.clipPath || "");
+    if (!clipX && !clipY && !clip && !inset) return bounds;
+    const box = normalizeRect(element.getBoundingClientRect?.());
+    if (!box) return null;
+    const left = box.x, top = box.y;
     if (clipX || clipY) {
       // Client geometry excludes borders and scrollbar gutters. Scale client
       // dimensions into the same coordinates as transformed Range rectangles.
+      for (const key of ["offsetWidth", "offsetHeight", "clientLeft", "clientTop", "clientWidth", "clientHeight"])
+        if (element[key] !== undefined && (!Number.isFinite(element[key]) || element[key] < 0)) return null;
       const sx = element.offsetWidth > 0 ? box.width / element.offsetWidth : 1;
       const sy = element.offsetHeight > 0 ? box.height / element.offsetHeight : 1;
       const x = left + (element.clientLeft || 0) * sx, y = top + (element.clientTop || 0) * sy;
       const width = Number.isFinite(element.clientWidth) ? element.clientWidth * sx : box.width;
       const height = Number.isFinite(element.clientHeight) ? element.clientHeight * sy : box.height;
+      if (clipX && ![x, width, x + width].every(Number.isFinite)
+          || clipY && ![y, height, y + height].every(Number.isFinite)) return null;
       bounds.push({ left: clipX ? x : -Infinity, right: clipX ? x + width : Infinity,
         top: clipY ? y : -Infinity, bottom: clipY ? y + height : Infinity });
     }
     // Legacy accessibility clipping applies only to positioned elements.
-    const clip = /^(?:rect)\((.*)\)$/.exec(style.clip || "");
-    if (clip && ["absolute", "fixed"].includes(style.position)) {
+    if (clip) {
       const values = clip[1].trim().split(/[\s,]+/);
       const offsets = values.map((value, i) => value === "auto" ? [0, box.width, box.height, 0][i]
         : length(value, i % 2 ? box.width : box.height));
-      if (offsets.length === 4 && offsets.every(value => value !== null))
-        bounds.push({ left: left + offsets[3], top: top + offsets[0], right: left + offsets[1], bottom: top + offsets[2] });
+      if (offsets.length !== 4 || offsets.some(value => value === null)) return null;
+      bounds.push({ left: left + offsets[3], top: top + offsets[0], right: left + offsets[1], bottom: top + offsets[2] });
     }
-    const inset = /^inset\((.*?)\)(?:\s+border-box)?$/.exec(style.clipPath || "");
     if (inset) {
       const values = inset[1].split(/\s+round\s+/)[0].trim().split(/\s+/);
       if (values.length >= 1 && values.length <= 4) {
         const expanded = [values[0], values[1] || values[0], values[2] || values[0], values[3] || values[1] || values[0]];
         const offsets = expanded.map((value, i) => length(value, i % 2 ? box.width : box.height));
-        if (offsets.every(value => value !== null)) bounds.push({ left: left + offsets[3], top: top + offsets[0],
+        if (offsets.some(value => value === null)) return null;
+        bounds.push({ left: left + offsets[3], top: top + offsets[0],
           right: left + box.width - offsets[1], bottom: top + box.height - offsets[2] });
-      }
+      } else return null;
     }
+    // Infinite edges are intentional only on the unconstrained overflow axes.
+    for (const bound of bounds.slice(clipX || clipY ? 1 : 0))
+      if (![bound.left, bound.top, bound.right, bound.bottom].every(Number.isFinite)) return null;
     return bounds;
   }
   function geometry(node, retainedRects) {
     const range = document.createRange(); range.selectNodeContents(node);
-    let rects = retainedRects ? retainedRects.map(r => ({ x: r.documentX - root.scrollX,
-      y: r.documentY - root.scrollY, width: r.width, height: r.height }))
-      : Array.from(range.getClientRects(), r => ({ x: r.x, y: r.y, width: r.width, height: r.height }));
+    let canRetain = Number.isFinite(root.scrollX) && Number.isFinite(root.scrollY);
+    let rects = retainedRects ? retainedRects.map(r => Number.isFinite(r.documentX) && Number.isFinite(r.documentY)
+      ? normalizeRect({ x: r.documentX - root.scrollX, y: r.documentY - root.scrollY, width: r.width, height: r.height }) : null)
+      : Array.from(range.getClientRects(), normalizeRect);
+    if (rects.some(rect => !rect)) canRetain = false;
+    rects = rects.filter(Boolean);
     const parent = composedParent(node), bounds = [];
-    let visible = !!parent;
+    let visible = !!parent && Number.isFinite(root.scrollX) && Number.isFinite(root.scrollY);
     const seen = new Set();
     for (let element = parent; element && !seen.has(element); element = composedParent(element)) {
       seen.add(element);
@@ -121,7 +154,9 @@
         const summary = Array.from(element.children || []).find(child => child.tagName === "SUMMARY");
         if (!seen.has(summary) && !summary?.contains(node)) { visible = false; break; }
       }
-      bounds.push(...clippingBounds(element, style));
+      const clipping = clippingBounds(element, style);
+      if (!clipping) { visible = false; canRetain = false; break; }
+      bounds.push(...clipping);
     }
     rects = rects.filter(r => r.width > 0 && r.height > 0).flatMap(rect => {
       let clipped = rect;
@@ -132,10 +167,13 @@
       const accessibilityAperture = bounds.some(bound => bound.right - bound.left <= 1 && bound.bottom - bound.top <= 1
         && (rect.width > bound.right - bound.left || rect.height > bound.bottom - bound.top));
       if (clipped.width <= 0 || clipped.height <= 0 || accessibilityAperture) return [];
-      return [{ ...clipped, documentX: clipped.x + root.scrollX, documentY: clipped.y + root.scrollY }];
+      clipped = normalizeRect(clipped);
+      const documentX = clipped?.x + root.scrollX, documentY = clipped?.y + root.scrollY;
+      if (!clipped || !Number.isFinite(documentX) || !Number.isFinite(documentY)) { canRetain = false; return []; }
+      return [{ ...clipped, documentX, documentY }];
     });
     const rendered = visible && rects.some(r => r.width > 0 && r.height > 0);
-    return { rects, ancestorsVisible: visible, rendered: !!rendered, inViewport: !!rendered && rects.some(r =>
+    return { canRetain, rects, ancestorsVisible: visible, rendered: !!rendered, inViewport: !!rendered && rects.some(r =>
       r.x < root.innerWidth && r.y < root.innerHeight && r.x + r.width > 0 && r.y + r.height > 0) };
   }
   function sample(phase) {
@@ -144,11 +182,11 @@
       const record = records.get(node);
       const source = record?.source ?? node.nodeValue;
       if (!String(source || "").trim()) continue;
-      const id = identity(node, source), layout = geometry(node), before = previous.get(id);
+      const id = identity(node, source), { canRetain, ...layout } = geometry(node), before = previous.get(id);
       // Empty Text ranges have no geometry. Retain the previous visible position
       // when an unchanged, still connected translated node disappears to blank.
       let disappeared = !String(node.nodeValue || "").trim() && before?.translated
-        && sources.has(id) && layout.ancestorsVisible && node.isConnected !== false;
+        && sources.has(id) && canRetain && layout.ancestorsVisible && node.isConnected !== false;
       if (disappeared && !layout.rects.length) {
         const retained = geometry(node, before.rects);
         disappeared = retained.rendered;
