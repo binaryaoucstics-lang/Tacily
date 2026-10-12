@@ -62,11 +62,21 @@ public static partial class PageTranslationDecision
             { ReasonCode = code, EligibleBlocks = eligible.ToArray() }, true);
 
         if (target == "und") return Result(false, "unsupported-target", "目标语言未列入程序自动判断范围。", "und", .5);
-        // Only actual Chinese prose vetoes an otherwise foreign page. Logos, names,
-        // navigation labels and a few Han glyphs in an English article are insufficient.
+        // Compare identified Chinese body prose with all other body letters.
+        // Japanese Han, headings, navigation and code are not Chinese evidence.
         var chinese = body.Where(block => IsChineseProse(block.Text)).ToArray();
-        var chineseLetters = chinese.Sum(block => Count(block.Text).Han);
-        if (target == "zh" && (chineseLetters >= 6 || statistics is { HanProseCharacters: >= 24 }))
+        var sampledChineseLetters = chinese.Sum(block => Count(block.Text).Han);
+        var sampledNonChineseLetters = body.Sum(block => Count(block.Text).Letters) - sampledChineseLetters;
+        var chineseLetters = Math.Max(sampledChineseLetters, statistics?.HanProseCharacters ?? 0);
+        // Zero is also the value supplied by older messages that omit the new
+        // statistic. Their Latin/kana counts and bounded samples remain usable.
+        var nonChineseLetters = statistics is { NonChineseProseCharacters: > 0 }
+            ? statistics.NonChineseProseCharacters
+            : Math.Max(sampledNonChineseLetters, (long)Math.Max(0, statistics?.LatinProseCharacters ?? 0)
+                + Math.Max(0, statistics?.KanaProseCharacters ?? 0));
+        var threshold = NormalizeChineseProseShareThresholdPercent(chineseProseShareThresholdPercent);
+        if (target == "zh" && chineseLetters >= 6
+            && (long)chineseLetters * 100 >= (chineseLetters + nonChineseLetters) * threshold)
         {
             var mixed = all.Latin >= 12 || all.Kana >= 3 || all.Hangul >= 4
                 || statistics is { LatinProseCharacters: >= 32 } or { KanaProseCharacters: >= 6 };

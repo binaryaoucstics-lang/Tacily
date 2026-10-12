@@ -1,4 +1,5 @@
 using ScreenTranslator.Core.Browser;
+using ScreenTranslator.Core.Translation;
 
 namespace ScreenTranslator.Core.Tests.Browser;
 
@@ -23,17 +24,50 @@ public sealed class PageTranslationDecisionTests
         Assert.Equal(expected, PageTranslationDecision.Inspect([new(Chinese)], target).RuleDecision.NeedsTranslation);
 
     [Fact]
-    public void GenuineChineseAndEnglishProseRemainsReadableMixedContent()
+    public void ForeignDominantPageWithASmallChinesePassageTranslatesAtTheFixedDefault()
+    {
+        const string readableChinese = "这里的中文说明可以直接阅读。";
+        var result = PageTranslationDecision.Inspect([new(readableChinese), new(English)], "zh",
+            chineseProseShareThresholdPercent: PageTranslationDecision.DefaultChineseProseShareThresholdPercent).RuleDecision;
+        Assert.True(result.NeedsTranslation);
+        Assert.False(result.IsMixedTargetLanguage);
+        Assert.Contains(result.EligibleBlocks, block => block.Text == readableChinese);
+        Assert.False(PageTextEligibility.NeedsTranslation(readableChinese, "zh"));
+        Assert.True(PageTextEligibility.NeedsTranslation(English, "zh"));
+    }
+
+    [Fact]
+    public void ChineseDominantPageWithASmallEnglishPassageSkipsAtTheFixedDefault()
+    {
+        var result = PageTranslationDecision.Inspect([new(Chinese), new("The page keeps the original links.")], "zh",
+            chineseProseShareThresholdPercent: PageTranslationDecision.DefaultChineseProseShareThresholdPercent).RuleDecision;
+        Assert.False(result.NeedsTranslation);
+        Assert.True(result.IsMixedTargetLanguage);
+        Assert.Equal("mixed-target-body", result.ReasonCode);
+    }
+
+    [Fact]
+    public void SeparateChineseAndEnglishPassagesUseTheirLetterShare()
     {
         var result = PageTranslationDecision.Inspect([new(Chinese), new(English)], "zh").RuleDecision;
-        Assert.False(result.NeedsTranslation); Assert.True(result.IsMixedTargetLanguage);
+        Assert.True(result.NeedsTranslation);
+        Assert.False(result.IsMixedTargetLanguage);
     }
 
     [Fact]
     public void ChineseNavigationAndHeadingDoNotOverrideEnglishBody()
     {
-        var result = PageTranslationDecision.Inspect([new("中文产品官方网站", "title"), new("翻译此页面", "navigation"), new(English)], "zh").RuleDecision;
+        var result = PageTranslationDecision.Inspect([new(Chinese, "title"), new(Chinese, "heading"),
+            new(Chinese, "navigation"), new(Chinese, "code"), new(English)], "zh").RuleDecision;
         Assert.True(result.NeedsTranslation); Assert.False(result.IsMixedTargetLanguage);
+    }
+
+    [Fact]
+    public void ForeignHeadingsDoNotDiluteChineseBodyShare()
+    {
+        var result = PageTranslationDecision.Inspect([new(English, "title"), new(English, "heading"), new(Chinese)], "zh").RuleDecision;
+        Assert.False(result.NeedsTranslation);
+        Assert.Equal("mixed-target-body", result.ReasonCode);
     }
 
     [Theory]
@@ -67,11 +101,154 @@ public sealed class PageTranslationDecisionTests
     }
 
     [Fact]
-    public void WholePageChineseProseVetoesASparseEnglishSample()
+    public void WholePageMinorityChineseProseDoesNotVetoAnEnglishSample()
     {
         var result = PageTranslationDecision.Inspect([new(English)], "zh",
             new(TotalCharacters: 4000, HanProseCharacters: 100, LatinProseCharacters: 2000)).RuleDecision;
+        Assert.True(result.NeedsTranslation); Assert.False(result.IsMixedTargetLanguage);
+    }
+
+    [Fact]
+    public void WholePageMajorityChineseProseSkipsASparseEnglishSample()
+    {
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: 2000, LatinProseCharacters: 100)).RuleDecision;
         Assert.False(result.NeedsTranslation); Assert.True(result.IsMixedTargetLanguage);
+    }
+
+    [Theory]
+    [InlineData(99, false)]
+    [InlineData(100, false)]
+    [InlineData(101, true)]
+    public void FixedDefaultIncludesTheExactShareBoundary(int nonChineseLetters, bool expected)
+    {
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: 100, NonChineseProseCharacters: nonChineseLetters),
+            PageTranslationDecision.DefaultChineseProseShareThresholdPercent).RuleDecision;
+        Assert.Equal(expected, result.NeedsTranslation);
+    }
+
+    [Theory]
+    [InlineData(40, false)]
+    [InlineData(50, false)]
+    [InlineData(51, true)]
+    [InlineData(70, true)]
+    public void CustomThresholdControlsTheChineseShareGate(int threshold, bool expected)
+    {
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: 100, NonChineseProseCharacters: 100), threshold).RuleDecision;
+        Assert.Equal(expected, result.NeedsTranslation);
+    }
+
+    [Theory]
+    [InlineData(int.MinValue, 10)]
+    [InlineData(9, 10)]
+    [InlineData(10, 10)]
+    [InlineData(50, 50)]
+    [InlineData(90, 90)]
+    [InlineData(91, 90)]
+    [InlineData(int.MaxValue, 90)]
+    public void SuppliedThresholdIsClampedToPublicBounds(int supplied, int normalized)
+    {
+        Assert.Equal(normalized, PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(supplied));
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: normalized * 10, NonChineseProseCharacters: (100 - normalized) * 10), supplied).RuleDecision;
+        Assert.False(result.NeedsTranslation);
+        Assert.Equal("mixed-target-body", result.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData(5, true)]
+    [InlineData(6, false)]
+    public void ShareGateRequiresAtLeastSixIdentifiedChineseLetters(int chineseLetters, bool expected)
+    {
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: chineseLetters, NonChineseProseCharacters: 6)).RuleDecision;
+        Assert.Equal(expected, result.NeedsTranslation);
+    }
+
+    [Theory]
+    [InlineData(900, 0, true)]
+    [InlineData(100, 9000, false)]
+    public void FullPageNonChineseStatisticTakesPrecedenceOverLatinAndSampleCounts(
+        int nonChineseLetters, int latinLetters, bool expected)
+    {
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: 100, LatinProseCharacters: latinLetters,
+                NonChineseProseCharacters: nonChineseLetters)).RuleDecision;
+        Assert.Equal(expected, result.NeedsTranslation);
+    }
+
+    [Theory]
+    [InlineData(300, 0)]
+    [InlineData(0, 300)]
+    [InlineData(150, 150)]
+    public void OlderStatisticsFallBackToLatinAndKanaProse(int latinLetters, int kanaLetters)
+    {
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: 200, LatinProseCharacters: latinLetters, KanaProseCharacters: kanaLetters)).RuleDecision;
+        Assert.True(result.NeedsTranslation);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MissingStatisticsFallBackToBoundedBodySamples(bool emptyStatistics)
+    {
+        PageTextStatistics? statistics = emptyStatistics ? new() : null;
+        Assert.True(PageTranslationDecision.Inspect([new(Chinese), new(English)], "zh", statistics).RuleDecision.NeedsTranslation);
+        Assert.False(PageTranslationDecision.Inspect([new(Chinese), new("The page keeps the original links.")],
+            "zh", statistics).RuleDecision.NeedsTranslation);
+    }
+
+    [Fact]
+    public void SampleShareCountsLettersRatherThanPunctuationOrDigits()
+    {
+        var result = PageTranslationDecision.Inspect([new("这是我的页面这是我的页面。"),
+            new("abcd efgh ijkl! 1234567890 " + new string('!', 200))], "zh").RuleDecision;
+        Assert.False(result.NeedsTranslation);
+        Assert.Equal("mixed-target-body", result.ReasonCode);
+    }
+
+    [Fact]
+    public void OtherScriptsAndJapaneseHanCountAsNonChineseSampleLetters()
+    {
+        var japanese = "このページでは文章を読みながら必要な情報を確認できます。画面の配置を維持して翻訳を表示します。";
+        var russian = "Эта библиотека предоставляет статьи для читателей и сохраняет исходное расположение страницы.";
+        foreach (var foreign in new[] { japanese, russian })
+        {
+            var result = PageTranslationDecision.Inspect([new("这里的中文说明可以直接阅读。"), new(foreign)], "zh").RuleDecision;
+            Assert.True(result.NeedsTranslation);
+            Assert.False(result.IsMixedTargetLanguage);
+        }
+    }
+
+    [Theory]
+    [InlineData("en", false)]
+    [InlineData("ja", true)]
+    [InlineData("ko", true)]
+    public void ChineseShareSettingDoesNotAffectOtherTargets(string target, bool expected)
+    {
+        foreach (var threshold in new[] { 10, 50, 90 })
+        {
+            var result = PageTranslationDecision.Inspect([new(English)], target,
+                new(HanProseCharacters: 9000, NonChineseProseCharacters: 1), threshold).RuleDecision;
+            Assert.Equal(expected, result.NeedsTranslation);
+            Assert.False(result.IsMixedTargetLanguage);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void LargeStatisticsDoNotOverflowShareArithmetic(bool legacyStatistics, bool expected)
+    {
+        var result = PageTranslationDecision.Inspect([new(English)], "zh",
+            new(HanProseCharacters: int.MaxValue,
+                LatinProseCharacters: legacyStatistics ? int.MaxValue : 0,
+                KanaProseCharacters: legacyStatistics ? int.MaxValue : 0,
+                NonChineseProseCharacters: legacyStatistics ? 0 : int.MaxValue)).RuleDecision;
+        Assert.Equal(expected, result.NeedsTranslation);
     }
 
     [Fact]
@@ -145,5 +322,16 @@ public sealed class PageTranslationDecisionTests
         var evidence = PageTranslationDecision.Inspect(Enumerable.Range(0, 2000).Select(_ => new PageTextSample(English + new string('a', 5000))).ToArray(), "en");
         Assert.InRange(evidence.RuleDecision.EligibleBlocks.Count, 1, 600);
         Assert.InRange(evidence.RuleDecision.EligibleBlocks.Sum(block => block.Text.Length), 1, 24_000);
+    }
+
+    [Fact]
+    public void ChineseOutsideTheBoundedSampleDoesNotVetoForeignProse()
+    {
+        var samples = Enumerable.Repeat(new PageTextSample(English + new string('a', 4096)), 7)
+            .Append(new PageTextSample(Chinese)).ToArray();
+        var result = PageTranslationDecision.Inspect(samples, "zh").RuleDecision;
+        Assert.True(result.NeedsTranslation);
+        Assert.DoesNotContain(result.EligibleBlocks, block => block.Text == Chinese);
+        Assert.Equal(PageTranslationDecision.MaximumSampleCharacters, result.EligibleBlocks.Sum(block => block.Text.Length));
     }
 }
