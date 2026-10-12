@@ -2436,3 +2436,174 @@ test("PDF spacing does not waive a changed composed slot assignment in the same 
   assert.equal(nodes[0].nodeValue, citationSources[0]); assert.equal(completeCitation(f, packet), false);
   await tick(); assert.equal(f.candidates().length, 2); f.session.dispose();
 });
+
+// Public site-021 requests -2538/-2542..-2546 supply these exact contexts,
+// hashes and first two Text owners. The supplied history does not enumerate
+// every tail owner; the remaining inline wrappers below are a reconstruction,
+// not new independent historical evidence. The title and archive are distinct
+// links, with a separate collapsible horizontal Text between them.
+const andersonSources = ["Anderson, D.D. (1995). ",
+  "Machine translation as a tool in second language learning", "Archived",
+  " 4 January 2018 at the ", "Wayback Machine", ". CALICO Journal. 13(1). 68–96."];
+const andersonHashes = ["4f47e8ff5b61b062487d4b3ffed190254f82a86b8ec5b7a5b0bdf650f1c4ba5e",
+  "3eba6848a1faead30d77e56cc41b14adc7f2e13a07bfedd22b0cd1dfa1c70ba3"];
+function andersonFixture(spacing = " ", extra = []) {
+  const nodes = andersonSources.map(source => new Text(source)), gap = new Text(spacing);
+  const title = new Element("A", [nodes[1]], { href: "/learning" }), archive = new Element("A", [nodes[2]], { href: "/archive/learning" });
+  const cite = new Element("SPAN", [nodes[0], title, gap, archive, nodes[3], new Element("A", [nodes[4]], { href: "/wayback" }), nodes[5]], { class: "reference-text" });
+  const row = new Element("LI", [cite]), f = fixture([row, ...extra]);
+  return { f, nodes, gap, title, archive, cite, row };
+}
+function assertAndersonMetadata(blocks, spaced) {
+  assert.deepEqual(blocks.map(block => block.text), andersonSources.map(source => source.trim()));
+  const context = andersonSources[0] + andersonSources[1] + (spaced ? " " : "") + andersonSources.slice(2).join("");
+  for (const block of blocks) {
+    assert.equal(block.context, context); assert.equal(block.sourceGroupHash, andersonHashes[Number(spaced)]);
+    assert.equal(block.sourceGroupLength, spaced ? 158 : 157);
+    assert.equal(context.slice(block.sourceStart, block.sourceStart + block.sourceLength), block.text);
+  }
+  assert.equal(blocks[0].sourceStart, 0); assert.equal(blocks[1].sourceStart, 23);
+}
+test("Anderson separate title/archive gap retains every complete owner and current exact metadata", async () => {
+  for (const mode of ["translation", "bilingual"]) for (const method of ["characterData", "remove", "replace", "rendering"]) {
+    const { f, nodes, gap, title, archive, cite, row } = andersonFixture();
+    let gapRendered = true; f.environment.isRenderedText = node => node !== gap || gapRendered;
+    await enabled(f); const old = f.candidate(); assertAndersonMetadata(old.blocks, true); approved(f); finish(f, old, "完整译文");
+    f.session.control(`view-${mode}`); const display = nodes.map(node => node.nodeValue), writes = nodes.map(trackTextWrites);
+    const annotation = f.session.inspect().annotations.get(row);
+    if (method === "characterData") { gap.nodeValue = ""; f.session.mutated([{ type: "characterData", target: gap }]); }
+    else if (method === "rendering") { gapRendered = false; f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); }
+    else {
+      gap.isConnected = false; const replacement = method === "replace" ? new Text("") : null;
+      cite.childNodes.splice(2, 1, ...(replacement ? [replacement] : [])); if (replacement) replacement.parentElement = cite;
+      f.session.mutated([{ type: "childList", target: cite, removedNodes: [gap], addedNodes: replacement ? [replacement] : [] }]);
+    }
+    assert.deepEqual(nodes.map(node => node.nodeValue), display); await tick();
+    assert.deepEqual(nodes.map(node => node.nodeValue), display); assert.ok(writes.every(values => values.length === 0));
+    assertAndersonMetadata([...f.session.inspect().blocks.values()], false);
+    assert.equal(f.candidates().length, 1); assert.equal(f.session.inspect().jobs, 0); assert.equal(f.session.inspect().pending, 0);
+    assert.equal(cite.childNodes[1], title); assert.equal(archive.getAttribute("href"), "/archive/learning");
+    if (mode === "bilingual") assert.equal(f.session.inspect().annotations.get(row), annotation);
+    assert.equal(f.session.receive(message(old, "pageAutoTranslations", { updates: [{ id: old.blocks[0].id, text: "旧响应", complete: true }], finished: true })), false);
+    f.session.control("view-original"); assert.deepEqual(nodes.map(node => node.nodeValue), andersonSources); f.session.dispose();
+  }
+});
+
+test("collapsed gap absent from extraction cannot repeatedly invalidate identical Anderson and responsive navigation repaints", async () => {
+  const label = new Text("Translated books"), navigationGap = new Text(" ");
+  const link = new Element("A", [new Element("SPAN", [label])]), navRow = new Element("LI", [link, navigationGap]);
+  const { f, nodes, gap } = andersonFixture(" ", [new Element("NAV", [new Element("UL", [navRow])])]);
+  f.environment.isRenderedText = node => node !== gap && node !== navigationGap;
+  await enabled(f); const old = f.candidate(), citation = old.blocks.filter(block => block.context.startsWith("Anderson"));
+  assertAndersonMetadata(citation, false);
+  const nav = old.blocks.find(block => block.text === "Translated books");
+  assert.equal(nav.sourceGroupHash, "bc9a374ed8e430c38818fe6e2d6bdd36e5554ab04031ef0f7c4ae9d75a8deef1");
+  approved(f); finish(f, old, "完整译文");
+  const all = [...nodes, label], display = all.map(node => node.nodeValue), ids = [...f.session.inspect().blocks.keys()];
+  for (let cycle = 0; cycle < 4; cycle++) {
+    all.forEach((node, index) => { node.nodeValue = index < nodes.length ? andersonSources[index] : "Translated books"; });
+    const writes = all.map(trackTextWrites);
+    f.session.mutated(all.map(target => ({ type: "characterData", target })));
+    assert.deepEqual(all.map(node => node.nodeValue), display, "rebind synchronously; no controller-induced invalidation flash");
+    assert.ok(writes.every(values => values.every(value => !andersonSources.includes(value) && value !== "Translated books")));
+    f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick();
+    assert.deepEqual([...f.session.inspect().blocks.keys()], ids); assert.equal(f.candidates().length, 1);
+    assertAndersonMetadata([...f.session.inspect().blocks.values()].filter(block => block.context.startsWith("Anderson")), false);
+  }
+  f.session.dispose();
+});
+
+test("link gap retirement leaves a peer request alive but rejects all old citation updates", async () => {
+  const peer = paragraph("An unrelated article still has a live translation while the complete citation reflows.");
+  const { f, nodes, gap } = andersonFixture(" ", [peer.element]); await enabled(f); const old = f.candidate(); approved(f);
+  f.session.receive(message(old, "pageAutoTranslations", { updates: old.blocks.filter(block => block.context.startsWith("Anderson"))
+    .map(block => ({ id: block.id, text: "完整引文", complete: true })) }));
+  const display = nodes.map(node => node.nodeValue), writes = nodes.map(trackTextWrites);
+  gap.nodeValue = ""; f.session.mutated([{ type: "characterData", target: gap }]);
+  f.session.receive(message(old, "pageAutoTranslations", { updates: old.blocks.map(block => ({ id: block.id, text: "迟到响应", complete: true })), finished: true }));
+  await tick(); assert.deepEqual(nodes.map(node => node.nodeValue), display); assert.ok(writes.every(values => values.length === 0));
+  assert.equal(peer.node.nodeValue, "迟到响应"); assert.equal(f.candidates().length, 1); f.session.dispose();
+});
+
+test("separate link spacing never salvages partial, failed or selection-scoped work", async () => {
+  for (const state of ["partial", "failed", "in-flight", "selection"]) {
+    const { f, nodes, gap } = andersonFixture();
+    if (state === "selection") {
+      await manualReady(f); select(f, nodes);
+      f.session.control("manual-selection"); await tick();
+    } else await enabled(f);
+    const old = f.candidate(); approved(f);
+    if (state !== "in-flight") f.session.receive(message(old, "pageAutoTranslations", { updates: old.blocks.map((block, index) =>
+      ({ id: block.id, text: "前缀", complete: state !== "partial" || index !== 1, failed: state === "failed" && index === 1 })), finished: state === "selection" }));
+    gap.nodeValue = ""; f.session.mutated([{ type: "characterData", target: gap }]);
+    assert.deepEqual(nodes.map(node => node.nodeValue), andersonSources);
+    assert.equal(f.session.receive(message(old, "pageAutoTranslations", { updates: [{ id: old.blocks[0].id, text: "旧完成", complete: true }], finished: true })), false);
+    await tick(); if (state !== "selection") assert.equal(f.candidates().length, 2); f.session.dispose();
+  }
+});
+
+test("link gap tolerance keeps authored joins, calendar facts, punctuation, NBSP, newlines and owner changes exact", async () => {
+  for (const change of ["join", "date", "count", "punctuation", "nbsp", "newline", "owner", "same-link", "inside-link"]) {
+    const { f, nodes, gap, title, archive, cite } = andersonFixture();
+    if (change === "same-link") { cite.childNodes.splice(2, 2); title.append(gap, nodes[2]); }
+    if (change === "inside-link") { cite.childNodes.splice(2, 1); title.append(gap); }
+    await enabled(f); const old = f.candidate(); approved(f); finish(f, old, "完整译文"); const writes = trackTextWrites(nodes[0]);
+    gap.nodeValue = change === "nbsp" ? "\u00a0" : change === "newline" ? "\n" : "";
+    const mutations = [{ type: "characterData", target: gap }];
+    const index = change === "join" ? 1 : change === "date" ? 3 : ["count", "punctuation"].includes(change) ? 5 : -1;
+    if (index >= 0) {
+      nodes[index].nodeValue = andersonSources[index].replace("language learning", "languagelearning").replace(change === "date" ? "2018" : "13(1)", change === "date" ? "2019" : change === "count" ? "14(1)" : "13[1]");
+      mutations.push({ type: "characterData", target: nodes[index] });
+    }
+    if (change === "owner") { const next = new Element("A", [nodes[2]], { href: "/different" }); archive.childNodes = []; cite.childNodes.splice(3, 1, next); next.parentElement = cite;
+      mutations.push({ type: "childList", target: cite, addedNodes: [next], removedNodes: [archive] }); }
+    f.session.mutated(mutations);
+    assert.ok(writes.includes(andersonSources[0]), change); assert.equal(nodes[0].nodeValue, andersonSources[0], change);
+    await tick(); f.session.dispose();
+  }
+});
+
+test("an unrendered new factual sibling still invalidates an exact-source repaint", async () => {
+  const { f, nodes, gap, cite } = andersonFixture(); f.environment.isRenderedText = node => node !== gap && node !== fact;
+  const fact = new Text(" 2019"); await enabled(f); approved(f); finish(f);
+  cite.append(fact); nodes[0].nodeValue = andersonSources[0]; const writes = trackTextWrites(nodes[1]);
+  f.session.mutated([{ type: "characterData", target: nodes[0] }, { type: "childList", target: cite, addedNodes: [fact], removedNodes: [] }]);
+  assert.ok(writes.includes(andersonSources[1])); assert.equal(nodes[1].nodeValue, andersonSources[1]); f.session.dispose();
+});
+
+test("repeated link-gap removal and insertion never leave stale separator context or restore complete text", async () => {
+  for (const rendering of [false, true]) {
+    const { f, nodes, gap } = andersonFixture(); let gapRendered = true;
+    f.environment.isRenderedText = node => node !== gap || gapRendered;
+    await enabled(f); approved(f); finish(f, undefined, "保留完整引文");
+    const display = nodes.map(node => node.nodeValue), writes = nodes.map(trackTextWrites);
+    for (let cycle = 0; cycle < 3; cycle++) for (const spaced of [false, true]) {
+      if (rendering) { gapRendered = spaced; f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); }
+      else { gap.nodeValue = spaced ? "\t  " : ""; f.session.mutated([{ type: "characterData", target: gap }]); }
+      await tick(); assert.deepEqual(nodes.map(node => node.nodeValue), display);
+      assertAndersonMetadata([...f.session.inspect().blocks.values()], spaced); assert.equal(f.candidates().length, 1);
+    }
+    assert.ok(writes.every(values => values.length === 0)); f.session.dispose();
+  }
+});
+
+test("link-gap proof refuses a simultaneous slot change and explicit original or pause still restores owners", async () => {
+  for (const action of ["slot", "view-original", "pause"]) {
+    const { f, nodes, gap, title, cite } = andersonFixture();
+    const first = new Element("SLOT"), second = new Element("SLOT"); let assigned = first;
+    if (action === "slot") {
+      title.assignedSlot = first; first.assignedNodes = () => assigned === first ? [title] : [];
+      second.assignedNodes = () => assigned === second ? [title] : [];
+      cite.childNodes.splice(1, 1, first); first.parentElement = cite; cite.append(second);
+    }
+    await enabled(f); const old = f.candidate(); approved(f); finish(f);
+    gap.nodeValue = ""; const mutations = [{ type: "characterData", target: gap }];
+    if (action === "slot") { assigned = second; title.assignedSlot = second;
+      mutations.push({ type: "slotchange", target: first }, { type: "slotchange", target: second }); }
+    f.session.mutated(mutations); await tick();
+    if (action !== "slot") f.session.control(action);
+    assert.deepEqual(nodes.map(node => node.nodeValue), andersonSources);
+    assert.equal(f.session.receive(message(old, "pageAutoTranslations", { updates: [{ id: old.blocks[0].id, text: "过期", complete: true }], finished: true })), false);
+    f.session.dispose();
+  }
+});
