@@ -39,7 +39,8 @@ public static class PageTextSemanticGuard
     private static readonly Regex Weekdays = MakeRegex(
         @"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b|[月火水木金土日](?:曜日|曜)|(?:周|週|星期|礼拜|禮拜)[一二三四五六日天1-7]");
     private static readonly Regex Clock = MakeRegex(
-        @"(?<!\d)(?:(?<period>上午|下午|晚上|凌晨|中午|午前|午後)\s*)?(?<hour>\d{1,2}|[零〇一二两兩三四五六七八九十]{1,3})\s*(?::\s*(?<minute>\d{2})(?!\d)|(?:時|时|点|點|h\b)\s*(?:(?<minute>\d{1,2}|[零〇一二两兩三四五六七八九十]{1,3})\s*分?|(?<half>半))?)\s*(?<ampm>a\.?m\.?|p\.?m\.?)?");
+        @"(?<!\d)(?:(?<period>上午|下午|晚上|凌晨|中午|午前|午後)\s*)?(?<hour>\d{1,2}|[零〇一二两兩三四五六七八九十]{1,3})\s*(?::\s*(?<minute>\d{2})(?!\d)|(?<clockUnit>時|时|点|點|h\b)\s*(?:(?<minute>\d{1,2}|[零〇一二两兩三四五六七八九十]{1,3})\s*分?|(?<half>半))?)\s*(?<ampm>a\.?m\.?|p\.?m\.?)?");
+    private static readonly Regex ClockWordContinuation = MakeRegex(@"\G(?:期|代|间|間|刻|段|光)");
     private static readonly Regex AmPmClock = MakeRegex(@"(?<!\d)(?<hour>\d{1,2})(?::(?<minute>\d{1,2}))?\s*(?<ampm>a\.?m\.?|p\.?m\.?)\b");
     private static readonly Regex Noon = MakeRegex(@"\b(?:noon|midday|midi|midnight)\b|正午|中午|午夜");
     private static readonly Regex ImplicitClock = MakeRegex(@"\bat\s+(?<hour>\d{1,2})(?=\s*(?:$|[.!?。！？,;()](?!\d)|\b(?:tonight|tomorrow|today|(?:in the|this)\s+(?:morning|afternoon|evening))\b))");
@@ -338,6 +339,18 @@ public static class PageTextSemanticGuard
             if (minute is < 0 or > 59) return match.Value;
             var period = match.Groups["period"].Value;
             var ampm = match.Groups["ampm"].Value.ToLowerInvariant();
+            // 一 in 这一时期 / 同一時間 qualifies a time word, not an hour.
+            // Require a lexical qualifier and a contiguous time word, so bare
+            // 一時代々木で集合 (meet in Yoyogi at one) still protects its clock.
+            // Keep Arabic hours, explicit periods, minutes and half-hours too.
+            var clockHour = match.Groups["hour"];
+            var clockUnit = match.Groups["clockUnit"];
+            if (clockHour.Value == "一" && (clockUnit.Value is "时" or "時")
+                && clockHour.Index > 0 && "这這那同每某任另各".Contains(normalized[clockHour.Index - 1])
+                && clockUnit.Index == clockHour.Index + clockHour.Length
+                && period.Length == 0 && ampm.Length == 0
+                && !match.Groups["minute"].Success && !match.Groups["half"].Success
+                && ClockWordContinuation.IsMatch(normalized, clockUnit.Index + clockUnit.Length)) return match.Value;
             // 一時停止 / 一时停止 means a pause, not a clock time.
             if(hour==1 && period.Length==0 && ampm.Length==0 && !match.Groups["minute"].Success && !match.Groups["half"].Success
                 && match.Value.Contains('一') && normalized.AsSpan(match.Index+match.Length).StartsWith("停止",StringComparison.Ordinal)) return match.Value;
