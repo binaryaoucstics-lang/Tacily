@@ -22,7 +22,7 @@ public enum ThemePreference
 
 public sealed record AppSettings
 {
-    public const int CurrentVersion = 16;
+    public const int CurrentVersion = 17;
 
     public int Version { get; init; } = CurrentVersion;
 
@@ -83,6 +83,7 @@ public sealed record AppSettings
     public BrowserPageJudgementMode BrowserPageJudgementMode { get; init; } = BrowserPageJudgementMode.Rules;
 
     public int BrowserPageTranslationConcurrency { get; init; } = 10;
+    public int BrowserChineseProseShareThresholdPercent { get; init; } = PageTranslationDecision.DefaultChineseProseShareThresholdPercent;
     public bool BrowserPageCacheEnabled { get; init; } = true;
     public int BrowserPageCacheMegabytes { get; init; } = 256;
 
@@ -146,6 +147,7 @@ public sealed record AppSettings
             TriggerMode = Enum.IsDefined(TriggerMode) ? TriggerMode : TranslationTriggerMode.ClickOrDrag,
             BrowserPageJudgementMode = Enum.IsDefined(BrowserPageJudgementMode) ? BrowserPageJudgementMode : BrowserPageJudgementMode.Rules,
             BrowserPageTranslationConcurrency = Math.Clamp(BrowserPageTranslationConcurrency, 1, 10),
+            BrowserChineseProseShareThresholdPercent = PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(BrowserChineseProseShareThresholdPercent),
             BrowserPageCacheMegabytes = Math.Clamp(BrowserPageCacheMegabytes, 32, 2048),
             DisplayMode = DisplayMode.SidePanel,
         };

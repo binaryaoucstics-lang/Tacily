@@ -10,7 +10,7 @@ public enum BrowserPageJudgementMode { Rules = 1 }
 public sealed record PageTextSample(string Text, string Kind = "body", string? LanguageHint = null);
 public sealed record PageTextStatistics(int TotalCharacters = 0, int HanCharacters = 0, int KanaCharacters = 0,
     int LatinCharacters = 0, int ProseBlocks = 0, int HanProseCharacters = 0,
-    int LatinProseCharacters = 0, int KanaProseCharacters = 0);
+    int LatinProseCharacters = 0, int KanaProseCharacters = 0, int NonChineseProseCharacters = 0);
 public sealed record PageTranslationAssessment(bool NeedsTranslation, string Reason, double Confidence,
     string DetectedLanguage, bool IsMixedTargetLanguage)
 {
@@ -23,12 +23,19 @@ public sealed record PageTranslationEvidence(PageTranslationAssessment RuleDecis
 /// <summary>Bounded Unicode, prose and common-word rules. No weights, model loading or network.</summary>
 public static partial class PageTranslationDecision
 {
-    public const string PolicyVersion = "page-program-prose-2";
+    public const string PolicyVersion = "page-program-prose-3";
+    public const int DefaultChineseProseShareThresholdPercent = 50;
+    public const int MinimumChineseProseShareThresholdPercent = 10;
+    public const int MaximumChineseProseShareThresholdPercent = 90;
     public const int MaximumBlocks = 600;
     public const int MaximumSampleCharacters = 24_000;
 
+    public static int NormalizeChineseProseShareThresholdPercent(int value) =>
+        Math.Clamp(value, MinimumChineseProseShareThresholdPercent, MaximumChineseProseShareThresholdPercent);
+
     public static PageTranslationEvidence Inspect(IReadOnlyList<PageTextSample> samples, string targetLanguage,
-        PageTextStatistics? statistics = null)
+        PageTextStatistics? statistics = null,
+        int chineseProseShareThresholdPercent = DefaultChineseProseShareThresholdPercent)
     {
         ArgumentNullException.ThrowIfNull(samples);
         var target = NormalizeLanguage(targetLanguage);

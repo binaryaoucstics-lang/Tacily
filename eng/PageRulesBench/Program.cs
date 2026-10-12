@@ -9,13 +9,15 @@ var results = new List<object>();
 foreach (var page in corpus.Pages.Where(page => page.Success))
 {
     var cold = Stopwatch.StartNew();
-    var decision = PageTranslationDecision.Inspect(page.Samples, "zh-CN", page.Statistics).RuleDecision;
+    var decision = PageTranslationDecision.Inspect(page.Samples, "zh-CN", page.Statistics,
+        PageTranslationDecision.DefaultChineseProseShareThresholdPercent).RuleDecision;
     var coldMs = cold.Elapsed.TotalMilliseconds;
     var measurements = new List<double>();
     for (var repeat = 0; repeat < 100; repeat++)
     {
         var start = Stopwatch.GetTimestamp();
-        _ = PageTranslationDecision.Inspect(page.Samples, "zh-CN", page.Statistics);
+        _ = PageTranslationDecision.Inspect(page.Samples, "zh-CN", page.Statistics,
+            PageTranslationDecision.DefaultChineseProseShareThresholdPercent);
         measurements.Add(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }
     measurements.Sort();

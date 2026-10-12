@@ -164,7 +164,10 @@ internal sealed class JsonlHost : IAsyncDisposable
         if (rule.Mode is "allow" or "block")
             return new(rule.Mode == "allow", rule.Mode, 1, "", false)
                 { ReasonCode = rule.Mode == "allow" ? "site-whitelist" : "site-blacklist" };
-        return PageTranslationDecision.Inspect(candidate.Samples ?? [], settings.TargetLanguage, candidate.Statistics).RuleDecision;
+        // Formal page-judgement runs use one fixed product baseline. A user's
+        // personalized application threshold must not change benchmark results.
+        return PageTranslationDecision.Inspect(candidate.Samples ?? [], settings.TargetLanguage, candidate.Statistics,
+            PageTranslationDecision.DefaultChineseProseShareThresholdPercent).RuleDecision;
     }
 
     private PageTranslationAssessment AssessDocument(Work work)

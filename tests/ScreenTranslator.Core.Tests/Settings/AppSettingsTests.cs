@@ -29,6 +29,7 @@ public sealed class AppSettingsTests
         Assert.False(settings.BrowserAutoPageTranslationEnabled);
         Assert.Equal(BrowserPageJudgementMode.Rules, settings.BrowserPageJudgementMode);
         Assert.Equal(10, settings.BrowserPageTranslationConcurrency);
+        Assert.Equal(50, settings.BrowserChineseProseShareThresholdPercent);
         Assert.True(settings.MinimizeToTray);
         Assert.True(settings.ShowTrayIcon);
         Assert.Null(settings.SidePanelPlacement);
@@ -60,6 +61,7 @@ public sealed class AppSettingsTests
         Assert.False(migrated.BrowserAutoPageTranslationEnabled);
         Assert.Equal(BrowserPageJudgementMode.Rules, migrated.BrowserPageJudgementMode);
         Assert.Equal(10, migrated.BrowserPageTranslationConcurrency);
+        Assert.Equal(50, migrated.BrowserChineseProseShareThresholdPercent);
         Assert.True(migrated.BriefThinkingGuidanceEnabled);
         Assert.True(migrated.BoundedLowThinkingEnabled);
         Assert.True(migrated.MinimizeToTray);
@@ -82,6 +84,7 @@ public sealed class AppSettingsTests
             BrowserAutoPageTranslationEnabled = true,
             BrowserPageJudgementMode = BrowserPageJudgementMode.Rules,
             BrowserPageTranslationConcurrency = 6,
+            BrowserChineseProseShareThresholdPercent = 70,
             BriefThinkingGuidanceEnabled = false,
             BoundedLowThinkingEnabled = false,
         };
@@ -130,6 +133,7 @@ public sealed class AppSettingsTests
         {
             Version = 7, BrowserAutoPageTranslationEnabled = true,
             BrowserPageJudgementMode = mode, BrowserPageTranslationConcurrency = 4,
+            BrowserChineseProseShareThresholdPercent = 60,
         };
         var restored = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(settings))!;
 
@@ -138,6 +142,7 @@ public sealed class AppSettingsTests
         Assert.True(migrated.BrowserAutoPageTranslationEnabled);
         Assert.Equal(mode, migrated.BrowserPageJudgementMode);
         Assert.Equal(4, migrated.BrowserPageTranslationConcurrency);
+        Assert.Equal(60, migrated.BrowserChineseProseShareThresholdPercent);
         Assert.False(migrated.BrowserAutoImageTranslationEnabled);
     }
 
@@ -161,5 +166,19 @@ public sealed class AppSettingsTests
 
         Assert.Equal(expected, migrated.BrowserPageTranslationConcurrency);
         Assert.Equal(BrowserPageJudgementMode.Rules, migrated.BrowserPageJudgementMode);
+    }
+
+    [Theory]
+    [InlineData(-10, 10)]
+    [InlineData(0, 10)]
+    [InlineData(10, 10)]
+    [InlineData(50, 50)]
+    [InlineData(90, 90)]
+    [InlineData(100, 90)]
+    public void Migration_Clamps_Chinese_Prose_Share_Threshold(int threshold, int expected)
+    {
+        var migrated = new AppSettings { BrowserChineseProseShareThresholdPercent = threshold }.Migrate(out _);
+
+        Assert.Equal(expected, migrated.BrowserChineseProseShareThresholdPercent);
     }
 }
