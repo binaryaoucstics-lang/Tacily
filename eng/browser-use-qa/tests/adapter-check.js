@@ -59,6 +59,11 @@ function assertCompleteSources(value) {
         "rendered", "ancestorsVisible", "inViewport", "displayedText", "phase"])
       assert.ok(Object.hasOwn(row, key), `${row.id} missing ${key}`);
     assert.ok(row.rects.some(rect => rect.width > 0 && rect.height > 0), `${row.id} lacks observed geometry`);
+    for (const rect of row.rects) {
+      for (const key of ["x", "y", "width", "height", "documentX", "documentY"])
+        assert.ok(Number.isFinite(rect[key]), `${row.id} has non-finite ${key}`);
+      assert.ok(rect.width > 0 && rect.height > 0, `${row.id} has nonpositive extent`);
+    }
     assert.ok(!["SCRIPT", "STYLE"].includes(row.tag));
   }
 }
@@ -346,6 +351,144 @@ assert.equal(find(sample, retract), undefined);
 assert.equal(sample.events.filter(event => event.type === "retraction").length, retractionCount);
 assert.equal(sample.sourceNodes.find(row => row.id === observed.id).currentlyRendered, false);
 assertCompleteSources(sample);
+// Ordinary Range and element boxes may expose edges, dimensions, or both.
+// All variants must supply the same independent evidence without a prediction.
+const representations = [
+  rect,
+  (x, y, width, height) => ({ left: x, top: y, right: x + width, bottom: y + height }),
+  (x, y, width, height) => ({ left: x, top: y, width, height }),
+  (x, y, width, height) => ({ x, y, right: x + width, bottom: y + height }),
+  (x, y, width, height) => ({ ...rect(x, y, width, height), left: x, top: y, right: x + width, bottom: y + height })
+];
+const represented = text("P", "Independent source with ordinary rectangle representations.");
+let representedId;
+for (const [index, representation] of representations.entries()) {
+  represented.rects = [representation(-15, 1800, 120, 20)];
+  const value = qa.sample(`range-representation-${index}`), row = find(value, represented);
+  assert.ok(row, `ordinary range representation ${index} must be independently observed`);
+  representedId ||= row.id;
+  assert.equal(row.id, representedId);
+  assert.equal(row.rendered, true); assert.equal(row.inViewport, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(row.rects)), [
+    { ...rect(-15, 1800, 120, 20), documentX: -15, documentY: 1800 }]);
+  assert.ok(!value.predictions.some(prediction => prediction.sourceId === row.id));
+  assertCompleteSources(value);
+}
+const representedClip = wrap(represented, rect(0, 1700, 120, 300), { overflowX: "hidden", overflowY: "visible" });
+Object.assign(representedClip, { offsetWidth: 60, offsetHeight: 150, clientLeft: 5, clientTop: 0,
+  clientWidth: 40, clientHeight: 150 });
+for (const [rangeIndex, rangeRepresentation] of representations.entries()) {
+  for (const [boxIndex, boxRepresentation] of representations.entries()) {
+    represented.rects = [rangeRepresentation(-20, 1800, 100, 20), rangeRepresentation(100, 1800, 20, 20)];
+    representedClip.getBoundingClientRect = () => boxRepresentation(0, 1700, 120, 300);
+    const value = qa.sample(`clip-representation-${rangeIndex}-${boxIndex}`), row = find(value, represented);
+    assert.deepEqual(JSON.parse(JSON.stringify(row.rects)), [
+      { ...rect(10, 1800, 70, 20), documentX: 10, documentY: 1800 }]);
+    assert.equal(row.inViewport, false);
+    assertCompleteSources(value);
+  }
+}
+// Unknown or impossible ranges cannot be promoted by completed predictions.
+const invalidRects = [
+  {}, null, { width: 100, height: 20 },
+  { x: NaN, y: 0, width: 100, height: 20 },
+  { left: 0, top: 0, right: Infinity, bottom: 20 },
+  { x: Infinity, y: 0, width: 100, height: 20 },
+  { x: 0, y: 0, width: NaN, height: 20 },
+  { x: 0, y: 0, width: 100, height: -1 },
+  { left: 10, top: 0, right: 0, bottom: 20 },
+  { x: 0, y: 0, width: 100, height: 20, left: 1 },
+  { x: 0, y: 0, width: 100, height: 20, right: 90 },
+  { x: 0, y: "0", width: 100, height: 20 },
+  { x: 0, y: 0, width: null, height: 20 },
+  { x: 1e308, y: 0, width: 1e308, height: 20 }
+];
+const invalidSource = text("P", "Prediction with no independently known geometry.");
+predict("invalid-geometry", invalidSource);
+for (const [index, invalid] of [...invalidRects, rect(0, 0, 0, 20)].entries()) {
+  invalidSource.rects = [invalid];
+  const value = qa.sample(`invalid-range-${index}`);
+  assert.equal(find(value, invalidSource), undefined);
+  assert.ok(!value.sourceNodes.some(row => row.sourceText === invalidSource.nodeValue));
+  assert.equal(value.predictions.find(prediction => prediction.id === "invalid-geometry").sourceEvidence, "unmatched");
+  assertCompleteSources(value);
+}
+// A good fragment can still be observed alongside an unknown fragment, but
+// only its finite positive geometry enters the source row.
+invalidSource.rects = [invalidRects[3], { left: 5, top: 10, right: 105, bottom: 30 }];
+sample = qa.sample("mixed-known-ranges");
+assert.equal(find(sample, invalidSource).rects.length, 1);
+assertCompleteSources(sample);
+
+// Edge-only retained blank evidence follows scroll and current clipping. Empty
+// and known zero-area ranges retain geometry; unknown ranges do not retract.
+const retained = text("P", "Edge-only source retained through blank translation.");
+const edgeRect = representations[1];
+const retainedBox = wrap(retained, edgeRect(0, 90, 60, 60), { overflow: "hidden" });
+const retainedRecord = { node: retained, source: retained.nodeValue, lastWritten: "保留译文", groupElement: retained.parentElement };
+state.records.set(retained, retainedRecord);
+function restoreRetained() {
+  context.scrollX = context.scrollY = 0;
+  retainedBox.getBoundingClientRect = () => edgeRect(0, 90, 60, 60);
+  delete retainedBox.clientWidth;
+  retained.rects = [edgeRect(-20, 100, 100, 20)];
+  retained.nodeValue = retainedRecord.lastWritten = "保留译文";
+  return qa.sample("edge-translation-restored");
+}
+let retainedObservation = find(restoreRetained(), retained);
+retained.nodeValue = retainedRecord.lastWritten = ""; retained.rects = [];
+context.scrollY = 50;
+retainedBox.getBoundingClientRect = () => edgeRect(10, 40, 30, 60);
+sample = qa.sample("edge-blank-clipped-and-scrolled");
+assert.equal(find(sample, retained).rendered, false);
+assert.deepEqual(JSON.parse(JSON.stringify(find(sample, retained).rects)), [
+  { ...rect(10, 50, 30, 20), documentX: 10, documentY: 100 }]);
+assert.equal(find(sample, retained).firstSeen, retainedObservation.firstSeen);
+assertCompleteSources(sample);
+for (const [index, invalid] of invalidRects.entries()) {
+  const before = restoreRetained(), count = before.events.filter(event => event.type === "retraction").length;
+  const history = before.sourceNodes.find(row => row.id === retainedObservation.id);
+  retained.nodeValue = retainedRecord.lastWritten = ""; retained.rects = [invalid];
+  sample = qa.sample(`edge-blank-unknown-range-${index}`);
+  assert.equal(find(sample, retained), undefined);
+  assert.equal(sample.events.filter(event => event.type === "retraction").length, count);
+  history.currentlyRendered = false;
+  assert.deepEqual(sample.sourceNodes.find(row => row.id === retainedObservation.id), history);
+  assertCompleteSources(sample);
+}
+const invalidBlankLayouts = [
+  () => { retainedBox.getBoundingClientRect = () => undefined; },
+  () => { retainedBox.getBoundingClientRect = () => ({ left: 0, top: 90, right: NaN, bottom: 150 }); },
+  () => { retainedBox.getBoundingClientRect = () => ({ left: 60, top: 90, right: 0, bottom: 150 }); },
+  () => { retainedBox.clientWidth = Infinity; },
+  () => { context.scrollY = NaN; },
+  () => { context.scrollX = Infinity; },
+  () => { retainedBox.getBoundingClientRect = () => edgeRect(1000, 90, 60, 60); }
+];
+for (const [index, invalidate] of invalidBlankLayouts.entries()) {
+  const before = restoreRetained(), count = before.events.filter(event => event.type === "retraction").length;
+  const history = before.sourceNodes.find(row => row.id === retainedObservation.id);
+  retained.nodeValue = retainedRecord.lastWritten = ""; retained.rects = [];
+  invalidate();
+  sample = qa.sample(`edge-blank-unknown-layout-${index}`);
+  assert.equal(find(sample, retained), undefined);
+  assert.equal(sample.events.filter(event => event.type === "retraction").length, count);
+  history.currentlyRendered = false;
+  assert.deepEqual(sample.sourceNodes.find(row => row.id === retainedObservation.id), history);
+  assertCompleteSources(sample);
+}
+restoreRetained();
+retained.nodeValue = retainedRecord.lastWritten = "";
+retained.rects = [edgeRect(0, 0, 0, 0)];
+sample = qa.sample("edge-blank-known-zero-area");
+assert.equal(find(sample, retained).rects[0].width, 60);
+assertCompleteSources(sample);
+// Overflow in document coordinate addition cannot emit source positions.
+const overflowPosition = text("P", "Finite viewport coordinates with impossible document position.");
+overflowPosition.rects = [rect(1e308, 0, 1e307, 20)];
+context.scrollX = 1e308;
+assert.equal(find(qa.sample("document-position-overflow"), overflowPosition), undefined);
+context.scrollX = 0;
 const packet = { type: "pageAutoCandidate", blocks: [{ id: "b", text: record.source }] };
 const promise = environment.send(packet);
 const outgoing = qa.drain(); assert.equal(outgoing[0].message, packet); assert.equal(qa.drain().length, 0);
