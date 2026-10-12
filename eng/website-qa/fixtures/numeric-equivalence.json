@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Public development phrases with hand-authored local guard expectations; not real quality evidence",
+  "sources": [
+    {
+      "url": "https://en.wikipedia.org/wiki/Machine_translation",
+      "text": "in the 1960s, was used by Xerox to translate technical manuals (1978). Beginning in the late 1980s, as",
+      "safeTranslation": "在20世纪60年代，被施乐公司用于翻译技术手册（1978年）。从20世纪80年代末开始，随着",
+      "unsafeTranslation": "在21世纪60年代，被施乐公司用于翻译技术手册（1978年）。从20世纪80年代末开始，随着"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Machine_translation",
+      "text": "1990s and early 2000s",
+      "safeTranslation": "1990年代和2000年代初",
+      "unsafeTranslation": "20世纪90年代至21世纪初"
+    },
+    {
+      "url": "https://www.stanford.edu/academics/",
+      "text": "The 7 Schools",
+      "safeTranslation": "七所学校",
+      "unsafeTranslation": "八所学校"
+    }
+  ]
+}
