@@ -23,34 +23,27 @@ public sealed class FinancialParagraphRegressionTests
     private static readonly TimeSpan TestDeadline = TimeSpan.FromSeconds(8);
 
     [Fact]
-    public async Task FinancialInlineParagraphStreamsCompletesAndReusesAllNodesAcrossNewDomIds()
+    public async Task FinancialInlineParagraphStagesCompletesAndReusesPersistedNodesAcrossNewDomIds()
     {
-        await using var cache = new BrowserPageTranslationCache();
+        using var directory = new TestDirectory();
+        await using var cache = new BrowserPageTranslationCache(directory: directory.Path);
         var provider = new FinancialProvider(wrongEuroMagnitude: false);
         var creations = 0;
         var service = new BrowserPageTranslationService(_ =>
         { Interlocked.Increment(ref creations); return provider; }, cache: cache);
         var source = Source("first-dom", "first-paragraph");
         var updates = new ConcurrentQueue<BrowserPageTranslationUpdate>();
-        var prefixIds = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
-        var allPrefixesVisible = Signal();
         var job = service.TranslateAsync(source, Options(), (update, _) =>
         {
             updates.Enqueue(update);
-            if (!update.Failed && !update.IsComplete && update.Translation.Length > 0)
-            {
-                prefixIds.TryAdd(update.Id, 0);
-                if (prefixIds.Count == source.Length) allPrefixesVisible.TrySetResult();
-            }
             return ValueTask.CompletedTask;
         }, CancellationToken.None);
         try
         {
-            await allPrefixesVisible.Task.WaitAsync(TestDeadline);
+            await provider.PrefixReported.Task.WaitAsync(TestDeadline);
             Assert.False(job.IsCompleted);
             Assert.Equal(0, cache.Count);
-            Assert.All(updates, update =>
-            { Assert.False(update.Failed); Assert.False(update.IsComplete); Assert.False(update.FromCache); });
+            Assert.Empty(updates);
         }
         finally { provider.ReleaseFinal.TrySetResult(); }
 
@@ -69,19 +62,19 @@ public sealed class FinancialParagraphRegressionTests
             var complete = Assert.Single(updates, update => update.Id == block.Id && update.IsComplete);
             Assert.Equal(Translation(block.Text, wrongEuroMagnitude: false), complete.Translation);
             Assert.False(complete.FromCache);
-            var forNode = updates.Where(update => update.Id == block.Id).ToArray();
-            Assert.True(forNode.Length >= 2);
-            Assert.True(forNode[^1].IsComplete);
-            Assert.All(forNode, update => Assert.StartsWith(update.Translation, complete.Translation));
+            Assert.Single(updates, update => update.Id == block.Id);
         });
         AssertPageOnlyRequest(Assert.Single(provider.Requests));
 
         // A new page snapshot and a recreated service use source/group content,
         // independent of transient DOM IDs or the paragraph's own identifier.
+        await cache.FlushAsync();
+        await cache.DisposeAsync();
+        await using var persisted = new BrowserPageTranslationCache(directory: directory.Path);
         var reopened = Source("replacement-dom", "replacement-paragraph");
         var cacheUpdates = new ConcurrentQueue<BrowserPageTranslationUpdate>();
         var cachedService = new BrowserPageTranslationService(_ =>
-            throw new InvalidOperationException("A complete cached paragraph must not create a provider."), cache: cache);
+            throw new InvalidOperationException("A complete cached paragraph must not create a provider."), cache: persisted);
         var restored = await cachedService.TranslateAsync(reopened, Options(), (update, _) =>
         { cacheUpdates.Enqueue(update); return ValueTask.CompletedTask; }, CancellationToken.None).WaitAsync(TestDeadline);
         Assert.Equal(0, restored.RequestCount);
@@ -98,33 +91,34 @@ public sealed class FinancialParagraphRegressionTests
     }
 
     [Fact]
-    public async Task WrongEuroMagnitudeRetractsWholeInlineGroupAndCannotBeReusedFromCache()
+    public async Task WrongEuroMagnitudeIsNeverDisplayedAndRejectedHistoryStopsRepeatedInlineRetries()
     {
         await using var cache = new BrowserPageTranslationCache();
         var provider = new FinancialProvider(wrongEuroMagnitude: true);
         var service = new BrowserPageTranslationService(_ => provider, cache: cache);
         var source = Source("first-dom", "first-paragraph");
         var updates = new ConcurrentQueue<BrowserPageTranslationUpdate>();
-        var firstPrefix = Signal();
         var job = service.TranslateAsync(source, Options(), (update, _) =>
         {
             updates.Enqueue(update);
-            if (!update.Failed && !update.IsComplete && update.Translation.Length > 0) firstPrefix.TrySetResult();
             return ValueTask.CompletedTask;
         }, CancellationToken.None);
         try
         {
-            await firstPrefix.Task.WaitAsync(TestDeadline);
+            await provider.PrefixReported.Task.WaitAsync(TestDeadline);
             Assert.False(job.IsCompleted);
             Assert.Equal(0, cache.Count);
+            Assert.Empty(updates);
         }
         finally { provider.ReleaseFinal.TrySetResult(); }
 
         var result = await job.WaitAsync(TestDeadline);
-        Assert.Equal(1, result.RequestCount);
+        Assert.Equal(2, result.RequestCount);
+        Assert.Equal(2, provider.Calls);
         AssertRejected(result);
         Assert.Equal(0, cache.Count);
         Assert.DoesNotContain(updates, update => update.IsComplete);
+        Assert.All(updates, update => { Assert.True(update.Failed); Assert.Empty(update.Translation); });
         Assert.All(source, block => Assert.Contains(updates,
             update => update.Id == block.Id && update.Failed && update.Translation.Length == 0));
 
@@ -135,7 +129,7 @@ public sealed class FinancialParagraphRegressionTests
         Assert.Equal(0, repeated.CacheHits);
         AssertRejected(repeated);
         Assert.Equal(0, cache.Count);
-        Assert.Equal(2, provider.Calls);
+        Assert.Equal(3, provider.Calls);
     }
 
     private static BrowserPageTextBlock[] Source(string prefix, string groupId) =>
@@ -191,6 +185,7 @@ public sealed class FinancialParagraphRegressionTests
         private int _calls;
         public int Calls => Volatile.Read(ref _calls);
         public TaskCompletionSource ReleaseFinal { get; } = Signal();
+        public TaskCompletionSource PrefixReported { get; } = Signal();
         public ConcurrentQueue<TranslationRequest> Requests { get; } = new();
 
         public Task<string> TranslateRawAsync(TranslationRequest request, CancellationToken token)
@@ -210,9 +205,16 @@ public sealed class FinancialParagraphRegressionTests
                     { IsComplete = false };
                 }).ToArray()
             });
+            PrefixReported.TrySetResult();
             await ReleaseFinal.Task.WaitAsync(token);
             return JsonSerializer.Serialize(new
             { blocks = request.Blocks.Select(block => new { id = block.Id, translation = Translation(block.Text, wrongEuroMagnitude) }) });
         }
+    }
+
+    private sealed class TestDirectory : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(Environment.CurrentDirectory, "work", "financial-paragraph-tests", Guid.NewGuid().ToString("N"));
+        public void Dispose() { if (Directory.Exists(Path)) Directory.Delete(Path, recursive: true); }
     }
 }
