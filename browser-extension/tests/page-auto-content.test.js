@@ -1621,6 +1621,131 @@ test("changed inline context invalidates its entire group while unrelated transl
   assert.equal(f.candidate().blocks.length, 3); assert.ok(f.candidate().blocks.every(block => /Friday, May 9/u.test(block.context)));
   assert.equal(f.session.receive(message(old, "pageAutoTranslations", { updates: [{ id: old.blocks[0].id, text: "周四", complete: true }], finished: true })), false); f.session.dispose();
 });
+
+test("completed nested navigation survives regrouping after an unrelated backend failure with the same IDs and source owner", async () => {
+  const source = "Translated books", node = new Text(source), link = new Element("A", [node], { href: "/wiki/Translated_books" });
+  const row = new Element("DIV", [link]), list = new Element("UL", [new Element("LI", [row])]);
+  const peer = paragraph("An unrelated article paragraph fails while the completed navigation remains visible.");
+  const f = fixture([new Element("NAV", [list]), peer.element]); const writes = trackTextWrites(node);
+  await enabled(f); const first = f.candidate(); approved(f);
+  const label = first.blocks.find(block => block.text === source);
+  f.session.receive(message(first, "pageAutoTranslations", { updates: [{ id: label.id, text: "翻译书籍", complete: true }] }));
+  f.session.receive(message(first, "pageAutoTranslations", { finished: true, error: "translation_incomplete" }));
+  assert.equal(f.statuses.at(-1).state, "failed"); assert.equal(f.statuses.at(-1).failedCount, 1);
+  const assertRetained = current => {
+    const record = f.session.inspect().records.get(current), block = f.session.inspect().blocks.get(label.id);
+    assert.equal(current.nodeValue, "翻译书籍"); assert.equal(record.source, source);
+    assert.equal(record.pieces[0].id, label.id); assert.equal(record.groupId, label.groupId);
+    assert.equal(block.record, record); assert.equal(block.piece.complete, true); assert.equal(block.piece.failed, false);
+    assert.equal(f.candidates().length, 1);
+  };
+  assertRetained(node);
+  // Adding a decorative sibling changes groupElement from A to DIV even though
+  // the independently authored link and its entire semantic source are intact.
+  const decoration = new Element("SPAN"); row.append(decoration);
+  f.session.mutated([{ type: "childList", target: row, addedNodes: [decoration], removedNodes: [] }]);
+  assertRetained(node); await tick(); assertRetained(node);
+  row.style.display = "none"; f.session.mutated([{ type: "attributes", target: row, attributeName: "style" }]); await tick();
+  row.style.display = "block"; f.session.mutated([{ type: "attributes", target: row, attributeName: "style" }]); await tick();
+  assertRetained(node);
+  // A whole rendered clone moves ownership to real new Text nodes, then a
+  // parent replacement moves the same nodes again without changing the source.
+  const cloneNode = new Text(node.nodeValue), cloneLink = new Element("A", [cloneNode], { href: link.getAttribute("href") });
+  const clone = new Element("DIV", [cloneLink, new Element("SPAN")]); node.isConnected = false;
+  list.childNodes[0].childNodes = []; list.childNodes[0].append(clone);
+  f.session.mutated([{ type: "childList", target: list.childNodes[0], removedNodes: [row], addedNodes: [clone] }]);
+  assertRetained(cloneNode); await tick(); assertRetained(cloneNode);
+  clone.childNodes = []; const nextParent = new Element("DIV", [cloneLink, new Element("SPAN")]);
+  list.childNodes[0].childNodes = []; list.childNodes[0].append(nextParent);
+  f.session.mutated([{ type: "childList", target: list.childNodes[0], removedNodes: [clone], addedNodes: [nextParent] }]);
+  assertRetained(cloneNode); await tick(); assertRetained(cloneNode);
+  f.session.layoutChanged(); await new Promise(resolve => setTimeout(resolve, 140)); await tick(); assertRetained(cloneNode);
+  assert.deepEqual(writes, ["翻译书籍"]);
+  assert.equal(f.session.inspect().records.has(node), false);
+  f.session.control("view-original"); assert.equal(cloneNode.nodeValue, source);
+  f.session.control("view-bilingual"); assert.equal(cloneNode.nodeValue, source); assert.equal(f.session.inspect().annotations.size, 1);
+  f.session.control("view-translation"); assertRetained(cloneNode);
+  f.session.control("pause"); assert.equal(cloneNode.nodeValue, source); assert.equal(f.session.inspect().annotations.size, 0);
+  f.session.dispose();
+});
+
+test("a newly visible navigation sibling cannot retract a completed independent link or reuse its failure", async () => {
+  const node = new Text("Translated books"), link = new Element("A", [node]);
+  const row = new Element("DIV", [link]), f = fixture([new Element("NAV", [new Element("UL", [new Element("LI", [row])])]),
+    paragraph("An independent article supplies the language evidence while its backend result fails.").element]);
+  const writes = trackTextWrites(node); await enabled(f); const first = f.candidate(); approved(f);
+  const label = first.blocks.find(block => block.text === "Translated books");
+  f.session.receive(message(first, "pageAutoTranslations", { updates: [{ id: label.id, text: "翻译书籍", complete: true }], finished: true, error: "translation_incomplete" }));
+  const sibling = new Element("SPAN", [new Text("Related publications")]); row.append(sibling);
+  f.session.mutated([{ type: "childList", target: row, addedNodes: [sibling], removedNodes: [] }]); await tick();
+  assert.equal(node.nodeValue, "翻译书籍"); assert.deepEqual(writes, ["翻译书籍"]);
+  const record = f.session.inspect().records.get(node);
+  assert.equal(record.source, "Translated books"); assert.equal(record.pieces[0].id, label.id); assert.equal(record.groupId, label.groupId);
+  assert.equal(f.candidates().length, 2); assert.deepEqual(f.candidate().blocks.map(block => block.text), ["Related publications"]);
+  f.session.receive(message(f.candidate(), "pageAutoTranslations", { finished: true, error: "translation_incomplete" }));
+  assert.equal(f.statuses.at(-1).failedCount, 2); assert.equal(f.statuses.at(-1).state, "failed");
+  assert.equal(node.nodeValue, "翻译书籍"); assert.equal(f.session.inspect().blocks.get(label.id).piece.failed, false);
+  sibling.style.display = "none"; f.session.mutated([{ type: "attributes", target: sibling, attributeName: "style" }]); await tick();
+  sibling.style.display = "block"; f.session.mutated([{ type: "attributes", target: sibling, attributeName: "style" }]); await tick();
+  assert.equal(node.nodeValue, "翻译书籍"); assert.deepEqual(writes, ["翻译书籍"]); assert.equal(f.candidates().length, 2);
+  node.nodeValue = "Translated journals"; f.session.mutated([{ type: "characterData", target: node }]); await tick();
+  assert.equal(node.nodeValue, "Translated journals"); assert.equal(f.session.inspect().blocks.has(label.id), false);
+  assert.deepEqual(f.candidate().blocks.map(block => block.text), ["Translated journals"]);
+  f.session.dispose();
+});
+
+test("moving an entire completed nested list source rebinds its semantic parent but changed inline facts do not", async () => {
+  const source = "Translated books", node = new Text(source), link = new Element("A", [new Element("SPAN", [node])]);
+  const oldRow = new Element("LI", [link]), list = new Element("UL", [oldRow]);
+  const f = fixture([new Element("NAV", [list]), paragraph("The main English article provides the independent language evidence.").element]);
+  await enabled(f); const first = f.candidate(), label = first.blocks.find(block => block.text === source); approved(f); finish(f, first, "翻译书籍");
+  oldRow.childNodes = []; const row = new Element("LI", [link]); list.childNodes = []; list.append(row);
+  f.session.mutated([{ type: "childList", target: list, removedNodes: [oldRow], addedNodes: [row] }]);
+  assert.equal(node.nodeValue, "翻译书籍"); await tick();
+  const record = f.session.inspect().records.get(node);
+  assert.equal(record.groupElement, row); assert.equal(record.pieces[0].id, label.id); assert.equal(record.groupId, label.groupId);
+  assert.equal(f.session.inspect().blocks.get(label.id).record, record); assert.equal(f.candidates().length, 1);
+  // A list sentence still shares context with its link: inserting a new fact
+  // must retire that whole sentence, even with the same Text-node identities.
+  const fact = new Text(" published in 2012"); row.append(fact);
+  f.session.mutated([{ type: "childList", target: row, addedNodes: [fact], removedNodes: [] }]);
+  assert.equal(node.nodeValue, source); await tick();
+  assert.ok(f.candidate().blocks.every(block => block.context.includes("2012")));
+  assert.equal(f.session.inspect().blocks.has(label.id), false); f.session.dispose();
+});
+
+test("navigation inline prose retains its whole changed fact context through nested links", async () => {
+  for (const tag of ["P", "LI", "DIV"]) {
+    const prefix = new Text("The deadline is "), date = new Text("Thursday, May 8"), suffix = new Text(" and registration costs 12 dollars.");
+    const container = new Element(tag, [prefix, new Element("SPAN", [new Element("A", [date])]), suffix]);
+    const f = fixture([new Element("NAV", [container]), paragraph("Independent main article prose admits the public page for translation.").element]);
+    await enabled(f); const first = f.candidate(); approved(f); finish(f);
+    const label = first.blocks.find(block => block.text === "Thursday, May 8");
+    assert.ok(first.blocks.filter(block => block.groupId === label.groupId).every(block => block.context.includes("12 dollars")));
+    date.nodeValue = "Friday, May 9"; f.session.mutated([{ type: "characterData", target: date }]); await tick();
+    assert.equal(prefix.nodeValue, "The deadline is "); assert.equal(suffix.nodeValue, " and registration costs 12 dollars.");
+    assert.ok(f.candidate().blocks.every(block => block.context.includes("Friday, May 9")));
+    assert.equal(f.session.inspect().blocks.has(label.id), false); f.session.dispose();
+  }
+});
+
+test("completed navigation moved between composed slots still retires its old assignment", async () => {
+  const source = "Translated books", node = new Text(source), link = new Element("A", [node]);
+  const firstSlot = new Element("SLOT"), nextSlot = new Element("SLOT"); let assigned = firstSlot;
+  firstSlot.assignedNodes = () => assigned === firstSlot ? [link] : [];
+  nextSlot.assignedNodes = () => assigned === nextSlot ? [link] : [];
+  link.assignedSlot = firstSlot;
+  const firstRow = new Element("LI", [firstSlot]), nextRow = new Element("LI", [nextSlot]), list = new Element("UL", [firstRow, nextRow]);
+  const f = fixture([new Element("NAV", [list]), paragraph("Independent English article prose provides enough language evidence for translation.").element]);
+  await enabled(f); const first = f.candidate(), label = first.blocks.find(block => block.text === source); approved(f); finish(f);
+  assigned = nextSlot; link.assignedSlot = nextSlot;
+  f.session.mutated([{ type: "childList", target: list, removedNodes: [], addedNodes: [nextRow] }, { type: "slotchange", target: firstSlot }, { type: "slotchange", target: nextSlot }]);
+  assert.equal(node.nodeValue, source); await tick();
+  assert.equal(f.session.inspect().blocks.has(label.id), false); assert.equal(f.session.inspect().records.get(node).groupElement, nextRow);
+  assert.deepEqual([...f.session.inspect().records.get(node).renderSlots], [nextSlot]);
+  assert.equal(f.session.receive(message(first, "pageAutoTranslations", { updates: [{ id: label.id, text: "过期译文", complete: true }], finished: true })), false);
+  f.session.dispose();
+});
 test("scroll-driven hiding and showing retains originals, completed translation and no duplicate candidate", async () => {
   const item = paragraph("This English paragraph is temporarily collapsed by a browser scroll animation."), f = fixture([item.element]); await enabled(f); approved(f); finish(f);
   const source = f.session.inspect().records.get(item.node).source;

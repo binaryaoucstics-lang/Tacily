@@ -91,9 +91,17 @@
       if (parent.tagName === "SPAN" && inlineCalendarLabel(parent)) return parent;
       if (parent.tagName === "A") {
         const container = composedParent(parent);
+        let boundary = container;
+        while (boundary && !semanticTags.has(boundary.tagName) && !["NAV", "HEADER", "FOOTER", "ASIDE", "BODY"].includes(boundary.tagName)) boundary = composedParent(boundary);
+        const proseBoundary = ["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "TD", "TH", "DT", "DD", "BLOCKQUOTE", "FIGCAPTION"].includes(boundary?.tagName);
+        const inlineProse = Array.from(boundary?.childNodes || []).some(child => child.nodeType === 3 && String(child.nodeValue || "").trim());
+        // Independently grouped links in navigation keep their own source
+        // boundary when decorative/label siblings or wrappers are added. Inline
+        // links in a paragraph/list sentence must still share its fact context.
+        if (!isProseGroup(parent) && boundary && !inlineProse && !proseBoundary) return parent;
         // A list/grid of independent article cards is not one paragraph. Keep
         // ordinary links embedded in prose on their existing paragraph group.
-        if (container && !["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "BLOCKQUOTE", "FIGCAPTION"].includes(container.tagName)) {
+        if (container && !proseBoundary && !inlineProse) {
           const authored = Array.from(container.childNodes || []).filter(child => child.nodeType === 1
             || child.nodeType === 3 && String(child.nodeValue || "").trim());
           if (authored.length && authored.every(child => child.nodeType === 1 && child.tagName === "A")) return parent;
@@ -559,6 +567,12 @@
     for (const group of groups.values()) {
       if (sliceExpired()) await yieldSlice();
       const groupBlockStart = blocks.length;
+      const unchanged = group.records.every(record => record.before?.groupId && record.before.source === record.source
+        && record.before.groupElement === group.element && record.before.groupText === group.text);
+      if (unchanged) {
+        group.id = group.records[0].before.groupId;
+        for (const record of group.records) record.groupId = group.id;
+      }
       for (const record of group.records) {
         // Carry a prefix/completed translation only when the whole semantic
         // paragraph is unchanged. A changed date or inline neighbour must not
@@ -610,6 +624,7 @@
           const raw = segment.map(record => record.source).join(""), canonical = canonicalSource(raw).text;
           if (!policy.hasLanguageText(canonical) || policy.skipTranslationText(canonical, { targetLanguage, kind: group.kind, foreignHanContext })) continue;
           const owner = segment.findLast(record => record.source.trim()) || segment.at(-1);
+          const previousId = owner.pieces[0]?.id;
           for (const record of segment) {
             const previous = record.pieces.length === 1 && record.pieces[0].source === record.source ? record.pieces[0] : null;
             const piece = previous ? { ...previous } : { source: record.source, value: record.source };
@@ -619,7 +634,7 @@
           const piece = owner.pieces[0];
           const sourceStart = group.canonical.positions[segment[0].groupSourceStart + raw.match(/^\s*/u)[0].length];
           const complete = piece.complete === true && piece.text === canonical;
-          Object.assign(piece, { id: makeId(), text: canonical, prefix: raw.match(/^\s*/u)[0],
+          Object.assign(piece, { id: complete && previousId || makeId(), text: canonical, prefix: raw.match(/^\s*/u)[0],
             suffix: raw.match(/\s*$/u)[0], complete });
           blocks.push({ id: piece.id, text: piece.text, groupId: group.id, context: group.canonical.text.slice(0, 512),
             contextKind: selectedRanges ? "selection" : "source", ...(group.sourceDigest ? { sourceGroupHash: group.sourceDigest,
@@ -655,7 +670,7 @@
         // Japanese prose is not an independent Chinese label.
         const prefix = piece.source.match(/^\s*/u)[0], suffix = piece.source.match(/\s*$/u)[0];
         const start = group.canonical.positions[pieceAt + prefix.length], end = group.canonical.positions[pieceAt + piece.source.length - suffix.length];
-        Object.assign(piece, { id: makeId(), text: group.canonical.text.slice(start, end), prefix,
+        Object.assign(piece, { id: piece.id || makeId(), text: group.canonical.text.slice(start, end), prefix,
           suffix, complete: piece.complete === true });
         piece.local = localValue !== null;
         if (piece.local) { piece.value = localValue; piece.complete = true; piece.failed = false; piece.cached = true; }
@@ -1338,7 +1353,8 @@
             blocks.delete(id); queue = queue.filter(block => block.id !== id);
             for (const job of jobs.values()) job.ids.delete(id);
           }
-          for (const piece of record.pieces) { piece.value = piece.source; piece.complete = false; piece.failed = false; }
+          delete record.groupId;
+          for (const piece of record.pieces) { delete piece.id; piece.value = piece.source; piece.complete = false; piece.failed = false; }
           // A reassigned slot's old fallback is no longer rendered, but it must
           // still lose the retired group's translation before a later reveal.
           if (record.node.isConnected !== false && record.node.nodeValue === record.lastWritten) {
@@ -1347,6 +1363,41 @@
           }
         }
         removeAnnotation(element);
+      }
+      function rebindRegroupedCompleted() {
+        const previousGroups = new Map();
+        for (const record of records.values()) {
+          if (!previousGroups.has(record.groupElement)) previousGroups.set(record.groupElement, []);
+          previousGroups.get(record.groupElement).push(record);
+        }
+        for (const [beforeElement, previous] of previousGroups) {
+          previous.sort((left, right) => left.groupOrder - right.groupOrder);
+          const element = groupElement(previous[0].node);
+          if (!element || element === beforeElement || previous.some(record => record.node.isConnected === false
+              || groupElement(record.node) !== element)) continue;
+          const kind = /^H[1-6]$/u.test(element.tagName) ? "heading" : isProseGroup(element) ? "body" : "navigation";
+          const source = previous.map(record => record.source).join("");
+          if (previous.some(record => record.groupKind !== kind || record.groupText !== source
+              || record.pieces.some(piece => piece.id && (!piece.complete || piece.failed)))
+              || !previous.some(record => record.pieces.some(piece => piece.id && piece.value !== piece.source))) continue;
+          const nodes = [...walkAccessibleNodes(element)].filter(node => node.nodeType === 3 && groupElement(node) === element
+            && permitted(node, environment.getStyle, environment.fragmentGroups)
+            && (String(node.nodeValue || "").length || previous.some(record => record.atomicOwner))
+            && renderedRecord(records.get(node) || { node }, environment.isRenderedText));
+          // Reparent only the entire proven group, in the same order. This must
+          // never salvage an unchanged fragment from a changed prose paragraph
+          // or carry an old translation across slot reassignment.
+          if (nodes.length !== previous.length || !nodes.every((node, index) => {
+            const record = previous[index];
+            if (node !== record.node || node.nodeValue !== record.source && node.nodeValue !== record.lastWritten) return false;
+            const slots = new Set();
+            for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") slots.add(ancestor);
+            return slots.size === record.renderSlots?.size && [...slots].every(slot => record.renderSlots.has(slot));
+          })) continue;
+          removeAnnotation(beforeElement); removeClonedAnnotations(element);
+          for (const record of previous) { record.groupElement = element; record.lastWritten = record.node.nodeValue; write(record); }
+          renderBilingual(new Set([element]));
+        }
       }
       function rebindUnchangedGroup(element) {
         if (!element) return false;
@@ -1555,6 +1606,8 @@
         return changed;
       }
       let changed = false;
+      if (mutations.some(mutation => mutation.type === "childList" && !ownedNodes.has(mutation.target)
+          && touchesManualSelection(mutation))) rebindRegroupedCompleted();
       // normalize() reports characterData before childList. Rebind against the
       // final DOM before either event can discard the proven old fine pieces.
       const coalesced = new Set();
