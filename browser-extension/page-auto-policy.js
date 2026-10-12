@@ -76,7 +76,14 @@
   function trimEligibilityText(text) {
     return String(text ?? "").replace(/^[\p{White_Space}\ufeff]+|[\p{White_Space}\ufeff]+$/gu, "");
   }
-  const technicalAbbreviations = new Set(["AI", "CPU", "WTT", "WSBK", "APEC"]);
+  // Established computing/science acronyms plus the reviewed public examples.
+  // Keep this small, explicit uppercase set mirrored in Core PageTextEligibility;
+  // membership alone never bypasses the surrounding Chinese evidence below.
+  const technicalAbbreviations = new Set([
+    "AI", "CPU", "WTT", "WSBK", "APEC",
+    "API", "GPU", "USB", "SSD", "RAM", "DNS", "SQL", "HTML", "CSS",
+    "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI"
+  ]);
   function alreadyTargetText(text, targetLanguage = "简体中文") {
     if (!/中文|Chinese|zh(?:-|$)/i.test(targetLanguage)) return false;
     // Match Core PageTextEligibility's per-node rules after NFKC. Only ASCII

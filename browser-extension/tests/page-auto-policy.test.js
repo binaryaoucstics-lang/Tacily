@@ -185,6 +185,48 @@ test("readable Chinese with short abbreviations is skipped only for Chinese targ
   }
 });
 
+// Synthetic computing/science boundaries; mirrored in the Core tests.
+test("common technical acronyms require readable Chinese context", () => {
+  for (const acronym of [
+    "API", "GPU", "USB", "SSD", "RAM", "DNS", "SQL", "HTML", "CSS",
+    "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI"
+  ]) {
+    for (const source of [`中文说明${acronym}`, `中文技术说明方案 ${acronym}`]) {
+      for (const targetLanguage of ["简体中文", "zh-CN", "zh-Hans", "zh-Hant", "Chinese", "繁体中文"]) {
+        assert.equal(policy.skipTranslationText(source, { targetLanguage }), "already_target_language", source);
+        assert.equal(policy.skipTranslationText(source, { targetLanguage, explicitSelection: true }), "already_target_language", source);
+        assert.equal(policy.skipTranslationText(source, { targetLanguage, foreignHanContext: true }), "", source);
+        assert.equal(policy.skipTranslationText(source, { targetLanguage, foreignHanContext: "true" }), "already_target_language", source);
+      }
+      for (const targetLanguage of ["English", "en-US", "ja-JP", "ko-KR", "fr-FR"])
+        assert.equal(policy.skipTranslationText(source, { targetLanguage }), "", source);
+    }
+    for (const source of [acronym, `${acronym}李明`, `Read the ${acronym} guide for 中文说明.`,
+      `中文接口技术支持说明方案 USE ${acronym}`]) {
+      assert.equal(policy.skipTranslationText(source), "", source);
+      assert.equal(policy.skipTranslationText(source, { explicitSelection: true }), "", source);
+    }
+  }
+});
+
+test("technical acronyms preserve Chinese ratios and foreign phrase boundaries", () => {
+  for (const [source, needsTranslation] of [
+    ["API使用指南", false], ["API接口", true],
+    ["中文说明方案 API", false], ["中文说明方 API", true],
+    ["中文说明方案 HTTP", true], ["中文技术说明方案 HTTP", false], ["中文技术说明方 HTTP", true],
+    ["中文接口技术支持说明方案API GPU", false], ["中文接口技术支持说明方API GPU", true],
+    ["中文接口技术支持说明方案DNA/RNA", false], ["中文接口技术支持说明方DNA/RNA", true],
+    ["GPU NEWS 中文接口技术支持说明方案", true], ["中文说明APIGPU", true], ["中文说明Api", true],
+    ["中文说明ＡＰＩ", false], ["中文接口技术支持说明方案API2 GPU", true],
+    ["中文技术说明方案APIの説明", true], ["中文技术说明方案GPU한", true]
+  ]) {
+    assert.equal(policy.skipTranslationText(source), needsTranslation ? "" : "already_target_language", source);
+    assert.equal(policy.skipTranslationText(source, { explicitSelection: true }), needsTranslation ? "" : "already_target_language", source);
+    assert.equal(policy.skipTranslationText(source, { foreignHanContext: true }), "", source);
+    assert.equal(policy.skipTranslationText(source, { targetLanguage: "English" }), "", source);
+  }
+});
+
 test("per-node Unicode trim distinguishes edge and internal whitespace without changing page counts", () => {
   for (const [source, needsTranslation] of [
     ["\u0085APEC中国年", false], ["APEC中国年\u0085", false],

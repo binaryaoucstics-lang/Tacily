@@ -59,8 +59,15 @@ public static partial class PageTextEligibility
         return text[start..end];
     }
 
+    // Established computing/science acronyms plus the reviewed public examples.
+    // Keep this small, explicit uppercase set mirrored in page-auto-policy.js;
+    // membership alone never bypasses the surrounding Chinese evidence below.
     private static readonly HashSet<string> TechnicalAbbreviations = new(StringComparer.Ordinal)
-        { "AI", "CPU", "WTT", "WSBK", "APEC" };
+    {
+        "AI", "CPU", "WTT", "WSBK", "APEC",
+        "API", "GPU", "USB", "SSD", "RAM", "DNS", "SQL", "HTML", "CSS",
+        "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI"
+    };
 
     // Keep these per-node rules in sync with page-auto-policy.js. Count Unicode
     // letters after NFKC, not digits, punctuation or emoji. Only ASCII uppercase
