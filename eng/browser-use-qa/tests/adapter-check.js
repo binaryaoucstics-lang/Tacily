@@ -538,3 +538,191 @@ async function probeChecks() {
   console.log("adapter synthetic DOM/RPC/async probe checks passed");
 }
 probeChecks().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Append-only transient fixtures. This separate VM cannot affect original checks.
+async function transientProducerChecks() {
+  const timers = new Map(); let timerSerial = 0, callback, environment;
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, childNodes: [body], body, visibilityState: "visible", title: "Offline transient",
+    createRange: () => ({ selectNodeContents() {}, getClientRects: () => [{ x: 0, y: 10, width: 200, height: 24 }] }),
+    addEventListener() {}, removeEventListener() {} };
+  body.parentNode = document;
+  function source(value) {
+    const parent = { nodeType: 1, tagName: "P", childNodes: [], parentNode: body, parentElement: body,
+      hasAttribute: () => false, getAttribute: () => null, getRootNode: () => document };
+    const node = { nodeType: 3, nodeValue: value, parentNode: parent, parentElement: parent, isConnected: true };
+    parent.childNodes.push(node); body.childNodes.push(parent); return node;
+  }
+  const node = source("Transient independently visible source.");
+  const state = { records: new Map(), blocks: new Map(), jobs: 0, pending: 0, scanning: false,
+    assessed: true, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  const session = { inspect: () => state, configure: () => true, mutated() {}, receive: () => true,
+    control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const context = { document, location: { href: "https://offline.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console,
+    getComputedStyle: node => ({ display: node.display || "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "offline", createRenderedTextTester: () => () => true,
+      createPageAutoSession: value => { environment = value; return session; },
+      createOpenRootObserver: value => { callback = value.onMutations;
+        return { configure() {}, found() {}, replace() {}, dispose() {} }; } },
+    MutationObserver: function () {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {},
+    setTimeout: (fn, delay) => { assert.equal(delay, 0); const id = ++timerSerial; timers.set(id, fn); return id; },
+    clearTimeout: id => timers.delete(id) };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa;
+  // Mutation is the only observation while the row is visible.
+  callback([]);
+  node.parentElement.display = "none";
+  let snapshot = qa.sample("scroll-before");
+  let retained = snapshot.producerObservations[0];
+  assert.equal(snapshot.nodes.length, 0);
+  assert.equal(retained.phase, "mutation");
+  assert.match(retained.at, /^\d{4}-\d\d-\d\dT/);
+  assert.equal(retained.source.firstSeen, retained.at);
+  assert.equal(retained.rendered, true); assert.equal(retained.eligible, false);
+  assert.equal(retained.work.scheduledScans, 0);
+  const id = retained.sourceId;
+  // Returned objects cannot corrupt adapter history.
+  retained.eligible = true; retained.source.sourceText = "tampered";
+  retained = qa.sample("hidden-again").producerObservations[0];
+  assert.equal(retained.eligible, false);
+  assert.equal(retained.sourceText, node.nodeValue);
+  // A queued scan is not idle even while the inspect counters are all zero.
+  node.parentElement.display = "block";
+  const cancelled = environment.schedule(async () => {});
+  snapshot = qa.sample("visible-scheduled");
+  assert.equal(snapshot.producerObservations[0].eligible, null);
+  assert.equal(snapshot.producerObservations[0].work.scheduledScans, 1);
+  environment.clearSchedule(cancelled); assert.equal(timers.size, 0);
+  // Actual asynchronous scan completion takes another independent view.
+  let finish;
+  const scheduled = environment.schedule(() => { state.scanning = true;
+    return new Promise(resolve => { finish = () => { state.scanning = false; resolve(); }; }); });
+  const run = timers.get(scheduled); timers.delete(scheduled); run();
+  callback([]); assert.equal(qa.sample("while-scanning").producerObservations[0].eligible, null);
+  finish(); await Promise.resolve();
+  node.parentElement.display = "none";
+  snapshot = qa.sample("hidden-after-idle");
+  assert.equal(snapshot.producerObservations[0].phase, "producer-idle");
+  assert.equal(snapshot.producerObservations[0].eligible, false);
+  // Hiding before asynchronous completion never supplies negative evidence.
+  node.parentElement.display = "block";
+  const early = environment.schedule(() => { state.scanning = true;
+    return new Promise(resolve => { finish = () => { state.scanning = false; resolve(); }; }); });
+  const earlyRun = timers.get(early); timers.delete(early); earlyRun(); callback([]);
+  node.parentElement.display = "none"; finish(); await Promise.resolve();
+  assert.equal(qa.sample("hidden-before-idle").producerObservations[0].eligible, null);
+  // Real producer flags and explicit atomic membership remain separate from truth.
+  node.parentElement.display = "block";
+  const peer = source("Independently observed atomic peer."); qa.sample("peer-before");
+  peer.parentElement.display = "none";
+  const record = { node, source: node.nodeValue, lastWritten: node.nodeValue };
+  state.records.set(node, record);
+  const piece = { complete: true, failed: false };
+  state.blocks.set("atomic", { id: "atomic", record, text: record.source, piece,
+    atomicRecords: [record, { node: peer, source: peer.nodeValue }] });
+  snapshot = qa.sample("atomic-idle");
+  const peerObservation = snapshot.producerObservations.find(row => row.sourceId !== id);
+  assert.equal(peerObservation.rendered, false); assert.equal(peerObservation.representedBy, id);
+  assert.equal(peerObservation.representedSource.rendered, true);
+  assert.equal(peerObservation.pieces[0].completed, true);
+  piece.failed = true; snapshot = qa.sample("atomic-failed");
+  assert.equal(snapshot.producerObservations[0].pieces[0].failed, true);
+  assert.equal(snapshot.producerObservations[0].pieces[0].completed, false);
+  state.blocks.clear(); state.scanning = true;
+  snapshot = qa.sample("new-visible-pending");
+  assert.equal(snapshot.producerObservations.find(row => row.sourceId === id).eligible, null);
+  // An authored source change cannot reuse stale record text as source authority.
+  node.nodeValue = "New authored factual version.";
+  snapshot = qa.sample("authored-change-before-production-scan");
+  assert.notEqual(snapshot.nodes[0].id, id);
+  assert.equal(snapshot.nodes[0].sourceText, node.nodeValue);
+  assert.equal(snapshot.sourceNodes.find(row => row.id === id).sourceText, record.source);
+  state.scanning = false; state.assessed = null;
+  const count = snapshot.producerObservations.length;
+  source("Before admission is unknown."); snapshot = qa.sample("unassessed");
+  assert.equal(snapshot.producerObservations.length, count);
+  // Bound additional capture. Overflow is explicit; Python refuses readiness.
+  state.records.clear(); state.assessed = true;
+  for (let i = 0; i < 2050; i++) source(`Bounded source ${i}`);
+  snapshot = qa.sample("observation-capacity");
+  assert.ok(snapshot.producerObservations.length <= 2048);
+  assert.ok(snapshot.producerObservationDropped > 0);
+  assert.ok(snapshot.sourceNodes.some(row => row.id === id));
+  assert.ok(JSON.stringify(snapshot.producerObservations).length <= 2000000 + 4096);
+  qa.dispose();
+  console.log("adapter transient producer/scheduled scan/atomic/bounds checks passed");
+}
+transientProducerChecks().catch(error => { console.error(error); process.exitCode = 1; });
+
+// An actual Text moves while admission is reset. The independent source row
+// advances, while the last factual producer view and its timestamp stay older.
+function movedProducerFixture(atomic) {
+  let selected;
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, childNodes: [body], body, visibilityState: "visible", title: "Offline movement",
+    createRange: () => ({ selectNodeContents(node) { selected = node; },
+      getClientRects: () => [{ x: selected.x, y: 10, width: 200, height: 24 }] }),
+    addEventListener() {}, removeEventListener() {} };
+  body.parentNode = document;
+  function parent() {
+    const value = { nodeType: 1, tagName: "P", childNodes: [], parentNode: body, parentElement: body,
+      hasAttribute: () => false, getAttribute: () => null, getRootNode: () => document };
+    body.childNodes.push(value); return value;
+  }
+  function text(value, container) {
+    const node = { nodeType: 3, nodeValue: value, parentNode: container, parentElement: container,
+      isConnected: true, x: 0 };
+    container.childNodes.push(node); return node;
+  }
+  const peer = atomic ? text("Independent atomic member.", parent()) : null;
+  if (!atomic) parent(); // Historical 0/1/0, current 0/2/0 as in the review probe.
+  const oldParent = parent(), node = text("Independent moving institution.", oldParent), newParent = parent();
+  const state = { records: new Map(), blocks: new Map(), jobs: 0, pending: 0, scanning: false,
+    assessed: true, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  const session = { inspect: () => state, configure: () => true, mutated() {}, receive: () => true,
+    control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const context = { document, location: { href: "https://offline.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console,
+    getComputedStyle: node => ({ display: node.display || "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "offline", createRenderedTextTester: () => () => true,
+      createPageAutoSession: () => session, createOpenRootObserver: () => ({ configure() {}, found() {}, replace() {}, dispose() {} }) },
+    MutationObserver: function () {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {} };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa;
+  if (atomic) {
+    qa.sample("independent-members");
+    peer.parentElement.display = "none";
+    const record = { node, source: node.nodeValue, lastWritten: node.nodeValue };
+    state.records.set(node, record);
+    state.blocks.set("moving-piece", { id: "moving-piece", record, text: node.nodeValue,
+      piece: { complete: true, failed: false }, atomicRecords: [record, { node: peer, source: peer.nodeValue }] });
+  }
+  const before = qa.sample("mutation"), historic = before.producerObservations.find(row => row.rendered);
+  assert.equal(historic.source.locator, "0/1/0");
+  state.assessed = null;
+  oldParent.childNodes.splice(oldParent.childNodes.indexOf(node), 1);
+  newParent.childNodes.push(node); node.parentElement = node.parentNode = newParent; node.x = 80;
+  const moved = qa.sample("unassessed-movement");
+  assert.equal(moved.nodes.find(row => row.id === historic.sourceId).locator, "0/2/0");
+  assert.equal(moved.nodes.find(row => row.id === historic.sourceId).rects[0].x, 80);
+  assert.equal(moved.nodes.find(row => row.id === historic.sourceId).firstSeen, historic.source.firstSeen);
+  newParent.display = "none";
+  const value = qa.sample("hidden-after-movement");
+  assert.deepEqual(value.producerObservations, before.producerObservations);
+  assert.equal(value.independentSourceObservationDropped, 0);
+  assert.ok(value.independentSourceObservations.some(version => version.source.id === historic.sourceId
+    && version.source.locator === "0/1/0" && version.at === historic.at && version.sequence === historic.sequence));
+  assert.ok(value.independentSourceObservations.some(version => version.source.id === historic.sourceId
+    && version.source.locator === "0/2/0" && version.source.phase === "unassessed-movement"));
+  qa.dispose(); return JSON.parse(JSON.stringify(value));
+}
+const movementFixtures = { rejected: movedProducerFixture(false), atomic: movedProducerFixture(true) };
+if (process.argv.includes("--movement-fixture")) console.log("MOVEMENT_FIXTURE=" + JSON.stringify(movementFixtures));
+console.log("adapter independent Text reparent/geometry/admission reset/atomic owner movement checks passed");
