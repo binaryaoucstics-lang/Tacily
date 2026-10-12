@@ -1,6 +1,6 @@
-# 网页 QA：固定判断与动态、历史证据边界
+# 网页 QA：覆盖口径、固定判断与历史证据边界
 
-本指南解释现有 [网页质量契约](../eng/website-qa/CONTRACT.md)、[Browser Use 采集](../eng/browser-use-qa/README.md) 与 [离线评分](../eng/website-qa/README.md) 的审核口径，不扩展结果字段或放宽完成门禁。[本轮回归约束](../eng/website-qa/REFLOW-REGRESSIONS-20261013.md) 是缺陷与保护条件的依据。
+本指南解释现有 [网页质量契约](../eng/website-qa/CONTRACT.md)、[覆盖与有界证据契约](../eng/website-qa/COVERAGE-EVIDENCE-20261013.md)、[Browser Use 采集](../eng/browser-use-qa/README.md) 与 [离线评分](../eng/website-qa/README.md) 的审核口径。[本轮回归约束](../eng/website-qa/REFLOW-REGRESSIONS-20261013.md) 是缺陷与保护条件的依据。新增字段和模式限于已发布的覆盖契约，原质量、未知、错误与来源门禁保留。
 
 主控留存的公开开发证据已经包含真实浏览器访问期间的引用重排、导航显示变化和短暂可见源观察。这些历史观察应保留，不能再笼统称“从未访问真实站点”。本指南、诊断摘要和离线合成 fixtures 都不能证明真实翻译已完成，也不能认证百站或质量目标已达成。本任务不运行真实浏览器、网络或模型。
 
@@ -9,6 +9,26 @@
 正式页面判断采用 fixed50：中文正文占比阈值固定为 **50%**。采集端 session 的 `chineseProseShareThresholdPercent` 与 QA 主机规则判断均采用该默认基线；用户在产品中配置的比例不能改变正式判断口径。50% 是正文语言规则中的比例阈值，不是翻译覆盖率、节点识别准确率或页面准确率。
 
 规则仍须遵守正文识别、语言证据、站点规则与手动模式等现有保护，不能把整页文字简单按字符数投票。独立标签来自源页面的可读性与翻译需要，不能根据 fixed50 的预测反推真值。保留用户设置、服务商与凭据、固定语料与 holdout、请求预算、超时及原始失败；不能通过改阈值、增加预算或放宽审批/沙盒使测试通过。
+
+## 显式覆盖口径 v1：strict 与 automatic-page
+
+公共接口为 `normalize_case`、`evaluate`、`_score_case` 增加关键字 `coverage_scope="strict"`，现有位置参数有效；归一化与评分 CLI 增加 `--coverage-scope strict|automatic-page`，非法模式拒绝。结果记录 `coverageScope={"schemaVersion":1,"mode":"strict"}` 或 `{"schemaVersion":1,"mode":"automatic-page"}`。固定基线尚无新增参数；此文记录集成要求，不代表独立实现任务已通过验收。
+
+默认 strict 继续执行全部原覆盖义务与原测试；没有 coverageScope 的旧案例只允许 strict。automatic-page 评分必须取得版本和模式一致的案例元数据，不能静默重解释 strict/旧案例；strict 拒绝 automatic-page 案例。分别生成新归一化文件与新报告，使用同一冻结标签和原始证据，保留旧审核与全部失败。评分 CLI 新增可选 `--output <path>`，指定时独占创建新报告并拒绝已存在路径，省略时保留 stdout 输出；新配对报告使用 `--output`。完整 CLI 示例见 [评分 README](../eng/website-qa/README.md)；automatic-page 完成数不能记作 strict 完成数，文件写出也不表示质量达标。
+
+automatic-page 仅调整正确跳过负页中部分正节点的覆盖义务。先核对全部实际请求、计数及 host 事件/terminal，再验证固定 `expectedPageTranslation=false`、独立且 reviewed 的 `pageAnnotation.needTranslation=false`、实际 boolean `pageDecision=false` 与有效整数 `requestCount=0`。还必须有 `type=capabilities, live=true`，以及至少一个成功的零模型调用本地/native assessment terminal：`type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`。事件的非空 `id` 和本案例 `caseId` 须有效，terminal 身份唯一，全部候选请求与 terminal 一一对应；计数均为明确的非负整数，terminal 的 `requestCount` 总和与顶层 `requestCount` 一致。native candidate 身份不能当模型调用数；缺失/失败终止或 null、boolean、字符串计数不能补成零。空请求/terminal 列表、只有 capabilities 或独立 `assessment` 事件不能证明 automatic-page policy skip；strict 的原零调用负例约定保持不变。非零调用、页面标签分歧、正页误跳过或损坏事件不符合条件。节点缺失、失败、矛盾或 unknown 预测不能取得豁免；捕获、截图、settlement、provenance、错误与撤回仍阻止完成。
+
+| 字段/指标 | 两种口径共同保留的含义 |
+| --- | --- |
+| `needTranslation` 与 TP/TN/FP/FN | 冻结的独立真值与实际 eligible；policy skip 不增加 TP/TN，不改英文正标签 |
+| `annotatedPositiveNodes` / `translatedPositiveNodes` / `translationCoverage` | 全部已标注正节点、已证明真实完整翻译的正节点、两者的原比值；跳过节点仍在分母 |
+| `unTranslatedPositiveNodes` | 全部已知正节点缺少已证明完整翻译的数量（整数） |
+| `policySkippedPositiveNodes` | 未翻译正节点中符合 automatic-page 正确跳过全部条件的子集数（整数）；strict 无此豁免 |
+| `confirmedOmissions` | 当前口径下必须覆盖而未完成的正节点；strict 保留原遗漏含义 |
+
+案例和 overall/development/holdout 聚合均须呈现新计数，从证据重新计算，不信任输入摘要。accuracy/precision/recall 公式仍使用原混淆矩阵；识别正确不代表翻译完成，policy skip 不产生翻译信用。
+
+GMW 公开开发案例有 412 个独立审核节点；契约提及的九个英文正标签及 FOLLOW 原文须保持。中文主导页面的独立 false 标签和实际零调用跳过，符合条件时可解释自动页的覆盖豁免。英文仍为 true，保留实际 eligible 对应的识别项，显示为未翻译且符合条件时显示为 policy skip；不能把“保持原页”改写成“英文已翻译”。这些节点事实不是已达成质量指标，也不解除未知、错误、撤回或域数门禁。
 
 ## 先冻结独立源标签，再看逐节点预测
 
@@ -47,6 +67,14 @@ review 的 screenshots 投票须覆盖实际捕获的全部唯一 phase，逐张
 
 历史观察须匹配独立 sourceId/sourceText、原始分片历史和完整 atomic 成员。可信负观察还要求源当时真实 idle 与明确生产标志；没有观察、成员不全、尚在扫描/工作中或相互矛盾时保持 unknown。后来隐藏不能覆盖先前合法观察；只保留源文本也不能创造缺失的生产证据。现有基线在两次控制端采样之间的短暂可见源上可能缺少 sourceObservations，须明确该限制，不能在文档中声称已补齐。
 
+## 2048 行 / 2,000,000 字符：原边界内的证据
+
+覆盖契约记录 main `3c3ec34` 上新 Wiki 开发捕获失败为 `producer_observation_overflow`，并指出基线重复保留每源分片及全源版本的冗余。历史生产观察仍受原 2048 行、2,000,000 字符上限约束；修复需优化传输/保留核算，保留源版本、几何、成员归属、真实扫描 idle、时间戳及过期分片 unknown 保护。本指南不规定尚未审查的新存储结构，不声称该真实捕获已重跑成功。
+
+丢失历史不能获得完成信用：提高限额、隐藏 overflow、删除源/标签、把 dropped 或隐藏后的空集合补成正确拒绝/完成，都不符合契约。真正丢失或未观察的历史仍 unknown 或明确失败，旧 completed、恢复缓存、最终 idle 或新的覆盖口径不能替代当时的完整证据。
+
+实现验收应在原边界内使用 >1800 独立源的现实规模离线页，同时验证移动与 atomic 成员、真实溢出/丢失、伪造或损坏版本、过期分片及未完成工作。原始测试只读保留，新增回归限于实现任务归属。离线通过只证明回归条件，不消除原失败，也不代表真实 Wiki 或其他网站已完成。
+
 ## 保留显示失败与回归保护
 
 公开开发诊断记录了引用标题与归档链接之间的独立横向分隔符变化，以及相同上下文刷新中已完成块被新 ID 替代、原文重新显示的现象。只有实际 DOM 所属链接和源文能证明它是链接间分隔变化；不能扩大为任意空白删除或把正文词间连接视为无意义格式。保留真实 offsets/hashes、日期/计数事实、完成内容与旧响应失效保护。
@@ -59,6 +87,6 @@ review 的 screenshots 投票须覆盖实际捕获的全部唯一 phase，逐张
 
 visitSuccess 仅证明访问；evidenceReady 是完整证据待审核；completed 要求实际执行、独立节点证据、所有截图审核、终止、覆盖与错误门禁。正例必须有真实 live 模型请求、逐节点完成且成功终止；模拟、自测、纯缓存或离线套件不算实际完成翻译。负例保持可读原页与实际零不必要请求可以完成该负例验证，但不能记作翻译了页面。
 
-质量验收仍需至少 100 个不同注册域的严格完成案例，节点 accuracy/precision 至少 95%、页面 accuracy 至少 97%，并满足原评分器的整体与 holdout 门禁。文档、访问数量、诊断记录和合成测试通过都不能替代这些实际证据；未达到条件就保持未达成，不在文档中填入推测的成绩。
+质量验收仍需固定清单至少 120 个不同注册域、35 个负例、30 个 holdout；至少 100 个不同注册域完成，holdout 至少 30 个域完成。strict 保持原严格完成含义，automatic-page 在单独声明的口径下统计。整体与 holdout 均须完成正、负两类页面，节点 accuracy/precision 至少 95%、页面 accuracy 至少 97%，无确认遗漏/撤回、不必要请求、未知标签或无效预测。召回率、原翻译覆盖率及所有未翻译/policy skip 数仍呈现；新增模式不放宽质量、未知、域数或 holdout 门槛。文档、访问数量、诊断记录和合成测试通过都不能替代这些实际证据；未达到条件就保持未达成，不填入推测成绩。
 
 离线验证分别运行 Browser Use 的全部 unittest 与 website evaluator/normalizer 的全部 unittest，命令见两份 README。通过仅证明当前实现的离线契约与回归保护；生产修复需主控审查真实差异，再以新采集和独立审核确认。各开发任务只读固定基线，依赖任务的验收不共享其代码；本指南不宣称其他任务计划中的观察已实现。
