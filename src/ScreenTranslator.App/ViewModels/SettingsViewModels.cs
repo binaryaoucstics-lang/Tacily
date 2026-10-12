@@ -19,6 +19,7 @@ public sealed class GeneralSettingsViewModel : ObservableObject
     private bool _translationAnimationsEnabled = true;
     private bool _browserAutoImageTranslationEnabled;
     private bool _browserAutoPageTranslationEnabled;
+    private int _browserChineseProseShareThresholdPercent = PageTranslationDecision.DefaultChineseProseShareThresholdPercent;
     private ImmutableList<string> _browserTranslationWhitelist = [], _browserTranslationBlacklist = [];
     private string _browserTranslationWhitelistText = "", _browserTranslationBlacklistText = "";
     private int _browserPageTranslationConcurrency = 10;
@@ -93,6 +94,13 @@ public sealed class GeneralSettingsViewModel : ObservableObject
     {
         get => _browserAutoPageTranslationEnabled;
         set => SetProperty(ref _browserAutoPageTranslationEnabled, value);
+    }
+
+    public int BrowserChineseProseShareThresholdPercent
+    {
+        get => _browserChineseProseShareThresholdPercent;
+        set => SetProperty(ref _browserChineseProseShareThresholdPercent,
+            PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(value));
     }
 
     public bool BrowserPageCacheEnabled { get => _browserPageCacheEnabled; set => SetProperty(ref _browserPageCacheEnabled, value); }

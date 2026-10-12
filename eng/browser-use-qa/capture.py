@@ -804,8 +804,10 @@ class CaseCapture:
             if self.full_screenshots:
                 screenshot("before-full", full=True)
             configured = True
+            # Official evaluation uses the fixed baseline, never a user's setting.
             if self.browser.qa("configure", {"enabled": True, "active": True, "generation": 1,
-                                              "targetLanguage": capabilities.get("targetLanguage"), "concurrency": 10}) is not True:
+                                              "targetLanguage": capabilities.get("targetLanguage"), "concurrency": 10,
+                                              "chineseProseShareThresholdPercent": 50}) is not True:
                 raise CaptureError("production_config_rejected")
             settle("after")
             # Local skip cross-check: call rules-only host assess with the production

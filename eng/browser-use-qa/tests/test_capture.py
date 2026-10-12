@@ -1493,6 +1493,8 @@ class WorkflowTests(Fixture):
         self.assertFalse(result["completed"])
         self.assertTrue(result["simulation"])
         self.assertEqual(len(browser.delivered), 2)
+        config = next(call[1] for call in browser.calls if call[0] == "configure")
+        self.assertEqual(config["chineseProseShareThresholdPercent"], 50)
         self.assertEqual(json.loads(browser.delivered[-1])["type"], "pageAutoTranslations")
         self.assertEqual([shot["phase"] for shot in result["screenshots"]],
                          ["before", "after", "scroll-before", "scroll-after", "return-after", "reflow-after", "stable"])
