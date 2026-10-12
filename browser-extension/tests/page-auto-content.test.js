@@ -2275,3 +2275,164 @@ test("site verification waits without translating its loader and recovers when g
   f.session.mutated([{type:"characterData",target:item.node}]);await tick();
   assert.equal(f.candidates().length,1);approved(f);finish(f);assert.equal(f.statuses.at(-1).state,"completed");f.session.dispose();
 });
+
+// Public replay: source-1464..1472 were independently observed retracting at
+// 21:15:02.466Z, between native requests site-021-rpc-2532 and -2533. The
+// unchanged numeric sibling supplies the complete retrieval year, not just the
+// selected "3 November". These raw strings and offsets come from that evidence.
+const citationSources = ["Schwartz, Lane (2008). ", "Multi-Source Translation Methods", "(PDF)",
+  ". Paper presented at the 8th Biennial Conference of the Association for Machine Translation in the Americas. ",
+  "Archived", "(PDF)", " from the original on 29 June 2016", ". Retrieved ", "3 November"];
+const citationTranslations = ["Schwartz, Lane (2008)。", "多源翻译方法", "（PDF）",
+  "。论文发表于美洲机器翻译协会第8届双年会议。", "存档", "（PDF）", "自2016年6月29日原始版本", "。检索于", "11月3日"];
+const citationHashes = ["e3763daa14aab33e0453fff301141c8a5437a8ec5e53ffac6f747ff158053fa0",
+  "b148af41dccfc29ced924d9594f0637ec45ca0e8c2f07a1931b9b95e86eaa491"];
+function citationFixture(spacing = "", extra = []) {
+  const nodes = citationSources.map(source => new Text(source)), gap = new Text(spacing), year = new Text(" 2017.");
+  const title = new Element("A", [new Element("I", [nodes[1]])], { href: "/multi-source.pdf" });
+  const cite = new Element("CITE", [nodes[0], title, gap, new Element("SPAN", [nodes[2]]), nodes[3],
+    new Element("A", [nodes[4]], { href: "/archive" }), new Text(" "), new Element("SPAN", [nodes[5]]), nodes[6],
+    new Element("SPAN", [nodes[7], new Element("SPAN", [nodes[8]]), year])]);
+  const row = new Element("LI", [cite]), f = fixture([row, ...extra]);
+  return { f, nodes, gap, year, cite, row, title };
+}
+function completeCitation(f, packet = f.candidate(), finished = true, incomplete = -1, failed = -1) {
+  return f.session.receive(message(packet, "pageAutoTranslations", { updates: packet.blocks.slice(0, 9).map((block, index) =>
+    ({ id: block.id, text: citationTranslations[index], complete: index !== incomplete, failed: index === failed })), finished }));
+}
+function assertCitationMetadata(blocks, spaced) {
+  const starts = spaced ? [0, 23, 56, 61, 170, 179, 185, 218, 230] : [0, 23, 55, 60, 169, 178, 184, 217, 229];
+  assert.equal(blocks.length, 9);
+  assert.deepEqual(blocks.map(block => block.text), citationSources.map(source => source.trim()));
+  assert.deepEqual(blocks.map(block => block.sourceStart), starts);
+  assert.deepEqual(blocks.map(block => block.sourceLength), [22, 32, 5, 108, 8, 5, 33, 11, 10]);
+  for (const block of blocks) {
+    assert.equal(block.sourceGroupHash, citationHashes[Number(spaced)]);
+    assert.equal(block.sourceGroupLength, spaced ? 246 : 245);
+    assert.equal(block.context.length, block.sourceGroupLength);
+    assert.equal(block.context.slice(block.sourceStart, block.sourceStart + block.sourceLength), block.text);
+    assert.ok(block.context.endsWith("3 November 2017."));
+  }
+}
+
+test("observed nine-node citation never retracts completed text through PDF gap insertion in translation or bilingual view", async () => {
+  for (const mode of ["translation", "bilingual"]) for (const mutationType of ["childList", "characterData"]) {
+    const { f, nodes, gap, year, cite, row, title } = citationFixture();
+    await enabled(f); const packet = f.candidate(); assertCitationMetadata(packet.blocks, false); approved(f); completeCitation(f);
+    f.session.control(`view-${mode}`);
+    const display = nodes.map(node => node.nodeValue), writes = nodes.map(trackTextWrites), annotation = f.session.inspect().annotations.get(row);
+    if (mutationType === "characterData") {
+      gap.nodeValue = " "; f.session.mutated([{ type: "characterData", target: gap }]);
+    } else {
+      // A newly inserted separator, rather than a synthetic edit to a selected ID.
+      const separator = new Text(" "); separator.parentElement = cite; cite.childNodes.splice(2, 1, separator); gap.isConnected = false;
+      f.session.mutated([{ type: "childList", target: cite, removedNodes: [gap], addedNodes: [separator] }]);
+    }
+    assert.deepEqual(nodes.map(node => node.nodeValue), display);
+    await tick();
+    assert.deepEqual(nodes.map(node => node.nodeValue), display);
+    assert.ok(writes.every(values => values.length === 0), "independent display writes must not hide a source flash");
+    assertCitationMetadata([...f.session.inspect().blocks.values()], true);
+    assert.equal(f.candidates().length, 1); assert.equal(f.session.inspect().jobs, 0); assert.equal(f.session.inspect().pending, 0);
+    assert.equal(year.nodeValue, " 2017."); assert.equal(cite.childNodes[1], title); assert.equal(title.getAttribute("href"), "/multi-source.pdf");
+    if (mode === "bilingual") { assert.equal(f.session.inspect().annotations.get(row), annotation); assert.equal(f.session.inspect().annotations.size, 1); }
+    assert.equal(completeCitation(f, packet), false, "old request has no response authority");
+    f.session.control("view-original"); assert.deepEqual(nodes.map(node => node.nodeValue), citationSources);
+    f.session.control("view-translation"); assert.deepEqual(nodes.map(node => node.nodeValue), citationTranslations.map((text, i) =>
+      citationSources[i].match(/^\s*/u)[0] + text + citationSources[i].match(/\s*$/u)[0]));
+    f.session.dispose();
+  }
+});
+
+test("completed citation also retains all owners when the PDF separator is removed or its horizontal spacing changes", async () => {
+  for (const removed of [false, true]) {
+    const { f, nodes, gap, cite } = citationFixture(" "); await enabled(f); assertCitationMetadata(f.candidate().blocks, true);
+    approved(f); completeCitation(f); const display = nodes.map(node => node.nodeValue), writes = nodes.map(trackTextWrites);
+    if (removed) {
+      gap.isConnected = false; cite.childNodes = cite.childNodes.filter(node => node !== gap);
+      f.session.mutated([{ type: "childList", target: cite, removedNodes: [gap], addedNodes: [] }]);
+    } else { gap.nodeValue = "\t  "; f.session.mutated([{ type: "characterData", target: gap }]); }
+    await tick(); assert.deepEqual(nodes.map(node => node.nodeValue), display); assert.ok(writes.every(values => values.length === 0));
+    assertCitationMetadata([...f.session.inspect().blocks.values()], !removed); assert.equal(f.candidates().length, 1); f.session.dispose();
+  }
+});
+
+test("a complete citation retires old paragraph IDs while another paragraph's in-flight response remains valid", async () => {
+  const peer = paragraph("An independent English paragraph still awaits its final response while the citation spacing changes.");
+  const { f, nodes, gap } = citationFixture("", [peer.element]); await enabled(f); const packet = f.candidate(); approved(f);
+  completeCitation(f, packet, false); const display = nodes.map(node => node.nodeValue), writes = nodes.map(trackTextWrites);
+  gap.nodeValue = " "; f.session.mutated([{ type: "characterData", target: gap }]);
+  f.session.receive(message(packet, "pageAutoTranslations", { updates: packet.blocks.map(block => ({ id: block.id, text: "晚到的旧响应", complete: true })), finished: true }));
+  await tick(); assert.deepEqual(nodes.map(node => node.nodeValue), display); assert.ok(writes.every(values => values.length === 0));
+  assert.equal(peer.node.nodeValue, "晚到的旧响应"); assertCitationMetadata([...f.session.inspect().blocks.values()].slice(0, 9), true);
+  assert.equal(f.candidates().length, 1); f.session.dispose();
+});
+
+test("PDF spacing never salvages a partial, failed or wholly in-flight citation", async () => {
+  for (const state of ["partial", "failed", "in-flight"]) {
+    const { f, nodes, gap } = citationFixture(); await enabled(f); const packet = f.candidate(); approved(f);
+    if (state !== "in-flight") completeCitation(f, packet, false, state === "partial" ? 1 : -1, state === "failed" ? 1 : -1);
+    else f.session.receive(message(packet, "pageAutoTranslations", { updates: [{ id: packet.blocks[0].id, text: "未完成前缀" }] }));
+    gap.nodeValue = " "; f.session.mutated([{ type: "characterData", target: gap }]);
+    assert.deepEqual(nodes.map(node => node.nodeValue), citationSources);
+    assert.equal(completeCitation(f, packet), false); await tick(); assert.equal(f.candidates().length, 2);
+    assertCitationMetadata(f.candidate().blocks, true); f.session.dispose();
+  }
+});
+
+test("PDF formatting cannot mask changed selected prose, nonselected facts or meaningful spacing", async () => {
+  const cases = [
+    { node: 1, value: "Multi-SourceTranslation Methods" }, { node: 1, value: "Multi-Source Translation Meth ods" },
+    { node: 3, value: citationSources[3].replace("8th", "9th") }, { node: 2, value: "( PDF)" },
+    { value: " 2018." }, { value: " 201 7." }, { value: " 2017. -5" },
+    { before: " 2017. -5", value: " 2017. - 5" }, { before: " 2017. 12:30", value: " 2017. 12 :30" },
+    { before: " 2017. 12/05/2018", value: " 2017. 12 /05/2018" },
+    { node: 6, value: citationSources[6].replace("2016", "2015") },
+    { node: 6, beforeSource: citationSources[6] + " at 12kg", value: citationSources[6] + " at 12 kg" },
+    { node: 6, beforeSource: citationSources[6] + " at -5°C", value: citationSources[6] + " at +5°C" },
+    { gapOnly: true, value: "\n" }, { gapOnly: true, value: "\u00a0" }
+  ];
+  for (const change of cases) {
+    const { f, nodes, gap, year } = citationFixture(); if (change.before) year.nodeValue = change.before;
+    if (change.beforeSource) nodes[change.node].nodeValue = change.beforeSource;
+    await enabled(f); const packet = f.candidate(); approved(f); completeCitation(f); const writes = trackTextWrites(nodes[0]);
+    gap.nodeValue = change.gapOnly ? change.value : " ";
+    const target = change.node === undefined ? year : nodes[change.node];
+    if (!change.gapOnly) target.nodeValue = change.value;
+    f.session.mutated([{ type: "characterData", target: gap }, ...(!change.gapOnly ? [{ type: "characterData", target }] : [])]);
+    assert.ok(writes.includes(citationSources[0]), JSON.stringify(change));
+    assert.equal(nodes[0].nodeValue, citationSources[0]); assert.equal(completeCitation(f, packet), false);
+    await tick(); assert.equal(f.candidates().length, 2); f.session.dispose();
+  }
+});
+
+test("PDF separator tolerance never transfers a completed selected owner to a replacement node", async () => {
+  const { f, nodes, gap, title } = citationFixture(); await enabled(f); approved(f); completeCitation(f);
+  const replacement = new Text(citationSources[1]), italic = title.childNodes[0]; nodes[1].isConnected = false; italic.childNodes = []; italic.append(replacement);
+  gap.nodeValue = " "; f.session.mutated([{ type: "characterData", target: gap },
+    { type: "childList", target: italic, removedNodes: [nodes[1]], addedNodes: [replacement] }]);
+  assert.equal(nodes[0].nodeValue, citationSources[0]); await tick(); assert.equal(f.candidates().length, 2); f.session.dispose();
+});
+
+test("explicit original and pause controls still restore the citation after benign PDF formatting", async () => {
+  for (const control of ["view-original", "pause"]) {
+    const { f, nodes, gap } = citationFixture(); await enabled(f); approved(f); completeCitation(f);
+    gap.nodeValue = " "; f.session.mutated([{ type: "characterData", target: gap }]); await tick();
+    f.session.control(control); assert.deepEqual(nodes.map(node => node.nodeValue), citationSources);
+    f.session.mutated([{ type: "characterData", target: gap }]); await tick(); assert.deepEqual(nodes.map(node => node.nodeValue), citationSources);
+    if (control === "pause") assert.equal(f.session.inspect().paused, true); f.session.dispose();
+  }
+});
+
+test("PDF spacing does not waive a changed composed slot assignment in the same citation", async () => {
+  const { f, nodes, gap, title, cite } = citationFixture(), first = new Element("SLOT"), second = new Element("SLOT");
+  let assigned = first;
+  first.assignedNodes = () => assigned === first ? [title] : [];
+  second.assignedNodes = () => assigned === second ? [title] : [];
+  title.assignedSlot = first; cite.childNodes.splice(1, 1, first); first.parentElement = cite; cite.append(second);
+  await enabled(f); const packet = f.candidate(); approved(f); completeCitation(f);
+  assigned = second; title.assignedSlot = second; gap.nodeValue = " ";
+  f.session.mutated([{ type: "characterData", target: gap }, { type: "slotchange", target: first }, { type: "slotchange", target: second }]);
+  assert.equal(nodes[0].nodeValue, citationSources[0]); assert.equal(completeCitation(f, packet), false);
+  await tick(); assert.equal(f.candidates().length, 2); f.session.dispose();
+});
