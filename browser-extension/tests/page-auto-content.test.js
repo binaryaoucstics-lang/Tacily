@@ -831,6 +831,121 @@ test("text range proof respects zero-height overflow clipping without rejecting 
   assert.equal(rendered(clipped.node), false); assert.equal(rendered(bottom.node), true); f.session.dispose();
 });
 
+test("ordinary unclipped range representations admit public text without requiring viewport intersection", async () => {
+  const cases = [
+    { x: 10, y: 9000, width: 400, height: 24 },
+    { left: 10, right: 410, top: 9000, bottom: 9024 },
+    line(10, 9000),
+    { top: 9000, width: 400, height: 24 },
+    { width: 400, height: 24 },
+    { x: -400, y: -24, width: 400, height: 24 },
+    { x: 10, y: 10, width: 1, height: 1 }
+  ];
+  for (const rect of cases) {
+    const item = paragraph("Public English prose remains eligible with an ordinary positive range."), f = fixture([item.element]);
+    renderedGeometry(f, () => [rect]);
+    assert.equal(f.environment.isRenderedText(item.node), true, JSON.stringify(rect));
+    const snapshot = await extractPageSnapshot(f.environment);
+    assert.deepEqual(snapshot.blocks.map(block => block.text), [item.node.nodeValue]);
+    assert.equal(snapshot.records[0].node, item.node); f.session.dispose();
+  }
+});
+
+test("zero, malformed and non-finite ranges cannot manufacture readable text", async () => {
+  const valid = { x: 10, y: 10, width: 400, height: 24 };
+  const cases = [null, {}, { x: 10, y: 10, width: 400 },
+    { ...valid, width: 0 }, { ...valid, height: 0 }, { ...valid, width: -1 }, { ...valid, height: -1 },
+    { left: 10, right: 10, top: 10, bottom: 34 }, { left: 410, right: 10, top: 10, bottom: 34 },
+    { left: 10, right: 410, top: 34, bottom: 10 }, { ...valid, left: 10, right: 10 },
+    { ...valid, x: Number.MAX_VALUE, width: Number.MAX_VALUE },
+    { left: -Number.MAX_VALUE, right: Number.MAX_VALUE, top: 10, bottom: 34 }];
+  for (const key of ["x", "y", "width", "height", "left", "right", "top", "bottom"]) {
+    for (const value of [NaN, Infinity, -Infinity, "10", null]) cases.push({ ...valid, [key]: value });
+  }
+  const item = paragraph("Invalid geometry must never be sent as readable public evidence."), f = fixture([item.element]);
+  for (const rect of cases) {
+    renderedGeometry(f, () => [rect]);
+    assert.equal(f.environment.isRenderedText(item.node), false, `invalid range ${JSON.stringify(rect)}`);
+    const snapshot = await extractPageSnapshot(f.environment);
+    assert.equal(snapshot.blocks.length, 0); assert.equal(snapshot.samples.length, 0); assert.equal(snapshot.records.length, 0);
+  }
+  // Invalid earlier lines do not hide a later actual rendered line.
+  renderedGeometry(f, () => [...cases, valid]); assert.equal(f.environment.isRenderedText(item.node), true); f.session.dispose();
+});
+
+test("ordinary range and box representations preserve actual overflow, rect and inset intersections", async () => {
+  const shapes = [
+    (x, y, width, height) => ({ x, y, width, height }),
+    (x, y, width, height) => ({ left: x, right: x + width, top: y, bottom: y + height })
+  ];
+  const cases = [
+    { style: { overflow: "hidden" }, width: 0, allowed: false },
+    { style: { overflow: "hidden" }, width: 1, height: 1, allowed: false },
+    { style: { overflow: "hidden" }, width: 80, allowed: true },
+    { style: { overflow: "hidden" }, width: 80, x: 500, allowed: false },
+    { style: { overflowX: "clip" }, width: 80, x: 500, allowed: false },
+    { style: { overflowY: "hidden" }, y: 500, allowed: false },
+    { style: { position: "absolute", clip: "rect(0px, 0px, 0px, 0px)" }, allowed: false },
+    { style: { position: "fixed", clip: "rect(auto, 80px, auto, 0px)" }, allowed: true },
+    { style: { clipPath: "inset(50%)" }, allowed: false },
+    { style: { clipPath: "inset(0 80% 0 0)" }, allowed: true }
+  ];
+  for (const boxShape of shapes) for (const rangeShape of shapes) for (const entry of cases) {
+    const item = paragraph("A public line is readable only inside its actual clipping aperture."), f = fixture([item.element]);
+    item.element.style = entry.style;
+    item.element.getBoundingClientRect = () => boxShape(10, 10, entry.width ?? 400, entry.height ?? 60);
+    renderedGeometry(f, () => [rangeShape(entry.x ?? 10, entry.y ?? 10, 300, 24)]);
+    assert.equal(f.environment.isRenderedText(item.node), entry.allowed, JSON.stringify(entry));
+    assert.equal((await extractPageSnapshot(f.environment)).blocks.length, Number(entry.allowed)); f.session.dispose();
+  }
+});
+
+test("clipping cannot fall back to dimensions when required coordinates or box geometry are missing", () => {
+  const item = paragraph("Positive dimensions alone cannot prove intersection with a clipping box."), f = fixture([item.element]);
+  for (const style of [{ overflow: "hidden" }, { position: "absolute", clip: "rect(auto, 80px, auto, 0px)" }, { clipPath: "inset(0)" }]) {
+    item.element.style = style;
+    for (const box of [null, {}, { width: 400, height: 60 }, { x: NaN, y: 10, width: 400, height: 60 }]) {
+      item.element.getBoundingClientRect = () => box;
+      renderedGeometry(f, () => [{ x: 10, y: 10, width: 300, height: 24 }]);
+      assert.equal(f.environment.isRenderedText(item.node), false, `unknown box ${JSON.stringify(box)}`);
+    }
+    item.element.getBoundingClientRect = () => ({ x: 10, y: 10, width: 400, height: 60 });
+    for (const rect of [{ width: 300, height: 24 }, { top: 10, width: 300, height: 24 }, { x: 10, width: 300, height: 24 }]) {
+      renderedGeometry(f, () => [rect]); assert.equal(f.environment.isRenderedText(item.node), false, `unknown range ${JSON.stringify(rect)}`);
+    }
+  }
+  // Only the clipped axis needs positions; this is not a missing-coordinate fallback.
+  item.element.style = { overflowY: "hidden" };
+  item.element.getBoundingClientRect = () => ({ top: 10, width: 400, height: 60 });
+  renderedGeometry(f, () => [{ top: 20, width: 300, height: 24 }]); assert.equal(f.environment.isRenderedText(item.node), true);
+  renderedGeometry(f, () => [{ top: 100, width: 300, height: 24 }]); assert.equal(f.environment.isRenderedText(item.node), false);
+  f.session.dispose();
+});
+
+test("ordinary rectangles keep clipped rescans stable, reveal once and retain unchanged translations", async () => {
+  for (const shape of [(x, y, width, height) => ({ x, y, width, height }),
+    (x, y, width, height) => ({ left: x, right: x + width, top: y, bottom: y + height })]) {
+    const body = paragraph("The below-fold public English article is already translated before the answer opens.");
+    const label = paragraph("A collapsed public answer becomes readable when its real overflow box opens."), source = label.node.nodeValue;
+    const f = fixture([body.element, label.element]); let height = 0;
+    label.element.style = { overflowY: "hidden" }; label.element.getBoundingClientRect = () => shape(10, 10, 400, height);
+    renderedGeometry(f, node => [shape(10, node === body.node ? 9000 : 10, 300, 24)]);
+    await enabled(f); const initial = f.candidate(); assert.deepEqual(initial.blocks.map(block => block.text), [body.node.nodeValue]);
+    approved(f); finish(f, initial, "正文完成译文"); const writes = trackTextWrites(body.node);
+    for (let index = 0; index < 2; index++) {
+      f.session.layoutChanged(); await tick();
+      assert.equal(f.candidates().length, 1); assert.equal(f.session.inspect().revision, initial.revision);
+    }
+    height = 60; f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]); await tick();
+    const shown = f.candidate(); assert.equal(f.candidates().length, 2); assert.deepEqual(shown.blocks.map(block => block.text), [source]);
+    approved(f); finish(f, shown, "答案完成译文"); const labelWrites = trackTextWrites(label.node);
+    height = 0; f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]); await tick();
+    height = 60; f.session.mutated([{ type: "attributes", target: label.element, attributeName: "style" }]); await tick();
+    assert.equal(f.candidates().length, 2); assert.deepEqual(writes, []); assert.deepEqual(labelWrites, []);
+    assert.equal(label.node.nodeValue, "答案完成译文"); assert.equal(f.session.inspect().records.get(label.node).source, source); f.session.dispose();
+  }
+});
+
 test("rectangular CSS clips exclude nonrendering labels while retaining partial prose and real small text", async () => {
   const cases = [
     { name: "empty legacy clip", style: { position: "absolute", clip: "rect(0px, 0px, 0px, 0px)" }, allowed: false },

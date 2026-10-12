@@ -254,6 +254,29 @@
     if (typeof root.scheduler?.yield === "function") return root.scheduler.yield();
     return new Promise(resolve => setTimeout(resolve, 0));
   }
+  function normalizeRectangle(rect) {
+    if (!rect) return null;
+    // DOMRect edges and x/y/width/height are equivalent representations. Do
+    // not replace supplied invalid numbers with another field or an origin.
+    for (const key of ["left", "right", "top", "bottom", "x", "y", "width", "height"]) {
+      if (rect[key] !== undefined && !Number.isFinite(rect[key])) return null;
+    }
+    function axis(start, end, origin, extent) {
+      start ??= origin;
+      extent ??= start !== undefined && end !== undefined ? end - start : undefined;
+      if (start === undefined && end !== undefined && extent !== undefined) start = end - extent;
+      if (end === undefined && start !== undefined && extent !== undefined) end = start + extent;
+      if (extent !== undefined && (!Number.isFinite(extent) || extent < 0)
+          || start !== undefined && !Number.isFinite(start) || end !== undefined && !Number.isFinite(end)) return null;
+      if (start !== undefined && end !== undefined && (end < start || (end > start) !== (extent > 0))) return null;
+      return { start, end, extent };
+    }
+    const x = axis(rect.left, rect.right, rect.x, rect.width), y = axis(rect.top, rect.bottom, rect.y, rect.height);
+    if (!x || !y) return null;
+    // Some range providers expose dimensions without all positions. Those
+    // prove unclipped area, but cannot prove intersection on a clipped axis.
+    return { left: x.start, right: x.end, top: y.start, bottom: y.end, width: x.extent, height: y.extent };
+  }
   function createScanLayout(document, getStyle = element => document.defaultView?.getComputedStyle?.(element)) {
     let styles = new WeakMap(), rectangles = new WeakMap(), clipping = new WeakMap();
     function style(element) {
@@ -266,7 +289,7 @@
       return styles.get(element);
     }
     function bounds(element) {
-      if (!rectangles.has(element)) rectangles.set(element, element?.getBoundingClientRect?.() || null);
+      if (!rectangles.has(element)) rectangles.set(element, normalizeRectangle(element?.getBoundingClientRect?.()));
       return rectangles.get(element);
     }
     function clips(element) {
@@ -282,7 +305,7 @@
           // Below-fold prose may lie outside the document scrollport. Authored
           // rect/inset clips still apply there; display:contents has no box.
           if ((x || y) && current !== document.body && current !== document.documentElement) {
-            const rect = bounds(current); if (rect) inherited = [...inherited, { bounds: rect, x, y }];
+            inherited = [...inherited, { bounds: bounds(current), x, y }];
           }
           const legacy = ["absolute", "fixed"].includes(value.position) && /^rect\(/iu.test(value.clip || "");
           const inset = /^inset\(/iu.test(value.clipPath || "");
@@ -290,7 +313,7 @@
             const rect = bounds(current);
             for (const css of [legacy && value.clip, inset && value.clipPath]) {
               const clipped = rectangularClipBounds(css, rect, current);
-              if (clipped) inherited = [...inherited, { bounds: clipped, x: true, y: true }];
+              if (css) inherited = [...inherited, { bounds: clipped, x: true, y: true }];
             }
           }
         }
@@ -335,13 +358,19 @@
         const clips = (layout || createScanLayout(document)).clips(composedParent(node));
         let apertureLeft = -Infinity, apertureRight = Infinity, apertureTop = -Infinity, apertureBottom = Infinity;
         for (const clip of clips) {
+          if (!clip.bounds || clip.x && ![clip.bounds.left, clip.bounds.right].every(Number.isFinite)
+              || clip.y && ![clip.bounds.top, clip.bounds.bottom].every(Number.isFinite)) return false;
           if (clip.x) { apertureLeft = Math.max(apertureLeft, clip.bounds.left); apertureRight = Math.min(apertureRight, clip.bounds.right); }
           if (clip.y) { apertureTop = Math.max(apertureTop, clip.bounds.top); apertureBottom = Math.min(apertureBottom, clip.bounds.bottom); }
         }
         const tinyAperture = apertureRight - apertureLeft <= 1 && apertureBottom - apertureTop <= 1;
         range.selectNodeContents(node);
-        for (const bounds of range.getClientRects()) {
-          if (!(bounds.width > 0 && bounds.height > 0)) continue;
+        for (const rect of range.getClientRects()) {
+          const bounds = normalizeRectangle(rect);
+          if (!bounds || !(bounds.width > 0 && bounds.height > 0)) continue;
+          if (!clips.length) return true;
+          if (clips.some(clip => clip.x && ![bounds.left, bounds.right].every(Number.isFinite)
+              || clip.y && ![bounds.top, bounds.bottom].every(Number.isFinite))) continue;
           let left = bounds.left, right = bounds.right, top = bounds.top, bottom = bounds.bottom;
           for (const clip of clips) {
             if (clip.x) { left = Math.max(left, clip.bounds.left); right = Math.min(right, clip.bounds.right); }
@@ -351,7 +380,9 @@
           // not display readable text. Do not impose a minimum on real layout
           // or reject an ordinary partly visible line at a larger clip edge.
           const cropped = left > bounds.left || right < bounds.right || top > bounds.top || bottom < bounds.bottom;
-          if (right > left && bottom > top && !(tinyAperture && cropped)) return true;
+          const positiveX = clips.some(clip => clip.x) ? right > left : bounds.width > 0;
+          const positiveY = clips.some(clip => clip.y) ? bottom > top : bounds.height > 0;
+          if (positiveX && positiveY && !(tinyAperture && cropped)) return true;
         }
       } catch { /* Detached source nodes are not eligible. */ }
       finally {
