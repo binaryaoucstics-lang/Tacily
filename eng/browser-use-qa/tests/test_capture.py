@@ -591,6 +591,30 @@ class CompletionTests(Fixture):
         self.assertTrue(capture.completion_gate(case, self.root)[1])
         self.assertFalse(capture.completion_gate({**case, "requestIds": ["unnecessary"]}, self.root)[1])
 
+    def test_negative_native_assessment_requires_explicit_successful_zero_terminal(self):
+        case = {**self.valid(False), "requestIds": ["native-rpc"], "terminals": [
+            {"id": "native-rpc", "success": True, "requestCount": 0, "failedCount": 0}]}
+        self.assertTrue(capture.completion_gate(case, self.root)[1])
+        self.assertEqual(case["requestIds"], ["native-rpc"])
+        for count in (None, True, "0", -1, .0):
+            with self.subTest(count=count):
+                terminal = {**case["terminals"][0], "requestCount": count}
+                self.assertIn("terminal_evidence_missing", capture.completion_gate(
+                    {**case, "terminals": [terminal]}, self.root)[2])
+        for patch, reason in (({"requestCount": 2}, "unnecessary_translation_request"),
+                              ({"success": False}, "terminal_evidence_missing"),
+                              ({"failedCount": 1}, "terminal_evidence_missing")):
+            self.assertIn(reason, capture.completion_gate(
+                {**case, "terminals": [{**case["terminals"][0], **patch}]}, self.root)[2])
+        self.assertIn("terminal_evidence_missing", capture.completion_gate(
+            {**case, "terminals": [{"id": "native-rpc", "success": True}]}, self.root)[2])
+        for patch, reason in (({"retractions": [{"type": "retraction"}]}, "translation_retractions"),
+                              ({"finalState": {"rpcPending": 1}}, "production_work_unresolved"),
+                              ({"finalState": {"pageDecision": False, "status": {"state": "assessing"}}},
+                               "production_work_unresolved"),
+                              ({"predictions": [{"sourceId": "source-1", "failed": True}]}, "node_failure")):
+            self.assertIn(reason, capture.completion_gate({**case, **patch}, self.root)[2])
+
     def test_full_phases_require_files_hashes_and_independent_review(self):
         case = self.valid()
         case["fullScreenshots"] = True
@@ -1110,8 +1134,275 @@ class WorkflowTests(Fixture):
                 self.assertFalse(result["settled"])
                 self.assertFalse(result["evidenceReady"])
                 self.assertFalse(result["completed"])
-                self.assertIn("unnecessary_translation_request", result["blockedReason"])
+                self.assertIn("terminal_evidence_missing", result["blockedReason"])
+                self.assertNotIn("unnecessary_translation_request", result["blockedReason"])
                 self.assertFalse(any(row["semanticStable"] for row in rows if row["kind"] == "stability"))
+                if terminal is None:
+                    self.assertTrue(all(not row["modelRequestsZero"] for row in rows if row["kind"] == "stability"))
+
+    def native_negative_browser(self):
+        browser = self.moving_browser(skipped=True, skipped_candidates=13)
+        original_qa = browser.qa
+        def qa(method, *args):
+            value = original_qa(method, *args)
+            if method == "configure":
+                browser.outgoing.append({"rpcId": "rpc-negative", "message": {
+                    "type": "pageAutoCandidate", "requestId": "negative-request", "documentToken": "doc1",
+                    "generation": 1, "revision": 1, "documentLanguage": "zh-CN",
+                    "blocks": [], "samples": [], "pageSummary": {}}})
+            return value
+        browser.qa = qa
+        return browser
+
+    def test_native_negative_zero_model_packets_keep_candidates_and_capture_all_phases(self):
+        packet = ' {"type":"pageAutoAssessment","needsTranslation":false} '
+        def events(request, requests):
+            return [self.packet_event(request, packet), None, self.terminal_event(request)]
+        clock = [1.0]
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result, browser, host, rows = self.scripted_case(events, browser=self.native_negative_browser(),
+                run_id="native-negative-zero", case_timeout=.3, stable_seconds=.01,
+                site={**SITE, "expectedPageTranslation": False})
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["settled"])
+        self.assertEqual(result["requestIds"], ["site-001-rpc-negative"])
+        self.assertEqual(result["terminals"][0]["requestCount"], 0)
+        self.assertEqual([request["action"] for request in host.requests], ["message"])
+        self.assertEqual(browser.delivered, [packet])
+        self.assertEqual(sum(call[0] == "acknowledge" for call in browser.calls), 1)
+        self.assertEqual(len(result["predictions"]), 13)
+        self.assertTrue(all(p["eligible"] and not p["completed"] and not p["failed"] for p in result["predictions"]))
+        self.assertEqual([shot["phase"] for shot in result["screenshots"]],
+            ["before", "after", "scroll-before", "scroll-after", "return-after", "reflow-after", "stable"])
+        self.assertNotIn("unnecessary_translation_request", result["blockedReason"])
+        self.assertFalse(result["evidenceReady"])  # Explicit simulation, never a real completed domain.
+        self.assertFalse(result["completed"])
+        self.assertEqual(len([row for row in rows if row["kind"] == "host_event"]), 2)
+
+    def test_native_negative_actual_model_and_unknown_counts_cannot_settle(self):
+        for label, count in (("actual", 1), ("missing", None), ("boolean", False), ("negative", -1)):
+            def events(request, requests):
+                terminal = self.terminal_event(request, requestCount=count)
+                if label == "missing":
+                    del terminal["requestCount"]
+                return [self.packet_event(request, '{"type":"pageAutoAssessment","needsTranslation":false}'), terminal]
+            clock = [1.0]
+            with self.subTest(count=count), mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                result, _, _, _ = self.scripted_case(events, browser=self.native_negative_browser(),
+                    run_id="native-negative-" + label, case_timeout=.04, stable_seconds=.01,
+                    site={**SITE, "expectedPageTranslation": False})
+            self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement" if label == "actual"
+                             else "backend_terminal_request_count_invalid")
+            self.assertIn("unnecessary_translation_request" if label == "actual" else "terminal_evidence_missing",
+                          result["blockedReason"])
+            self.assertFalse(result["settled"])
+            self.assertFalse(result["evidenceReady"])
+            self.assertFalse(result["completed"])
+            self.assertEqual(result["terminals"][0].get("requestCount"), count)
+
+    def test_rules_only_assessment_event_cannot_replace_candidate_terminal(self):
+        def events(request, requests):
+            return [self.packet_event(request, '{"type":"pageAutoAssessment","needsTranslation":false}'),
+                    {"type": "assessment", "id": request["id"], "caseId": request["caseId"],
+                     "needsTranslation": False}]
+        result, _, _, _ = self.scripted_case(events, browser=self.native_negative_browser(),
+            run_id="candidate-no-terminal", site={**SITE, "expectedPageTranslation": False})
+        self.assertEqual(result["errors"][0]["code"], "host_unexpected_assessment")
+        self.assertEqual(result["terminals"], [])
+        self.assertIn("terminal_evidence_missing", result["blockedReason"])
+        self.assertFalse(result["settled"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
+
+    def test_negative_reset_and_assessment_storm_between_idle_samples_never_settles(self):
+        for kind in ("decision", "candidate"):
+            browser = self.moving_browser(skipped=True, skipped_candidates=13)
+            original_qa = browser.qa
+            activity = []
+            def qa(method, *args):
+                value = original_qa(method, *args)
+                if method == "sample" and browser.configured:
+                    if kind == "decision":
+                        activity.extend([{"type": "decision", "value": {"assessed": False}},
+                                         {"type": "status", "value": {"state": "assessing"}},
+                                         {"type": "decision", "value": {"assessed": True}}])
+                    else:
+                        number = len(activity)
+                        message = {"type": "pageAutoCandidate", "requestId": f"req-{number}",
+                                   "documentToken": "doc1", "generation": 1, "revision": number + 1,
+                                   "documentLanguage": "zh-CN", "blocks": [], "samples": [], "pageSummary": {}}
+                        browser.outgoing.append({"rpcId": f"rpc-{number}", "message": message})
+                        activity.append({"type": "outbound", "message": message})
+                    value["events"] = copy.deepcopy(activity)
+                return value
+            browser.qa = qa
+            clock = [1.0]
+            def events(request, requests):
+                return [self.packet_event(request, '{"type":"pageAutoAssessment","needsTranslation":false}'),
+                        self.terminal_event(request)]
+            with self.subTest(kind=kind), mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                result, _, host, rows = self.scripted_case(events, browser=browser,
+                    run_id="negative-storm-" + kind, case_timeout=.04, stable_seconds=.01,
+                    site={**SITE, "expectedPageTranslation": False})
+            self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
+            self.assertFalse(result["settled"])
+            self.assertFalse(result["completed"])
+            self.assertFalse(any(row["semanticStable"] for row in rows if row["kind"] == "stability"))
+            if kind == "candidate":
+                self.assertGreater(len(host.requests), 1)
+                self.assertTrue(all(event["requestCount"] == 0 for event in result["terminals"]))
+
+    def failed_browser(self):
+        browser = self.browser()
+        original_qa = browser.qa
+        def qa(method, *args):
+            value = original_qa(method, *args)
+            if method == "deliver" and json.loads(args[1]).get("error"):
+                browser.done = True
+                browser.predictions[0].update(completed=False, failed=True, text="实际失败前的译文")
+            if method == "sample" and browser.configured:
+                row = {"id": "s1", "sourceText": "Synthetic source", "displayedText": "实际失败前的译文",
+                       "tag": "P", "role": "article"}
+                value["nodes"] = [row]
+                value["sourceNodes"] = [copy.deepcopy(row)]
+                if browser.predictions[0]["failed"]:
+                    value["status"] = {"state": "failed", "reason": "synthetic_guard_failure"}
+            return value
+        browser.qa = qa
+        return browser
+
+    def test_failed_packet_drains_original_failed_terminal_and_final_snapshot_via_fake_cli(self):
+        simulator = self.failed_browser()
+        argv_seen = []
+        def runner(argv, **options):
+            self.assertIs(options["shell"], False)
+            self.assertLessEqual(options["timeout"], 5)
+            self.assertEqual(argv[1], str(capture.WRAPPER))
+            argv_seen.append(argv)
+            action, arguments = argv[5], argv[6:]
+            if action == "eval":
+                expression = arguments[0]
+                prefix = "globalThis.__websiteQa."
+                if expression.startswith(prefix):
+                    method, data = expression[len(prefix):].split("(", 1)
+                    value = simulator.qa(method, *json.loads("[" + data[:-1] + "]"))
+                else:
+                    value = simulator.evaluate(expression)
+                data = {"result": value}
+            elif action == "screenshot":
+                Path(arguments[0]).write_bytes(capture.encode(simulator.predictions).encode("utf-8"))
+                data = {}
+            elif action == "state":
+                data = simulator.state()
+            else:
+                simulator.command(action, *arguments)
+                data = {}
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"success": True, "data": data}), "")
+        browser = capture.BrowserCli("offline-failed", self.journal, runner=runner)
+        packets = [' {"type":"pageAutoTranslations","finished":false,"updates":[]} ',
+                   ' {"type":"pageAutoTranslations","finished":true,"error":"synthetic_guard_failure"}\n']
+        originals = []
+        def events(request, requests):
+            batch = [self.packet_event(request, packet) for packet in packets]
+            terminal = self.terminal_event(request, success=False, requestCount=7, failedCount=15, cacheHits=2)
+            originals.extend(batch + [terminal])
+            return batch + [None, None, terminal]
+        result, _, host, rows = self.scripted_case(events, browser=browser, run_id="failed-cli", full_screenshots=True)
+        self.assertEqual(simulator.delivered, packets)
+        self.assertEqual([row["event"] for row in rows if row["kind"] == "host_event"], originals)
+        self.assertEqual(result["terminals"], [originals[-1]])
+        self.assertEqual([error["code"] for error in result["errors"]],
+                         ["backend_packet_error", "backend_terminal_failed"])
+        self.assertEqual(result["failureSnapshot"]["predictions"], result["predictions"])
+        self.assertTrue(result["predictions"][0]["failed"])
+        self.assertFalse(result["predictions"][0]["completed"])
+        self.assertEqual(result["failureSnapshot"]["nodes"][0]["displayedText"], "实际失败前的译文")
+        self.assertEqual(sum(call[0] == "acknowledge" for call in simulator.calls), 1)
+        self.assertEqual(len(host.requests), 1)
+        config = next(call[1] for call in simulator.calls if call[0] == "configure")
+        self.assertEqual(config["chineseProseShareThresholdPercent"], 50)
+        self.assertTrue(all(len(argv[6].encode("utf-16-le")) <= capture.EVAL_LIMIT_BYTES
+                            for argv in argv_seen if argv[5] == "eval"))
+        self.assertEqual([shot["phase"] for shot in result["screenshots"]],
+                         ["before", "before-full", "after", "after-full", "stable", "stable-full"])
+        attempt = next((self.root / "failed-cli").glob("*/attempt-*"))
+        for shot in result["screenshots"]:
+            raw = (attempt / shot["path"]).read_bytes()
+            self.assertEqual(shot["sha256"], capture.hashlib.sha256(raw).hexdigest())
+            if shot["phase"] in ("stable", "stable-full"):
+                self.assertTrue(json.loads(raw)[0]["failed"])
+        self.assertEqual(result["screenshotReview"], {})
+        self.assertFalse(result["settled"])
+        self.assertFalse(result["semanticStable"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
+
+    def test_failed_packet_missing_terminal_retains_available_evidence_without_deadline_extension(self):
+        clock = [1.0]
+        browser = self.failed_browser()
+        def events(request, requests):
+            return [self.packet_event(request, '{"type":"pageAutoTranslations","error":"synthetic_failure"}')]
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result, browser, _, _ = self.scripted_case(events, browser=browser,
+                run_id="failed-missing-terminal", case_timeout=.01)
+        self.assertAlmostEqual(clock[0], 1.01)
+        self.assertEqual(result["errors"][0]["code"], "backend_packet_error")
+        self.assertIn("case_timeout_without_settlement", [error["code"] for error in result["errors"]])
+        self.assertEqual(result["terminals"], [])
+        self.assertTrue(result["failureSnapshot"]["predictions"][0]["failed"])
+        self.assertEqual([shot["phase"] for shot in result["screenshots"]], ["before", "after"])
+        self.assertIn("terminal_evidence_missing", result["blockedReason"])
+        self.assertFalse(result["settled"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
+
+    def test_failed_evidence_screenshot_failure_keeps_delayed_terminal(self):
+        browser = self.failed_browser()
+        original_shot = browser.screenshot
+        def screenshot(path, full=False):
+            if Path(path).name == "after.png":
+                raise capture.CaptureError("screenshot_missing")
+            original_shot(path, full=full)
+        browser.screenshot = screenshot
+        def events(request, requests):
+            return [self.packet_event(request, '{"type":"pageAutoTranslations","error":"synthetic_failure"}'),
+                    None, None, self.terminal_event(request, success=False, requestCount=1, failedCount=1)]
+        result, _, _, _ = self.scripted_case(events, browser=browser, run_id="failed-screenshot")
+        self.assertEqual(len(result["terminals"]), 1)
+        self.assertIn("screenshot_missing", [error["code"] for error in result["errors"]])
+        self.assertEqual([shot["phase"] for shot in result["screenshots"]], ["before", "stable"])
+        self.assertTrue(result["failureSnapshot"]["predictions"][0]["failed"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
+
+    def test_failed_packet_at_deadline_does_not_start_snapshot_or_screenshot(self):
+        clock = [1.0]
+        browser = self.failed_browser()
+        original_qa = browser.qa
+        def qa(method, *args):
+            value = original_qa(method, *args)
+            if method == "deliver":
+                clock[0] = 1.01
+            return value
+        browser.qa = qa
+        def events(request, requests):
+            return [self.packet_event(request, '{"type":"pageAutoTranslations","error":"synthetic_failure"}'),
+                    self.terminal_event(request, success=False, requestCount=7, failedCount=15)]
+        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+            result, browser, host, _ = self.scripted_case(events, browser=browser,
+                run_id="failed-deadline", case_timeout=.01)
+        self.assertEqual(result["errors"][0]["code"], "backend_packet_error")
+        self.assertEqual(result["terminals"], [])  # Beyond deadline: never invent or consume a terminal.
+        self.assertEqual(host.events[0]["type"], "terminal")
+        self.assertNotIn("failureSnapshot", result)
+        self.assertEqual([shot["phase"] for shot in result["screenshots"]], ["before"])
+        self.assertFalse(result["settled"])
+        self.assertFalse(result["evidenceReady"])
+        self.assertFalse(result["completed"])
 
     def test_changed_semantics_and_unresolved_translation_do_not_settle(self):
         checks = [("change", key) for key in ("sourceText", "displayedText", "tag", "role", "multiplicity")]
