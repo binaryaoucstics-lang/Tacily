@@ -1,6 +1,8 @@
 # Browser Use CLI 真实网页采集基础设施
 
-此目录实现采集驱动，不包含任何已完成的真实网站结果或准确率结论。开发验收只运行合成 DOM、mock CLI 输出与离线 JSONL 主机；它们不计真实 case。
+此目录实现采集驱动，不包含已认证的百站结果或准确率结论。主控留存的公开开发证据已包含真实浏览器访问及重排/隐藏源观察；这些观察不等于已完成翻译或质量审核。本任务的开发验收只运行合成 DOM、mock CLI 输出与离线 JSONL 主机；它们不计真实 case。统一口径见 [网页 QA 证据指南](../../docs/WEBSITE-QA-EVIDENCE.md) 和 [本轮回归约束](../website-qa/REFLOW-REGRESSIONS-20261013.md)。
+
+正式页面判断固定使用 **fixed50（中文正文占比阈值 50%）**：采集端的 session 配置与 QA 主机规则判断均使用该基线。产品可配置比例是用户偏好，不能据此调整正式评分的判断口径或更改用户设置。正文识别、站点规则、手动控制、模型/请求预算与期限仍按原接口执行。
 
 当前 `predictions` 表示最后采样时仍在生产 session 中的块；全部观察历史保存在
 `predictionHistory` 和原始 JSONL。重排后已被新块替代的旧 pending ID 不再冒充当前漏译，
@@ -9,15 +11,15 @@ currentlyRendered 表示它在本次真实 DOM 采样中是否仍呈现；审核
 已跳过的动态页面以页面决策稳定为等待条件，持续变化的源文字与几何仍保留，不声称
 网页内容静止。正例仍需内容与完成状态稳定、真实请求及成功终止。原样名称的源前缀
 （如 FOI → FOIA）单调补全不算译文撤回；真正不同的译文恢复原文/空白仍记录。
-sourceObservations 保留每个独立源最后实际呈现时的生产分片集合；隐藏后缺少 block 不会
-覆盖该观测。扫描中尚未获得预测的源保持 unknown，最后 pending 集合不能借用此前成功。
+sourceObservations 保留每个独立源被实际采样且呈现/原子块代表时的生产分片集合；隐藏后缺少 block 不会
+覆盖该观测。这是生产状态观察，不是独立 needTranslation 真值。若 mutation 曾采到可见源，但在下一次控制端采样前隐藏，可能只有 sourceNodes 历史而没有可用 sourceObservations；后来 eligible=false、currentlyRendered=false 不能证明历史拒绝。负观察需要源当时有完整独立成员证据、真实 idle 和可信生产标志；未观察或尚未解决的源保持 unknown，最后 pending 集合不能借用此前成功。
 atomic block 的 sourceIds 来自生产 atomicRecords，每个成员都必须有独立源证据；同一块
 完成状态可对应这些成员。全部原始采样、历史预测、失败终止和撤回继续保留。
 
 ## 边界和入口
 
 - Python 标准库，无新增依赖。离线页面适配器检查使用仓库现有 Node。
-- 所有浏览器操作只有一个入口：`C:/Users/cool848457/.codex/skills/browser-use-cli/scripts/run_browser_use.py`。使用命名 session、`--json open/state/eval/screenshot`，命令始终为参数列表、`shell=false`。没有 Playwright、CDP、WebDriver、HTTP 或 MCP 备用通道。
+- 所有浏览器操作只有一个入口：已安装 browser-use-cli skill 的 `scripts/run_browser_use.py` 包装器。使用命名 session、`--json open/state/eval/screenshot`，命令始终为参数列表、`shell=false`。没有 Playwright、CDP、WebDriver、HTTP 或 MCP 备用通道。
 - 真实运行仅由主控执行。驱动不读取用户配置或凭据，不换模型，不绕过访问控制。`--host-command-json` 指向主控提供的 live-backend JSONL 程序；该程序承担正常设置与服务商选择。
 - 原样分块注入生产 `page-auto-policy.js`、`translation-motion.js`、`page-auto-content.js`，然后安装 `page-adapter.js`。生产识别、分组、样式、文本写入、session.configure/receive、开放 Shadow DOM MutationObserver 都由原模块执行。适配器只替换消息传输并采集证据。拒绝存在扩展 runtime 的页面，避免两套 session 同时运行。
 - 每次 eval 参数限制在 20000 bytes UTF-16 内；生产源通常按 8000 字符拼接后执行。分块按 JSON 序列化后的完整表达式（包括前后缀、转义、中文与非 BMP 字符）计算实际预算，必要时自动缩小，避开 Windows 32k 命令行限制。`state` 的 `data._raw_text` 原样保留；eval 从 `data.result` 读取，不解析 state 文本来生成候选。
@@ -76,6 +78,8 @@ python eng/browser-use-qa/capture.py `
 - 原子 block 的 `sourceIds` 只排除源文为空或全为 JavaScript trim 空白的成员，保留所有非空成员的身份。当前显示为空、隐藏或脱离不能作为过滤理由；未独立可见的非空成员仍使整个预测 unmatched。不会改写生产 atomicRecords、文本或 eligibility。
 - screenshots：before、after、stable、scroll-before、scroll-after、return-after、reflow-after。实际滚动约一屏，再返回顶部；存在关闭 details 时额外展开/还原并截图。重排通过临时设置 body max-width 为 viewport 的 80% 触发真实换行，保存并恢复原 inline 值及 priority；同时派发 resize 检查生产监听器。没有改浏览器窗口尺寸的能力，因此这不是 viewport resize 测试。
 - 可选 `--full-screenshots`（别名 `--full`）另外捕获 before-full、after-full、stable-full，通过同一包装器调用 `screenshot <path> --full`。保留原首屏/滚动截图，完整页截图有独立 phase、文件、时间、viewport、SHA-256 与 `fullPage=true`；启用时缺少任一完整页截图不能记 evidenceReady，审核须对所有 phase 单独投票且核对原始哈希。选项冻结在 run 配置中；改变选项或源文件须创建新 run ID，原失败 attempt 不修改。完整页截图仍需人工检查长页的正文、裁切、重叠和重排，不证明无限滚动内容已经加载完毕。
+- 截图命令可能触发新的扫描或请求，故截图之后、dispose 之前仍须通过 `final-idle` 的真实语义等待并转发原始 host 事件。`finalScreenshotProof.screenshotsCurrent=true` 表示最后 stable（启用完整页时也包括 stable-full）图片与该次最终状态有可审核的时间关联；它既可来自内容/语义与请求身份数量匹配，也可来自独立源版本/可见性变化的时间戳解释。已观察的 skipped 动态内容也可保留时间戳证据。此字段不声称网站静止、几何不动或人工布局审核通过。源文未变的显示/预测变化不能用“动态网页”解释；仍须刷新，原上限 3 次和同一 case 期限耗尽后保留失败。新请求必须先取得真实终止，不能借用先前 idle。
+- 刷新使用新的 `stable-refresh-N` / `stable-full-refresh-N` phase，保存原图而不覆盖；`basePhase` 仅关联最后一对证明图片。人工必须审核所有唯一 phase，包括初始图、每次刷新图、完整页的全部区域/拼接内容与 details 图；最后一对为 true 不能抹去较早的失败或撤回。
 - 每个阶段等待生产无 jobs/pending/scanning/rpcPending、实际 skipped/completed 状态、boolean pageDecision、全部已发请求成功终止且无 failed，再要求语义连续不变达到 stable_seconds（默认 2 秒）。只有 `pageDecision=true` 才要求当前 eligible 预测均 completed；`pageDecision=false` 时允许保留 `eligible=true, completed=false, failed=false` 的未翻译候选，原标志不改写，候选识别准确率另行评分。负例要求实际零模型请求，任一 failed、未解决任务、缺失/失败 terminal 都不能通过。正例语义签名使用当前 `nodes` 的源文/显示文本/标签/角色多重集，以及当前生产预测的源文/文本、eligible/completed/failed 和源证据匹配标志、pageDecision；保留重复行数量，忽略顺序、时间戳、坐标、locator 和仅用于 bookkeeping 的 ID/groupId。实际文本或数量变化会重新计时。使用当前节点而非累计 sourceNodes 历史判定，以免相同内容的新身份不断替换阻止语义稳定。负例等待页面决策稳定，允许源 ticker 内容变化；追加的 decision/outbound、assessing/waiting_for_page 事件或新 candidate 请求会重启 quiet period，因此两次 idle 采样之间的决策重置和 assessment storm 不能被误当成完成。全部原事件、来源与几何采样继续保留。
 - `settled` 仅表示上述语义等待通过，另写 `settlementKind=semantic`、`semanticStable`、`layoutReviewRequired=true`。每次 raw sample 的完整几何和阶段信息保持在 JSONL；另追加 `stability` 记录，并在 case 的 `stability[phase]` 保存最后一条：semanticUnchanged/semanticStable/stableForSeconds 与 geometryChanged/geometryVaried/geometryChanges 分开记录。几何变化单独比较 rects/可见状态多重集及 viewport，不用文本、locator 或行顺序冒充位移；这些诊断不认证布局稳定。CSS 轮播持续移动仍可能语义稳定，截图的人工布局检查始终必须完成。所有源身份继续累积到 sourceNodes 和 unknown annotations，不按语义签名去重或过滤；未匹配预测、历史未知证据和失败继续保留。
 - 截图存路径、时间、viewport 与 SHA-256。必要时主控增加滚动范围/站点交互；默认一次滚动不能证明覆盖无限滚动站点的全部内容。本轮仅以离线夹具验证语义等待修复，没有重跑真实 People.com.cn 或宣称真实语料通过。
@@ -85,7 +89,7 @@ python eng/browser-use-qa/capture.py `
 
 ## 独立审核（离线）
 
-人类依据原文和截图独立标注，不根据 predictions 自动生成标签。准备外部 review JSON：
+人类先依据独立原文、角色、位置和源截图标注，并在逐节点查看 predictions 前冻结页面与全部历史源标签及其证据版本；新源或源版本也须独立标注。无法判断的保持 unknown，不根据 eligible/completed、缓存或审核票生成真值，也不使用 holdout 调参。准备外部 review JSON：
 
 ```json
 {
@@ -99,7 +103,7 @@ python eng/browser-use-qa/capture.py `
 }
 ```
 
-必须审核 case 中的全部 screenshot phase（存在 details 时也包括额外两张，启用完整页截图时也包括 before-full/after-full/stable-full）。运行：
+示例只列基本 phase；必须按实际 case 审核全部唯一 screenshot phase（存在 details 时也包括额外两张，启用完整页截图时也包括 before-full/after-full/stable-full，以及所有 stable-refresh-N/stable-full-refresh-N）。每张原图均须核对哈希、时间与源变化；完整页须逐区域检查。运行：
 
 ```powershell
 python eng/browser-use-qa/review.py `
@@ -113,10 +117,10 @@ python eng/browser-use-qa/review.py `
 ## 离线验收
 
 ```powershell
-pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId transport
-C:/Users/cool848457/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe -m unittest discover -s eng/browser-use-qa/tests -p 'test_*.py'
+pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId evidence-guide
+python -m unittest discover -s eng/browser-use-qa/tests -p 'test_*.py'
 ```
 
-测试包括 mock CLI JSON/失败/分块注入（转义、非 BMP、中文与 UTF-16 边界），批量交付的原始帧/交错 RPC/单次确认/顺序、完整包装预算边界、大包安全数据分块、错误与逐事件日志、case 期限与子进程超时，Promise 空对象及任务 completed/failed/timeout 回归，负例只有完整 probe 才能转发 assess，合成 DOM 可见候选（脚本/样式/隐藏节点不生成证据、后来显示/隐藏/脱离保留完整历史、预测 unmatched）/稳定 ID/撤回/RPC/监听器，独立 JSONL 严格 mock 进程（拒绝空身份/重复请求、核验响应关联、同一主机连续两个站点），实际 Windows 句柄占用与模拟替换冲突/耗尽/旧证据保留/失败堆栈，持续 rect/locator/顺序/身份运动的语义稳定、所有替换源身份/unknown 历史保留、13 个 eligible 未翻译候选的 skipped 负例零翻译请求且捕获全部截图、负例文本变化/failed/未解决任务仍阻止稳定、文本/数量变化和未解决任务阻止稳定、完整页独立截图/哈希/审核门槛，逐站截图阶段、失败恢复、冻结/历史保护、完成门槛与独立审核。测试临时目录在 owned tests 内并自动清理。实际验收日志和修复前 trace 保留于忽略的 `.test-logs/`，原主控审查失败报告保持不动；没有执行真实 Browser Use、网络或模型。
+测试包括 mock CLI JSON/失败/分块注入（转义、非 BMP、中文与 UTF-16 边界），批量交付的原始帧/交错 RPC/单次确认/顺序、完整包装预算边界、大包安全数据分块、错误与逐事件日志、case 期限与子进程超时，Promise 空对象及任务 completed/failed/timeout 回归，负例只有完整 probe 才能转发 assess，合成 DOM 可见候选（脚本/样式/隐藏节点不生成证据、后来显示/隐藏/脱离保留完整历史、预测 unmatched）/稳定 ID/撤回/RPC/监听器，独立 JSONL 严格 mock 进程（拒绝空身份/重复请求、核验响应关联、同一主机连续两个站点），实际 Windows 句柄占用与模拟替换冲突/耗尽/旧证据保留/失败堆栈，持续 rect/locator/顺序/身份运动的语义稳定、所有替换源身份/unknown 历史保留、13 个 eligible 未翻译候选的 skipped 负例零翻译请求且捕获全部截图、负例文本变化/failed/未解决任务仍阻止稳定、文本/数量变化和未解决任务阻止稳定、完整页独立截图/哈希/审核门槛，逐站截图阶段、失败恢复、冻结/历史保护、完成门槛与独立审核。测试临时目录在 owned tests 内并自动清理。实际验收日志和修复前 trace 留在忽略目录，原主控审查失败报告保持不动；本任务的这些离线测试不执行真实 Browser Use、网络或模型，不改变已有真实访问的历史记录。
 
 capture-evidence 回归另外使用 fake wrapper runner 与假主机事件核对失败 packet 后的原始 failed terminal（包含真实形式的非零 requestCount/failedCount）、最终节点标志与截图哈希、截图失败不丢终止、缺失 terminal 和截止瞬间不启动额外采集。负页回归涵盖零模型 native assessment、实际模型调用拒绝、unknown/缺失 requestCount、采样间决策重置及持续零模型 assessment storm。全部仍是离线合成证据，不计真实网页完成率。
