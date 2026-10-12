@@ -25,7 +25,7 @@ public static class PageTextSemanticGuard
     private const string Numeric = @"(?:" + ArabicNumeric + "|" + ChineseNumeric + ")";
     private const string CurrencyPrefix = @"US\$|USD\b|EUR\b|\$|€";
     private const string CurrencySuffix = @"(?:US|U\.S\.)\s+dollars?\b|dollars?\b|euros?\b|USD\b|EUR\b|美元|美金|欧元|歐元";
-    private const string QuantityUnits = @"分钟|分鐘|小时|小時|居民|用户|用戶|传感器|傳感器|摄氏度|攝氏度|毫升|公斤|千米|毫米|厘米|参数|參數|维度|維度|维|維|令牌|词元|詞元|标记|標記|字节|字節|字符|向量|编码器|編碼器|种|種|类|類|项|項|组|組|层|層|帧|幀|倍|tokens?\b|天|个|個|位|名|人|户|戶|只|台|枚|件|本|瓶|秒|歳|岁|歲|次|米|比|号|號";
+    private const string QuantityUnits = @"分钟|分鐘|小时|小時|居民|用户|用戶|传感器|傳感器|摄氏度|攝氏度|毫升|公斤|千米|毫米|厘米|参数|參數|维度|維度|维|維|令牌|词元|詞元|标记|標記|字节|字節|字符|向量|编码器|編碼器|种|種|类|類|项|項|组|組|层|層|帧|幀|倍|tokens?\b|天|个|個|位|名|人|户|戶|只|台|枚|件|本|瓶|所|艘|辆|輛|栋|棟|秒|歳|岁|歲|次|米|比|号|號";
     private static readonly Regex FollowingQuantityUnit = MakeRegex(@"\G\s*(?:多|余|餘|来|來)?\s*(?:" + QuantityUnits + @")");
     private static readonly Regex ExplicitHanBillion = MakeRegex(@"^[负負]?[零〇一二两兩三四五六七八九十百千]+(?:[点點][零〇一二两兩三四五六七八九]+[十百千]*)?(?:万亿|萬億|亿|億)$");
     private static readonly Regex ByteContext = MakeRegex(@"\b(?:bytes?|packets?|buffers?|files?|storage|memory|disk|downloads?)\b|字节|字節|数据包|資料包|缓冲|緩衝|文件大小|檔案大小|内存|記憶體");
@@ -64,6 +64,21 @@ public static class PageTextSemanticGuard
     private static readonly Regex ChineseNumber = MakeRegex(ChineseNumeric
         + @"(?=\s*(?:年|月|日|天|个|個|位|名|人|只|台|枚|件|本|瓶|分钟|分鐘|分|秒|小时|小時|歳|岁|歲|次|米|毫升|公斤|比|号|號|%))|(?<=比)" + ChineseNumeric);
     private static readonly Regex WholeChineseNumber = MakeRegex(@"^\s*(?<number>" + ChineseNumeric + @")\s*[。.!]?\s*$");
+    private const string CalendarDigits = @"[零〇一二三四五六七八九]";
+    // Explicit phase synonyms only; match longer forms before 初/中/末 so the
+    // shared century/decade parser retains the full early/mid/late distinction.
+    private const string CalendarPhase = @"早期|初期|中期|中叶|中葉|晚期|后期|後期|末期|初|中|末";
+    private static readonly Regex ChineseDecades = MakeRegex(
+        @"(?<![\d零〇一二三四五六七八九十百千])(?:(?<century>\d{1,2}|[零〇一二三四五六七八九十]{1,4})\s*世[纪紀]\s*(?<decade>\d{1,2}|[零〇一二三四五六七八九十]{1,3})|(?<year>\d{4}|" + CalendarDigits + @"{4}))\s*年代\s*(?<phase>" + CalendarPhase + @")?");
+    private static readonly Regex EnglishDecades = MakeRegex(
+        @"(?<![\p{L}\p{N}_.+])(?:(?<phase>early|mid|late)[\s-]+)?(?<year>\d{4})['’]?s\b");
+    private static readonly Regex CalendarDecadePrefix = MakeRegex(@"\bthe\s+$");
+    private static readonly Regex DurationPrefix = MakeRegex(@"\b(?:for|lasts?|lasted|lasting|takes?|took|taking|wait|waited|waiting|duration|timeout|delay|runtime|elapsed)\s*(?:(?:of|was|is)\s*|[=:]\s*)?$");
+    private static readonly Regex DurationSuffix = MakeRegex(@"^\s*(?:elapsed|long|duration|timeout|delay|runtime|wait)\b");
+    private static readonly Regex DurationContext = MakeRegex(@"\b(?:duration|timeout|delay|runtime|elapsed|wait|waited|waiting|lasted|lasting|takes?|took|taking|completed|finished|seconds?)\b");
+    private static readonly Regex Centuries = MakeRegex(
+        @"(?<![\d零〇一二三四五六七八九十百千])(?<century>\d{1,2}|[零〇一二三四五六七八九十]{1,4})\s*世[纪紀]\s*(?<phase>" + CalendarPhase + @")?"
+        + @"|\b(?:(?<phase>early|mid|late)[\s-]+)?(?<century>\d{1,2})(?:st|nd|rd|th)\s+century\b");
     private static readonly IReadOnlyDictionary<string, string> DayNumbers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["Monday"] = "1", ["lundi"] = "1", ["月"] = "1",
@@ -163,6 +178,52 @@ public static class PageTextSemanticGuard
         string ReadTwoFactor(Match _) { numbers.Add("auth-factors:2"); return " "; }
         normalized = TwoFactorAuthentication.Replace(normalized, ReadTwoFactor);
         if (twoFactorContext) normalized = ContextualTwoFactor.Replace(normalized, ReadTwoFactor);
+        // Keep a decade separate from its component numbers: 1960s is exactly
+        // 20世纪60年代, not the year 1960 or an unspecified century beginning.
+        // These typed numbers also participate in the existing per-ID transfer check.
+        normalized = ChineseDecades.Replace(normalized, match =>
+        {
+            decimal year;
+            if (match.Groups["year"].Success)
+            {
+                if (!TryNumber(match.Groups["year"].Value, out year)) return match.Value;
+            }
+            else
+            {
+                if (!TryNumber(match.Groups["century"].Value, out var century) || century is < 1 or > 99
+                    || !TryNumber(match.Groups["decade"].Value, out var decade) || decade is < 0 or > 90 || decade % 10 != 0)
+                    return match.Value;
+                year = (century - 1) * 100 + decade;
+            }
+            if (year is < 1000 or > 9990 || year % 10 != 0) return match.Value;
+            numbers.Add("decade:" + Canonical(year) + ":" + Phase(match.Groups["phase"].Value));
+            return " ";
+        });
+        normalized = EnglishDecades.Replace(normalized, match =>
+        {
+            if (!TryNumber(match.Groups["year"].Value, out var year) || year is < 1000 or > 9990 || year % 10 != 0)
+                return match.Value;
+            // A hyphen after another decade is a range separator, not a sign.
+            if (match.Index > 0 && normalized[match.Index - 1] == '-'
+                && (match.Index < 2 || char.ToLowerInvariant(normalized[match.Index - 2]) != 's')) return match.Value;
+            // Attached s can mean seconds. Explicit calendar qualifiers take priority;
+            // local duration cues leave the quantity to the ordinary number parser.
+            var prefix = normalized[Math.Max(0, match.Index - 80)..match.Index];
+            var clauseStart = prefix.LastIndexOfAny(['.', ';', '\n', '。', '；']);
+            if (clauseStart >= 0) prefix = prefix[(clauseStart + 1)..];
+            var suffix = normalized[(match.Index + match.Length)..Math.Min(normalized.Length, match.Index + match.Length + 80)];
+            if (!match.Groups["phase"].Success && (DurationSuffix.IsMatch(suffix)
+                || (!CalendarDecadePrefix.IsMatch(prefix) && (DurationPrefix.IsMatch(prefix) || DurationContext.IsMatch(prefix)))))
+                return match.Value;
+            numbers.Add("decade:" + Canonical(year) + ":" + Phase(match.Groups["phase"].Value));
+            return " ";
+        });
+        normalized = Centuries.Replace(normalized, match =>
+        {
+            if (!TryNumber(match.Groups["century"].Value, out var century) || century is < 1 or > 99) return match.Value;
+            numbers.Add("century:" + Canonical(century) + ":" + Phase(match.Groups["phase"].Value));
+            return " ";
+        });
         // Extract units before clocks/bare numbers: 十二点五 percent is 12.5%, not 12:05,
         // and 90 billion euros is the same fact as 900亿欧元. Keep currency identity;
         // a currency conversion is not inferred or accepted by this local safeguard.
@@ -421,9 +482,18 @@ public static class PageTextSemanticGuard
 
     private static string Canonical(decimal value) => value.ToString("0.############################", CultureInfo.InvariantCulture);
 
+    private static string Phase(string value) => value.ToLowerInvariant() switch
+    {
+        "early" or "初" or "初期" or "早期" => "early",
+        "mid" or "中" or "中期" or "中叶" or "中葉" => "mid",
+        "late" or "末" or "末期" or "晚期" or "后期" or "後期" => "late",
+        _ => "all"
+    };
+
     private static bool IsUnitFact(string value) => value.StartsWith("money:", StringComparison.Ordinal)
         || value.StartsWith("percent:", StringComparison.Ordinal) || value.StartsWith("percentage-points:", StringComparison.Ordinal)
-        || value.StartsWith("auth-factors:", StringComparison.Ordinal);
+        || value.StartsWith("auth-factors:", StringComparison.Ordinal)
+        || value.StartsWith("decade:", StringComparison.Ordinal) || value.StartsWith("century:", StringComparison.Ordinal);
 
     private static Regex MakeRegex(string pattern) => new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexBudget);
     private sealed record TextFacts(HashSet<string> Weekdays, HashSet<string> Times, HashSet<string> Dates, HashSet<string> Numbers);

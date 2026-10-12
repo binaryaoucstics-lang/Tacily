@@ -6,6 +6,225 @@ namespace ScreenTranslator.Core.Tests.Translation;
 public sealed class PageTextSemanticGuardTests
 {
     [Theory]
+    // Original Stanford phrase: 晚期 must not lose the source's late phase.
+    [InlineData("in the late 19th century", "在19世纪晚期")]
+    [InlineData("early 19th century", "19世纪早期")]
+    [InlineData("mid-19th century", "19世纪中期")]
+    [InlineData("mid-19th century", "十九世纪中叶")]
+    [InlineData("mid-19th century", "十九世紀中葉")]
+    [InlineData("late 19th century", "19世纪后期")]
+    [InlineData("late 19th century", "十九世紀後期")]
+    [InlineData("early 1980s", "20世纪80年代早期")]
+    [InlineData("early 2000s", "二〇〇〇年代早期")]
+    [InlineData("mid-1980s", "1980年代中期")]
+    [InlineData("mid-1980s", "20世纪80年代中叶")]
+    [InlineData("mid-1980s", "二十世紀八十年代中葉")]
+    [InlineData("late 1980s", "20世纪80年代晚期")]
+    [InlineData("late 1980s", "1980年代后期")]
+    [InlineData("late 1980s", "一九八〇年代後期")]
+    public void ExplicitChinesePhaseSynonymsPreservePreciseCalendarFacts(string source, string translation)
+    {
+        Assert.True(PageTextSemanticGuard.HasProtectedFacts(source));
+        Assert.True(PageTextSemanticGuard.HasProtectedFacts(translation));
+        Assert.Empty(Check(source, translation));
+        Assert.Empty(Check(translation, source));
+    }
+
+    [Theory]
+    [InlineData("early 19th century", "19世纪中叶")]
+    [InlineData("early 19th century", "19世纪晚期")]
+    [InlineData("mid-19th century", "19世纪早期")]
+    [InlineData("mid-19th century", "19世纪后期")]
+    [InlineData("late 19th century", "19世纪早期")]
+    [InlineData("late 19th century", "19世紀中葉")]
+    [InlineData("early 1980s", "1980年代中叶")]
+    [InlineData("early 1980s", "1980年代晚期")]
+    [InlineData("mid-1980s", "1980年代早期")]
+    [InlineData("mid-1980s", "1980年代後期")]
+    [InlineData("late 1980s", "1980年代早期")]
+    [InlineData("late 1980s", "1980年代中葉")]
+    [InlineData("late 19th century", "19世纪")]
+    [InlineData("19th century", "19世纪晚期")]
+    [InlineData("late 1980s", "1980年代")]
+    [InlineData("1980s", "1980年代后期")]
+    [InlineData("in the late 19th century", "在20世纪晚期")]
+    [InlineData("late 1980s", "20世纪90年代晚期")]
+    [InlineData("early 2000s", "21世纪早期")]
+    public void ExplicitChinesePhasesCannotChangeOrReplaceCalendarPrecision(string source, string translation)
+        => Assert.Equal(new[] { "node" }, Check(source, translation));
+
+    [Theory]
+    // Hand-authored regressions for the observed Wikipedia and Stanford failures.
+    [InlineData("in the 1960s, was used by Xerox to translate technical manuals (1978). Beginning in the late 1980s, as", "在20世纪60年代，被施乐公司用于翻译技术手册（1978年）。从20世纪80年代末开始，随着")]
+    [InlineData("1990s and early 2000s", "1990年代和2000年代初")]
+    [InlineData("The 7 Schools", "七所学校")]
+    [InlineData("The 7 Schools", "七所學校")]
+    [InlineData("1960s", "20世纪60年代")]
+    [InlineData("1960s", "二十世纪六十年代")]
+    [InlineData("1960s", "二十世紀六十年代")]
+    [InlineData("1960s", "一九六〇年代")]
+    [InlineData("early 2000s", "二〇〇〇年代初期")]
+    [InlineData("early 2000s", "21世纪00年代初")]
+    [InlineData("late 1980s", "一九八零年代末")]
+    [InlineData("mid-1980s", "20世纪80年代中期")]
+    [InlineData("in the 1960's", "1960年代")]
+    [InlineData("1960s–1980s", "20世纪60年代至20世纪80年代")]
+    [InlineData("1960s-1980s", "1960年代至1980年代")]
+    [InlineData("20th century", "二十世纪")]
+    [InlineData("early 21st century", "21世纪初")]
+    [InlineData("七所学校", "The 7 Schools")]
+    [InlineData("3 ships and 4 vehicles", "三艘船和四辆车")]
+    [InlineData("2 buildings", "两栋楼")]
+    public void AcceptsPreciseDecadesCenturiesAndExplicitChineseClassifiers(string source, string translation)
+        => Assert.Empty(Check(source, translation));
+
+    [Theory]
+    [InlineData("in the 1960s, was used by Xerox to translate technical manuals (1978). Beginning in the late 1980s, as", "在21世纪60年代，被施乐公司用于翻译技术手册（1978年）。从20世纪80年代末开始，随着")]
+    [InlineData("1990s and early 2000s", "20世纪90年代至21世纪初")]
+    [InlineData("early 2000s", "21世纪初")]
+    [InlineData("early 2000s", "2000年代")]
+    [InlineData("early 2000s", "2000年代末")]
+    [InlineData("late 1980s", "20世纪80年代初")]
+    [InlineData("1960s", "21世纪60年代")]
+    [InlineData("1960s", "20世纪70年代")]
+    [InlineData("1960s", "1960年")]
+    [InlineData("1960s", "1961年代")]
+    [InlineData("1960s", "1960年代及1970年代")]
+    [InlineData("1960s–1980s", "1960年代至1990年代")]
+    [InlineData("1960s–1980s", "1960年代")]
+    [InlineData("20th century", "21世纪")]
+    [InlineData("early 21st century", "21世纪")]
+    [InlineData("The 7 Schools", "八所学校")]
+    [InlineData("The 7 Schools", "学校")]
+    [InlineData("七所学校", "The 8 Schools")]
+    public void RejectsChangedMissingOrVagueDecadesAndSchoolCounts(string source, string translation)
+        => Assert.Equal(new[] { "node" }, Check(source, translation));
+
+    [Theory]
+    [InlineData("Wait for 2000s.", "等待2000秒。")]
+    [InlineData("The task took 2000s.", "任务花了两千秒。")]
+    [InlineData("Timeout: 2000s", "超时：2000秒")]
+    [InlineData("2000s elapsed.", "经过了两千秒。")]
+    [InlineData("A 2000s delay.", "延迟2000秒。")]
+    [InlineData("The 2000s timeout expired.", "2000秒的超时已到。")]
+    [InlineData("The timeout is set to 2000s.", "超时设为两千秒。")]
+    [InlineData("The task completed in 2000s.", "任务在两千秒内完成。")]
+    [InlineData("-2000s elapsed.", "经过了负两千秒。")]
+    [InlineData("Wait for 2000 s.", "等待两千秒。")]
+    [InlineData("During the 2000s, adoption grew.", "在2000年代，使用率有所增长。")]
+    [InlineData("Wait for 2000s; adoption grew in the 2000s.", "等待两千秒；使用率在2000年代增长。")]
+    public void DistinguishesSecondsFromCalendarDecadesUsingLocalContext(string source, string translation)
+        => Assert.Empty(Check(source, translation));
+
+    [Theory]
+    [InlineData("Wait for 2000s.", "等待2000年代。")]
+    [InlineData("The task took 2000s.", "任务花了2000年代。")]
+    [InlineData("Timeout: 2000s", "超时：2000年代")]
+    [InlineData("A 2000s delay.", "延迟2000年代。")]
+    [InlineData("The timeout is set to 2000s.", "超时设为2000年代。")]
+    [InlineData("The task completed in 2000s.", "任务在2000年代完成。")]
+    [InlineData("Wait for 2000s.", "等待200秒。")]
+    [InlineData("During the 2000s, adoption grew.", "2000秒内使用率增长。")]
+    [InlineData("During the 2000s, adoption grew.", "在21世纪初，使用率增长。")]
+    public void RejectsDurationChangesAndCalendarDurationSubstitution(string source, string translation)
+        => Assert.Equal(new[] { "node" }, Check(source, translation));
+
+    [Theory]
+    [InlineData("late 1980s", true)]
+    [InlineData("二十世纪六十年代", true)]
+    [InlineData("二〇〇〇年代初", true)]
+    [InlineData("21世纪初", true)]
+    [InlineData("七所学校", true)]
+    [InlineData("Wait for 2000s.", true)]
+    [InlineData("所有学校", false)]
+    [InlineData("统一思想，唯一选择。", false)]
+    [InlineData("万一下雨，千万不要出门。", false)]
+    public void ProtectedFactsUsesTheSameCalendarAndQuantityParser(string source, bool expected)
+        => Assert.Equal(expected, PageTextSemanticGuard.HasProtectedFacts(source));
+
+    [Theory]
+    [InlineData("in the late 1980s", "在20世纪80年代末")]
+    [InlineData("early 2000s", "在二〇〇〇年代初")]
+    [InlineData("The 7 Schools", "七所学校")]
+    [InlineData("in the late 19th century", "在19世纪晚期")]
+    [InlineData("early 19th century", "19世纪早期")]
+    [InlineData("mid-19th century", "十九世紀中葉")]
+    [InlineData("late 19th century", "十九世紀後期")]
+    [InlineData("early 1980s", "20世纪80年代早期")]
+    [InlineData("mid-1980s", "1980年代中叶")]
+    [InlineData("late 1980s", "1980年代后期")]
+    public void EquivalentNewFactsStillProtectTheirOwnerAndActualReceiver(string ownerText, string equivalent)
+    {
+        BrowserPageTextBlock[] source = [new("owner", ownerText), new("receiver", "Read more"), new("unrelated", "Contact us")];
+        var translations = new Dictionary<string, string>
+        {
+            ["owner"] = "更多信息", ["receiver"] = equivalent, ["unrelated"] = "联系我们"
+        };
+        var assessment = PageTextSemanticGuard.Assess(source, translations);
+        Assert.Equal(new[] { "owner", "receiver" }, assessment.UnsafeIds);
+        Assert.Equal(new[] { new PageTextNumericTransfer("owner", "receiver") }, assessment.NumericTransfers);
+
+        translations["owner"] = equivalent;
+        translations["receiver"] = "了解更多";
+        assessment = PageTextSemanticGuard.Assess(source, translations);
+        Assert.Empty(assessment.UnsafeIds);
+        Assert.Empty(assessment.NumericTransfers);
+    }
+
+    [Theory]
+    [InlineData("late 19th century", "19世纪早期")]
+    [InlineData("early 19th century", "19世纪中叶")]
+    [InlineData("mid-1980s", "1980年代後期")]
+    public void WrongPhaseOnAnotherNodeDoesNotFabricateAnEquivalentTransfer(string ownerText, string wrongPhase)
+    {
+        BrowserPageTextBlock[] source = [new("owner", ownerText), new("receiver", "Read more")];
+        var assessment = PageTextSemanticGuard.Assess(source,
+            new Dictionary<string, string> { ["owner"] = "更多信息", ["receiver"] = wrongPhase });
+        Assert.Equal(new[] { "owner", "receiver" }, assessment.UnsafeIds);
+        Assert.Empty(assessment.NumericTransfers);
+    }
+
+    [Fact]
+    public void WrongCenturyOnAnotherNodeDoesNotFabricateAnEquivalentTransfer()
+    {
+        BrowserPageTextBlock[] source = [new("owner", "in the 1960s"), new("receiver", "Read more")];
+        var assessment = PageTextSemanticGuard.Assess(source,
+            new Dictionary<string, string> { ["owner"] = "更多信息", ["receiver"] = "在21世纪60年代" });
+        Assert.Equal(new[] { "owner", "receiver" }, assessment.UnsafeIds);
+        Assert.Empty(assessment.NumericTransfers);
+    }
+
+    [Fact]
+    public void ExistingEquivalentFactOnAnotherNodeIsNotAReceivingTransfer()
+    {
+        BrowserPageTextBlock[] source = [new("owner", "1960s"), new("existing", "20世纪60年代")];
+        var assessment = PageTextSemanticGuard.Assess(source,
+            new Dictionary<string, string> { ["owner"] = "更多信息", ["existing"] = "1960年代" });
+        Assert.Equal(new[] { "owner" }, assessment.UnsafeIds);
+        Assert.Empty(assessment.NumericTransfers);
+    }
+
+    [Fact]
+    public void SwappedDecadesReportBothDirectedTransfers()
+    {
+        BrowserPageTextBlock[] source = [new("a", "early 2000s"), new("b", "late 1980s")];
+        var assessment = PageTextSemanticGuard.Assess(source,
+            new Dictionary<string, string> { ["a"] = "20世纪80年代末", ["b"] = "二〇〇〇年代初" });
+        Assert.Equal(new[] { "a", "b" }, assessment.UnsafeIds);
+        Assert.Equal(new[] { new PageTextNumericTransfer("a", "b"), new PageTextNumericTransfer("b", "a") }, assessment.NumericTransfers);
+    }
+
+    [Fact]
+    public void EqualDurationAndDecadeDigitsDoNotCreateATransferEdge()
+    {
+        BrowserPageTextBlock[] source = [new("calendar", "in the 2000s"), new("duration", "Wait for 2000s.")];
+        var assessment = PageTextSemanticGuard.Assess(source,
+            new Dictionary<string, string> { ["calendar"] = "等待2000秒", ["duration"] = "等待2000秒" });
+        Assert.Equal(new[] { "calendar" }, assessment.UnsafeIds);
+        Assert.Empty(assessment.NumericTransfers);
+    }
+
+    [Theory]
     [InlineData("Tune in next time for more Blue News at 11!", "下次继续收看11点的蓝色新闻！")]
     [InlineData("Meet at 11 tonight.", "今晚11点见。")]
     [InlineData("The stock was quoted at 11 dollars per share.", "这只股票的报价为每股11美元。")]
