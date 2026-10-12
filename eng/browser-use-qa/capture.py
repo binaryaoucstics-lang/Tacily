@@ -25,6 +25,7 @@ SOURCE_CHUNK_CHARACTERS = 8000
 DELIVERY_BATCH_PACKETS = 32
 FORWARD_EVENT_LIMIT = 1000
 REPLACE_RETRY_DELAYS = (.02, .05, .1)
+FINAL_SCREENSHOT_REFRESH_LIMIT = 3
 
 
 class CaptureError(RuntimeError):
@@ -98,6 +99,15 @@ def geometry_signature(value):
                           ("rects", "rendered", "ancestorsVisible", "inViewport")])
                    for row in value["nodes"])
     return encode([nodes, value["viewport"]])
+
+
+def screenshot_content_signature(value, dynamic_sources=()):
+    """Visible content, including authored text on rules-only skipped pages."""
+    nodes = sorted(encode(["dynamic-source", row["id"], row.get("tag"), row.get("role")]
+                         if row.get("id") in dynamic_sources else
+                         [row.get(key) for key in ("sourceText", "displayedText", "tag", "role")])
+                   for row in value["nodes"])
+    return hashlib.sha256(encode([nodes, value["pageDecision"]]).encode("utf-8")).hexdigest()
 
 
 def error_record(error, prefix=""):
@@ -613,16 +623,29 @@ class CaseCapture:
             save()
             return value
 
-        def screenshot(phase, full=False):
+        def screenshot(phase, full=False, base_phase=None):
+            check_deadline(deadline)
             value = sample(phase)
+            check_deadline(deadline)
+            # Each phase is an independently reviewable observation. Refreshes
+            # get new phases/files, retaining the canonical phase as metadata.
             image = path / (phase + ".png")
+            if image.exists() or any(shot["phase"] == phase for shot in case["screenshots"]):
+                raise CaptureError("screenshot_phase_or_file_exists")
             if full:
                 self.browser.screenshot(image, full=True)
             else:
                 self.browser.screenshot(image)
             case["screenshots"].append({"phase": phase, "path": image.name, "at": now(), "viewport": value["viewport"],
-                                        "sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "fullPage": full})
+                                        "sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "fullPage": full,
+                                        "contentSignature": screenshot_content_signature(value),
+                                        "dynamicContentSignature": screenshot_content_signature(value,
+                                            case["stability"].get("stable", {}).get("dynamicSourceIds", [])),
+                                        "semanticSignature": hashlib.sha256(semantic_signature(value).encode("utf-8")).hexdigest(),
+                                        "requestCount": len(case["requestIds"]),
+                                        **({"basePhase": base_phase} if base_phase is not None else {})})
             save()
+            check_deadline(deadline)
 
         def forward(phase=None, evidence_only=False, cleanup=False):
             frames = []
@@ -774,6 +797,8 @@ class CaseCapture:
         def settle(phase):
             quiet_since, signature = None, None
             geometry, geometry_changes = None, 0
+            content, content_changed = None, False
+            source_content, dynamic_sources = {}, set()
             while time.monotonic() - started < self.case_timeout:
                 value = forward(phase)
                 check_deadline(deadline)
@@ -785,6 +810,15 @@ class CaseCapture:
                 if value["pageDecision"] is False:
                     candidate_signature = encode([candidate_signature, len(case["requestIds"])])
                 candidate_geometry = geometry_signature(value)
+                candidate_content = screenshot_content_signature(value)
+                content_changed |= content is not None and candidate_content != content
+                content = candidate_content
+                for row in value["nodes"]:
+                    row_content = encode([row.get("sourceText"), row.get("displayedText")])
+                    source_id = row.get("id")
+                    if source_id in source_content and source_content[source_id] != row_content:
+                        dynamic_sources.add(source_id)
+                    source_content[source_id] = row_content
                 geometry_changed = geometry is not None and candidate_geometry != geometry
                 geometry_changes += int(geometry_changed)
                 idle = not value["jobs"] and not value["pending"] and not value["scanning"] and not value["rpcPending"]
@@ -818,6 +852,8 @@ class CaseCapture:
                                "geometryChanges": geometry_changes, "idle": idle, "statusReady": status_ready,
                                "terminalsComplete": terminals_complete, "predictionsComplete": predictions_complete,
                                "modelRequestsZero": model_requests_zero,
+                               "contentVaried": content_changed,
+                               "dynamicSourceIds": sorted(sid for sid in dynamic_sources if sid is not None),
                                "pageDecisionKnown": decision_known, "layoutReviewRequired": True}
                 log.append({"kind": "stability", **observation})
                 case["stability"][phase] = observation
@@ -829,6 +865,48 @@ class CaseCapture:
                 geometry = candidate_geometry
                 time.sleep(min(self.poll_seconds, max(0, deadline - time.monotonic())))
             raise CaptureError("case_timeout_without_settlement")
+
+        def final_settlement():
+            # Screenshot commands can trigger production scans, work and text
+            # changes. Every final observation uses the normal settlement proof,
+            # host forwarding and the original deadline, before QA disposal.
+            dynamic_sources = (case["stability"]["stable"]["dynamicSourceIds"]
+                               if case["pageDecision"] is False else [])
+            for refresh in range(FINAL_SCREENSHOT_REFRESH_LIMIT + 1):
+                value = settle("final-idle")
+                latest = {shot.get("basePhase", shot["phase"]): shot for shot in case["screenshots"]}
+                phases = ["stable"] + (["stable-full"] if self.full_screenshots else [])
+                content_matches = all(latest[phase]["contentSignature"] == screenshot_content_signature(value)
+                                      for phase in phases)
+                # Existing skip settlement certifies a decision even with a live
+                # authored ticker. Such screenshots are timestamped observations,
+                # never a claim that the site's content became static. A newly
+                # changed previously stable skip page still requires a refresh.
+                dynamic_skipped = bool(dynamic_sources) and value["pageDecision"] is False
+                comparable_content_matches = all(
+                    latest[phase]["dynamicContentSignature"] == screenshot_content_signature(value, dynamic_sources)
+                    for phase in phases) if dynamic_skipped else content_matches
+                final_semantics = hashlib.sha256(semantic_signature(value).encode("utf-8")).hexdigest()
+                current = all(latest[phase]["requestCount"] == len(case["requestIds"]) and
+                              latest[phase]["semanticSignature"] == final_semantics
+                              for phase in phases)
+                proof = {"refreshes": refresh, "contentMatches": content_matches,
+                         "dynamicSkippedContent": dynamic_skipped, "dynamicSourceIds": dynamic_sources,
+                         "screenshotsCurrent": current and comparable_content_matches, "at": value.get("at"),
+                         "contentSignature": screenshot_content_signature(value),
+                         "paths": [latest[phase]["path"] for phase in phases],
+                         "images": [{"basePhase": phase, **{key: latest[phase][key]
+                                     for key in ("phase", "path", "sha256")}} for phase in phases]}
+                log.append({"kind": "final_screenshot_proof", **proof})
+                case["finalScreenshotProof"] = proof
+                save()
+                check_deadline(deadline)
+                if proof["screenshotsCurrent"]:
+                    return
+                if refresh == FINAL_SCREENSHOT_REFRESH_LIMIT:
+                    raise CaptureError("final_screenshot_content_unstable")
+                for phase in phases:
+                    screenshot(f"{phase}-refresh-{refresh + 1}", full=phase == "stable-full", base_phase=phase)
 
         def failed_evidence():
             # No new candidates or retries: retain original ordered host events.
@@ -945,6 +1023,7 @@ class CaseCapture:
             settle("stable"); screenshot("stable")
             if self.full_screenshots:
                 screenshot("stable-full", full=True)
+            final_settlement()
             case["settled"] = True
             case["semanticStable"] = True
         except (CaptureError, OSError, ValueError, KeyError, TypeError) as error:
