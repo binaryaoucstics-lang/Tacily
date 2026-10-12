@@ -54,6 +54,34 @@ Invoke-WorkflowTest 'three independent processes overlap and preserve schema res
     Assert-Workflow ((Get-FileHash -LiteralPath (Join-Path $f.runPath 'state.json')).Hash -eq $before.Hash) 'Status mutated state.'
     $script:SuccessfulFixture=$f
 }
+Invoke-WorkflowTest 'refresh completion evidence after joining a child with stale liveness observation' {
+    $f=New-WorkflowFixture 'shutdown-observation'
+    $localScripts=Join-Path $f.repo 'eng/parallel'
+    $statusPath=Join-Path $localScripts 'Get-ParallelStatus.ps1'
+    $statusText=[IO.File]::ReadAllText($statusPath)
+    Assert-Workflow ($statusText.Contains('return ($null -ne $candidate)')) 'PID observation fixture anchor missing.'
+    # Simulate a stale PID observation while retaining the real child handle.
+    # Only fixture scripts are changed; no real CLI or network is used.
+    [IO.File]::WriteAllText($statusPath,$statusText.Replace('return ($null -ne $candidate)','return $false'),[Text.UTF8Encoding]::new($false))
+    Invoke-ParallelGit $f.repo @('add','eng/parallel/Get-ParallelStatus.ps1') | Out-Null
+    Invoke-ParallelGit $f.repo @('commit','-m','fixture stale liveness observation') | Out-Null
+    $f.plan.baseline=Get-ParallelHead $f.repo
+    Write-ParallelJson $f.planPath $f.plan
+    $stubPath=Join-Path $f.repo '.parallel/delayed-stub.ps1'
+    [IO.Directory]::CreateDirectory((Split-Path $stubPath -Parent)) | Out-Null
+    $stubText=[IO.File]::ReadAllText((Join-Path $script:WorkflowSource 'tests/Stub-Codex.ps1'))
+    Assert-Workflow ($stubText.Contains('Write-StubWindow $null')) 'Delayed stub anchor missing.'
+    [IO.File]::WriteAllText($stubPath,$stubText.Replace('Write-StubWindow $null',"Write-StubWindow `$null`nStart-Sleep -Milliseconds 1200"),[Text.UTF8Encoding]::new($false))
+    $result=Invoke-WorkflowScript 'Invoke-ParallelDevelopment.ps1' @('-PlanPath',$f.planPath,'-RepoRoot',$f.repo,'-RunRoot',$f.runRoot,'-CodexPath',$stubPath,'-TimeoutSeconds','15') $f.repo 90 $localScripts
+    $state=Read-WorkflowState $f
+    foreach ($task in $state.tasks) {
+        Assert-WorkflowEvidence $task
+        $process=Read-ParallelJson (Join-Path $task.attemptPath 'process.json')
+        Assert-Workflow ($process.status -eq 'exited' -and $process.exitCode -eq 0) 'Fixture child did not actually finish successfully.'
+        Assert-Workflow ($task.status -eq 'completed' -and $task.attempt -eq 1) 'Stale observation replaced valid completion evidence or caused a restart.'
+    }
+    Assert-WorkflowSuccess $result
+}
 foreach ($mode in @('failed','process-failure','missing-result','invalid-result','wrong-id','blocked','timeout')) {
     $testMode=$mode
     Invoke-WorkflowTest "runtime rejects $testMode and retains checkout/logs" {
