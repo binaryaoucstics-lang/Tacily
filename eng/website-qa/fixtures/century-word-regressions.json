@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "countsTowardRealGoal": false,
+  "basis": "Offline guard reproduction of the public Wikipedia development paragraph; no model outputs or credentials",
+  "sourceReference": "https://en.wikipedia.org/wiki/Machine_translation",
+  "cases": [
+    {"source": "a 9th century Arabic cryptographer", "translation": "一位9世纪的阿拉伯密码学家", "expectedSafe": true},
+    {"source": "a ninth-century Arabic cryptographer", "translation": "一位9世纪的阿拉伯密码学家", "expectedSafe": true},
+    {"source": "a 9th-century Arabic cryptographer", "translation": "一位9世纪的阿拉伯密码学家", "expectedSafe": true},
+    {"source": "an early ninth-century Arabic cryptographer", "translation": "一位9世纪初的阿拉伯密码学家", "expectedSafe": true},
+    {"source": "a ninth-century Arabic cryptographer", "translation": "一位10世纪的阿拉伯密码学家", "expectedSafe": false},
+    {"source": "an early ninth-century Arabic cryptographer", "translation": "一位9世纪末的阿拉伯密码学家", "expectedSafe": false}
+  ]
+}

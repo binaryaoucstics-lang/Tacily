@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "countsTowardRealGoal": false,
+  "fixedChineseProseShareThresholdPercent": 50,
+  "cases": [
+    {
+      "name": "Readable Chinese news headlines without paragraph punctuation",
+      "groups": [
+        {"text": "国产大型邮轮完成海上试航", "kind": "body"},
+        {"text": "我国重大科研成果正式发布", "kind": "body"},
+        {"text": "新型高速列车投入商业运营", "kind": "body"},
+        {"text": "国家科学中心推进基础研究", "kind": "body"},
+        {"text": "ENGLISH", "kind": "navigation"}
+      ],
+      "expectedPageTranslation": false
+    },
+    {
+      "name": "Foreign prose with one short Chinese headline",
+      "groups": [
+        {"text": "国产大型邮轮完成海上试航", "kind": "body"},
+        {"text": "This public article explains a reliable browser translation workflow and keeps the original paragraphs, links, and controls available to readers.", "kind": "body"}
+      ],
+      "expectedPageTranslation": true
+    }
+  ]
+}
