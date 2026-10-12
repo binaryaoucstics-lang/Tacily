@@ -30,7 +30,8 @@ public sealed record BrowserPageTranslationOptions
 /// <summary>
 /// Translates a bounded snapshot of plain DOM text. Concurrent batches retain
 /// original IDs, and independently generated pieces of a long node are revealed
-/// only when all previous pieces have completed. Inline paragraphs are staged until
+/// only when all previous pieces have completed. Inline paragraphs and independent
+/// nodes containing protected facts are staged until
 /// their facts pass the existing guard, with unsafe nodes retried within the request
 /// budget. An optional shared cache persists only complete, validated translations.
 /// </summary>
@@ -101,7 +102,10 @@ public sealed class BrowserPageTranslationService
                     || node.Block.Text.TrimEnd().EndsWith('?') || node.Block.Text.TrimEnd().EndsWith('!')
                     || node.Block.Text.TrimEnd().EndsWith('。') || node.Block.Text.TrimEnd().EndsWith('？')
                     || node.Block.Text.TrimEnd().EndsWith('！'));
-            foreach (var node in group) node.StageInline = stageInline;
+            // Use the guard's source parser so a standalone date, quantity or clock
+            // cannot publish an unverified numeric prefix before its final answer.
+            foreach (var node in group)
+                node.StageInline = stageInline || PageTextSemanticGuard.HasProtectedFacts(node.Block.Text);
         }
         var parts = new List<TextPart>();
         var cacheHits = 0;

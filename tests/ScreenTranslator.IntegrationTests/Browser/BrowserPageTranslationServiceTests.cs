@@ -10,25 +10,60 @@ namespace ScreenTranslator.IntegrationTests.Browser;
 public sealed class BrowserPageTranslationServiceTests
 {
     [Theory]
-    [InlineData("Tune in next time for more Blue News at 11!", "下次继续收看11点的蓝色新闻！")]
-    [InlineData("今日は１１時に漫画第3話を公開します！", "今天11点公开漫画第三话！")]
-    [InlineData("一時停止しています。後で再開します。", "暂时停止，稍后恢复。")]
-    [InlineData("11/8(日)に開催します。受講料は500円です。", "11/8（周日）举行，听课费500日元。")]
-    [InlineData("11/8(日)に開催します。受講料は500円です。", "11月8日（周日）举行，听课费500日元。")]
-    public async Task EquivalentSocialClocksAndJapaneseOrdinalsCommitAfterStreamingAndReplayWithoutNewRequest(string original,string translated)
+    [InlineData("Tune in next time for more Blue News at 11!", "下次继续收看11点的蓝色新闻！", true)]
+    [InlineData("今日は１１時に漫画第3話を公開します！", "今天11点公开漫画第三话！", true)]
+    [InlineData("一時停止しています。後で再開します。", "暂时停止，稍后恢复。", false)]
+    [InlineData("11/8(日)に開催します。受講料は500円です。", "11/8（周日）举行，听课费500日元。", true)]
+    [InlineData("11/8(日)に開催します。受講料は500円です。", "11月8日（周日）举行，听课费500日元。", true)]
+    public async Task EquivalentSocialClocksAndJapaneseOrdinalsCommitAfterStreamingAndReplayWithoutNewRequest(
+        string original, string translated, bool hasFacts)
     {
-        var streamed=NewSignal();
-        var provider=new Provider(async(request,progress,token)=>
+        var prefixReported = NewSignal();
+        var prefixVisible = NewSignal();
+        var release = NewSignal();
+        var provider = new Provider(async (request, progress, token) =>
         {
-            progress.Report(new("prefix"){ImageSegments=request.Blocks.Select(block=>new TranslatedBlock(block.Id,block.Text,translated[..4],default){IsComplete=false}).ToArray()});
-            await streamed.Task.WaitAsync(TimeSpan.FromSeconds(5),token);return Json(request,_=>translated);
+            progress.Report(new("prefix") { ImageSegments = request.Blocks.Select(block =>
+                new TranslatedBlock(block.Id, block.Text, translated[..4], default) { IsComplete = false }).ToArray() });
+            prefixReported.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return Json(request, _ => translated);
         });
-        await using var cache=new BrowserPageTranslationCache();var service=new BrowserPageTranslationService(_=>provider,cache:cache);
-        var updates=new ConcurrentQueue<BrowserPageTranslationUpdate>();BrowserPageTextBlock[] source=[new("tweet",original,"tweet-group")];
-        var result=await service.TranslateAsync(source,new(),(update,_)=>{updates.Enqueue(update);if(!update.IsComplete&&!update.Failed)streamed.TrySetResult();return ValueTask.CompletedTask;},CancellationToken.None);
-        Assert.Equal(translated,result.Blocks.Single().Translation);Assert.True(result.Blocks.Single().IsComplete);Assert.DoesNotContain(updates,update=>update.Failed);
-        Assert.Single(provider.Requests);var restored=await Translate(service,[new("new-tweet",original,"new-tweet-group")],new());
-        Assert.Equal(translated,restored.Blocks.Single().Translation);Assert.Single(provider.Requests);
+        await using var cache = new BrowserPageTranslationCache();
+        var service = new BrowserPageTranslationService(_ => provider, cache: cache);
+        var updates = new ConcurrentQueue<BrowserPageTranslationUpdate>();
+        BrowserPageTextBlock[] source = [new("tweet", original, "tweet-group")];
+        var job = service.TranslateAsync(source, new(), (update, _) =>
+        {
+            updates.Enqueue(update);
+            if (!update.IsComplete && !update.Failed) prefixVisible.TrySetResult();
+            return ValueTask.CompletedTask;
+        }, CancellationToken.None);
+        try
+        {
+            await prefixReported.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            Assert.False(job.IsCompleted);
+            Assert.Equal(0, cache.Count);
+            if (hasFacts) Assert.Empty(updates);
+            else
+            {
+                await prefixVisible.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                Assert.Contains(updates, update => !update.IsComplete && update.Translation == translated[..4]);
+            }
+        }
+        finally { release.TrySetResult(); }
+        var result = await job.WaitAsync(TimeSpan.FromSeconds(8));
+        Assert.Equal(translated, Assert.Single(result.Blocks).Translation);
+        Assert.True(result.Blocks.Single().IsComplete);
+        Assert.DoesNotContain(updates, update => update.Failed);
+        if (hasFacts) Assert.All(updates, update => Assert.True(update.IsComplete && update.Translation == translated));
+        Assert.Equal(1, cache.Count);
+        Assert.Single(provider.Requests);
+        var restored = await Translate(service, [new("new-tweet", original, "new-tweet-group")], new());
+        Assert.Equal(0, restored.RequestCount);
+        Assert.Equal(1, restored.CacheHits);
+        Assert.Equal(translated, Assert.Single(restored.Blocks).Translation);
+        Assert.Single(provider.Requests);
     }
     [Fact]
     public async Task WholeUpdatedPhraseIsTranslatedByTheProviderAndReplaysAsOneNaturalSentence()
@@ -113,11 +148,14 @@ public sealed class BrowserPageTranslationServiceTests
     {
         var expected = MoreVpnTitles.ToDictionary(pair => pair.Source, pair => pair.Translation, StringComparer.Ordinal);
         var prefixObserved = NewSignal();
+        var prefixReported = NewSignal();
+        var release = NewSignal();
         var provider = new Provider(async (request, progress, token) =>
         {
             progress.Report(new("正在翻译") { ImageSegments = request.Blocks.Select(block =>
                 new TranslatedBlock(block.Id, block.Text, "正在翻译", default) { IsComplete = false }).ToArray() });
-            await prefixObserved.Task.WaitAsync(TimeSpan.FromSeconds(8), token);
+            prefixReported.TrySetResult();
+            await release.Task.WaitAsync(token);
             return Json(request, block => expected[block.Text]);
         });
         await using var cache = new BrowserPageTranslationCache();
@@ -125,11 +163,25 @@ public sealed class BrowserPageTranslationServiceTests
         var source = MoreVpnTitles.Select((pair, index) => new BrowserPageTextBlock("title-" + index, pair.Source,
             legacySharedGroup ? "list" : "card-" + index)).ToArray();
         var updates = new ConcurrentQueue<BrowserPageTranslationUpdate>();
-        var result = await service.TranslateAsync(source, new(), (update, _) =>
+        var job = service.TranslateAsync(source, new(), (update, _) =>
         { updates.Enqueue(update); if (!update.IsComplete && !update.Failed) prefixObserved.TrySetResult(); return ValueTask.CompletedTask; }, CancellationToken.None);
+        try
+        {
+            await Task.WhenAll(prefixReported.Task, prefixObserved.Task).WaitAsync(TimeSpan.FromSeconds(8));
+            Assert.False(job.IsCompleted);
+            Assert.Equal(0, cache.Count);
+            // The 2FA card is factual even when its independent siblings share a
+            // legacy list group; the ordinary questions still stream immediately.
+            Assert.DoesNotContain(updates, update => update.Id == "title-2");
+            Assert.Contains(updates, update => !update.IsComplete && update.Id != "title-2");
+        }
+        finally { release.TrySetResult(); }
+        var result = await job.WaitAsync(TimeSpan.FromSeconds(8));
         Assert.Equal(10, result.Blocks.Count); Assert.All(result.Blocks, block => Assert.True(block.IsComplete && !block.Failed));
         Assert.Contains(updates, update => !update.IsComplete && !update.Failed);
         Assert.DoesNotContain(updates, update => update.Failed);
+        Assert.All(updates.Where(update => update.Id == "title-2"), update =>
+        { Assert.True(update.IsComplete); Assert.Equal(MoreVpnTitles[2].Translation, update.Translation); });
         for (var index = 0; index < source.Length; index++)
             Assert.Equal(MoreVpnTitles[index].Translation, result.Blocks.Single(block => block.Id == source[index].Id).Translation);
         var rebound = source.Select((block, index) => block with { Id = "reloaded-" + index,

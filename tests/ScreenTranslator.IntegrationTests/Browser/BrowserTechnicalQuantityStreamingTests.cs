@@ -24,24 +24,23 @@ public sealed class BrowserTechnicalQuantityStreamingTests
         using var directory = new TestDirectory();
         await using (var cache = new BrowserPageTranslationCache(directory: directory.Path))
         {
-            var visible = NewSignal(); var release = NewSignal();
+            var release = NewSignal();
             var provider = new StreamingProvider(Translation, release);
             var updates = new ConcurrentQueue<BrowserPageTranslationUpdate>();
             var service = new BrowserPageTranslationService(_ => provider, cache: cache);
             var job = service.TranslateAsync([Block("initial-source")], Options, (update, _) =>
             {
                 updates.Enqueue(update);
-                if (!update.IsComplete && !update.Failed && update.Translation.Length > 0) visible.TrySetResult();
                 return ValueTask.CompletedTask;
             }, CancellationToken.None);
             try
             {
-                var deadline = visible.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                var deadline = provider.PrefixReported.Task.WaitAsync(TimeSpan.FromSeconds(8));
                 if (await Task.WhenAny(job, deadline) == job)
                 { await job; throw new InvalidOperationException("No streaming prefix was observed before completion."); }
                 await deadline;
                 Assert.False(job.IsCompleted);
-                Assert.Contains(updates, update => !update.IsComplete && !update.Failed && update.Translation.Length > 0);
+                Assert.Empty(updates);
                 Assert.Equal(0, cache.Count);
             }
             finally
@@ -55,6 +54,7 @@ public sealed class BrowserTechnicalQuantityStreamingTests
             Assert.True(complete.IsComplete); Assert.False(complete.Failed); Assert.Equal(Translation, complete.Translation);
             Assert.DoesNotContain(updates, update => update.Failed);
             Assert.Contains(updates, update => update.IsComplete && update.Translation == Translation);
+            Assert.All(updates, update => Assert.True(update.IsComplete && update.Translation == Translation));
             await cache.FlushAsync();
         }
         await using var restarted = new BrowserPageTranslationCache(directory: directory.Path);
@@ -74,27 +74,27 @@ public sealed class BrowserTechnicalQuantityStreamingTests
     [InlineData("7.4亿", "7.5亿")]
     [InlineData("十亿", "一亿")]
     [InlineData("768维", "786维")]
-    public async Task IncorrectTechnicalQuantityStillRollsBackAfterStreamingAndIsNotCached(string correct, string incorrect)
+    public async Task IncorrectTechnicalQuantityIsNeverDisplayedOrCachedAndRepeatedRejectionStopsRetries(string correct, string incorrect)
     {
         await using var cache = new BrowserPageTranslationCache();
-        var visible = NewSignal(); var release = NewSignal();
+        var release = NewSignal();
         var provider = new StreamingProvider(Translation.Replace(correct, incorrect, StringComparison.Ordinal), release);
         var service = new BrowserPageTranslationService(_ => provider, cache: cache);
         var updates = new ConcurrentQueue<BrowserPageTranslationUpdate>();
         var job = service.TranslateAsync([Block("incorrect-result")], Options, (update, _) =>
         {
             updates.Enqueue(update);
-            if (!update.IsComplete && !update.Failed && update.Translation.Length > 0) visible.TrySetResult();
             return ValueTask.CompletedTask;
         }, CancellationToken.None);
         try
         {
-            var deadline = visible.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            var deadline = provider.PrefixReported.Task.WaitAsync(TimeSpan.FromSeconds(8));
             if (await Task.WhenAny(job, deadline) == job)
             { await job; throw new InvalidOperationException("No streaming prefix was observed before validation."); }
             await deadline;
             Assert.False(job.IsCompleted);
-            Assert.Contains(updates, update => !update.IsComplete && !update.Failed && update.Translation.Length > 0);
+            Assert.Empty(updates);
+            Assert.Equal(0, cache.Count);
         }
         finally
         {
@@ -102,14 +102,16 @@ public sealed class BrowserTechnicalQuantityStreamingTests
             await job.WaitAsync(TimeSpan.FromSeconds(8));
         }
         var result = await job;
-        Assert.Equal(1, result.RequestCount); Assert.Equal(0, result.CacheHits);
+        Assert.Equal(2, result.RequestCount); Assert.Equal(0, result.CacheHits);
+        Assert.Equal(2, provider.Requests.Count);
         var failed = Assert.Single(result.Blocks);
         Assert.True(failed.Failed); Assert.False(failed.IsComplete); Assert.Empty(failed.Translation);
         Assert.Contains(updates, update => update.Failed && update.Translation.Length == 0);
+        Assert.All(updates, update => { Assert.True(update.Failed); Assert.Empty(update.Translation); });
         Assert.Equal(0, cache.Count);
         var retry = await service.TranslateAsync([Block("retry-new-id")], Options,
             (_, _) => ValueTask.CompletedTask, CancellationToken.None);
-        Assert.Equal(1, retry.RequestCount); Assert.Equal(0, retry.CacheHits); Assert.Equal(2, provider.Requests.Count);
+        Assert.Equal(1, retry.RequestCount); Assert.Equal(0, retry.CacheHits); Assert.Equal(3, provider.Requests.Count);
         Assert.True(Assert.Single(retry.Blocks).Failed); Assert.Equal(0, cache.Count);
     }
 
@@ -121,6 +123,7 @@ public sealed class BrowserTechnicalQuantityStreamingTests
         : ITranslationProvider, IStreamingTranslationProvider
     {
         public ConcurrentQueue<TranslationRequest> Requests { get; } = new();
+        public TaskCompletionSource PrefixReported { get; } = NewSignal();
         public Task<string> TranslateRawAsync(TranslationRequest request, CancellationToken token) =>
             TranslateRawStreamingAsync(request, new EmptyProgress(), token);
         public async Task<string> TranslateRawStreamingAsync(TranslationRequest request,
@@ -130,6 +133,7 @@ public sealed class BrowserTechnicalQuantityStreamingTests
             var prefix = translation[..Math.Min(20, translation.Length)];
             progress.Report(new(prefix) { ImageSegments = request.Blocks.Select(block =>
                 new TranslatedBlock(block.Id, block.Text, prefix, default) { IsComplete = false }).ToArray() });
+            PrefixReported.TrySetResult();
             await release.Task.WaitAsync(token);
             return JsonSerializer.Serialize(new { blocks = request.Blocks.Select(block => new { id = block.Id, translation }) });
         }
