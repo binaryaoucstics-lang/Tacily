@@ -9,7 +9,7 @@ const document = { body, nodeType: 9, title: "Synthetic interface fixture", chil
   createRange: () => {
     let node;
     return { selectNodeContents(value) { node = value; }, getClientRects: () =>
-      ["SCRIPT", "STYLE"].includes(node.parentElement?.tagName) ? [] : [{ x: 0, y: 10, width: 100, height: 20 }] };
+      node.rects || (["SCRIPT", "STYLE"].includes(node.parentElement?.tagName) ? [] : [{ x: 0, y: 10, width: 100, height: 20 }]) };
   },
   addEventListener: type => listeners.push(type), removeEventListener() {} };
 body.parentNode = document;
@@ -36,7 +36,7 @@ const mockSession = { inspect: () => state, configure: () => true, receive: valu
   selectionChanged() {}, suspend() {}, resumeDocument() {}, discoverOpenRoots() {}, dispose() {} };
 const context = {
   document, location: { href: "https://synthetic.invalid/" }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
-  getComputedStyle: element => ({ display: element.display || "block", visibility: "visible", opacity: "1" }),
+  getComputedStyle: element => ({ display: element.display || "block", visibility: "visible", opacity: "1", ...element.css }),
   ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
   ScreenTranslatorPageAutoContent: { randomIdentifier: () => "opaque", createRenderedTextTester: () => () => true,
     extractPageSnapshot: value => extractProbe(value),
@@ -188,6 +188,164 @@ assert.equal(identityComplete.events.filter(x => x.type === "retraction").length
 identityName.nodeValue = identityRecord.lastWritten = "信息自由法"; qa.sample("different-translation");
 identityName.nodeValue = identityRecord.lastWritten = "FOIA";
 assert.equal(qa.sample("real-withdrawal").events.filter(x => x.type === "retraction").length, 4);
+// Independent geometry fixtures. Production eligibility is deliberately wrong
+// for clipped nodes; neither that tester nor predictions determine visibility.
+const rect = (x, y, width, height) => ({ x, y, width, height });
+function box(element, bounds, css) {
+  element.getBoundingClientRect = () => bounds;
+  element.css = css;
+  return element;
+}
+function wrap(node, bounds, css) {
+  const inner = node.parentElement, outer = { nodeType: 1, tagName: "DIV", childNodes: [inner],
+    parentElement: inner.parentElement, parentNode: inner.parentNode, hasAttribute: () => false, getAttribute: () => null };
+  const siblings = outer.parentNode.childNodes;
+  siblings[siblings.indexOf(inner)] = outer;
+  inner.parentElement = inner.parentNode = outer;
+  return box(outer, bounds, css);
+}
+const find = (value, node) => value.nodes.find(row => row.sourceText === (state.records.get(node)?.source || node.nodeValue));
+const offslide = text("P", "Clipped horizontal carousel slide.");
+offslide.rects = [rect(-2439, 10, 200, 20)];
+const carousel = wrap(offslide, rect(2060.5, 0, 500, 100), { overflowX: "hidden", overflowY: "visible" });
+predict("offslide", offslide);
+sample = qa.sample("carousel-clipped");
+assert.equal(find(sample, offslide), undefined);
+assert.equal(sample.predictions.find(p => p.id === "offslide").sourceEvidence, "unmatched");
+assert.ok(!sample.sourceNodes.some(row => row.sourceText === offslide.nodeValue));
+offslide.rects = [rect(2070, 10, 200, 20)];
+sample = qa.sample("carousel-reveal");
+const slideRow = find(sample, offslide);
+assert.ok(slideRow.rendered); assert.equal(slideRow.inViewport, false);
+offslide.rects = [rect(-2439, 10, 200, 20)];
+sample = qa.sample("carousel-retire");
+assert.equal(find(sample, offslide), undefined);
+assert.equal(sample.sourceNodes.find(row => row.id === slideRow.id).currentlyRendered, false);
+assert.equal(sample.sourceNodes.find(row => row.id === slideRow.id).phase, "carousel-reveal");
+assert.equal(sample.predictions.find(p => p.id === "offslide").sourceEvidence, "matched");
+
+const partial = text("P", "Partly rendered multiple text ranges.");
+partial.rects = [rect(-20, -10, 80, 30), rect(130, 5, 50, 20), rect(90, 5, 40, 20)];
+const xClip = wrap(partial, rect(0, 500, 100, 100), { overflowX: "hidden", overflowY: "visible" });
+const yClip = wrap(partial.parentElement.childNodes[0], rect(-500, 0, 1000, 15), { overflowX: "visible", overflowY: "clip" });
+sample = qa.sample("nested-axis-partial");
+assert.deepEqual(JSON.parse(JSON.stringify(find(sample, partial).rects)), [
+  { ...rect(0, 0, 60, 15), documentX: 0, documentY: 0 },
+  { ...rect(90, 5, 10, 10), documentX: 90, documentY: 5 }]);
+// Border and scrollbar area do not enlarge the real overflow aperture.
+Object.assign(xClip, { clientLeft: 5, clientTop: 5, clientWidth: 80, clientHeight: 80, offsetWidth: 100, offsetHeight: 100 });
+sample = qa.sample("client-aperture");
+assert.equal(find(sample, partial).rects.length, 1);
+assert.equal(find(sample, partial).rects[0].x, 5);
+assert.equal(find(sample, partial).rects[0].width, 55);
+yClip.css.overflowY = "hidden";
+partial.rects = [rect(10, 50, 20, 20)];
+assert.equal(find(qa.sample("nested-retire"), partial), undefined);
+
+const below = text("P", "Loaded below-fold prose must remain source evidence.");
+below.rects = [rect(10, 1800, 300, 20)];
+document.documentElement = box({ nodeType: 1, tagName: "HTML", parentNode: document }, rect(0, 0, 800, 600),
+  { overflowX: "hidden", overflowY: "auto" });
+document.scrollingElement = document.documentElement;
+body.parentElement = document.documentElement;
+sample = qa.sample("below-fold");
+assert.equal(find(sample, below).rendered, true); assert.equal(find(sample, below).inViewport, false);
+
+const legacyLabel = text("SPAN", "Accessibility text with legacy clipping.");
+legacyLabel.rects = [rect(0, 0, 180, 20)];
+box(legacyLabel.parentElement, rect(0, 0, 1, 1), { position: "absolute", clip: "rect(0px, 0px, 0px, 0px)" });
+const insetLabel = text("SPAN", "Accessibility text with inset clipping.");
+insetLabel.rects = [rect(0, 0, 180, 20)];
+box(insetLabel.parentElement, rect(0, 0, 1, 1), { clipPath: "inset(50%)" });
+const tinyLabel = text("SPAN", "Accessibility text through a one pixel aperture.");
+tinyLabel.rects = [rect(0, 0, 180, 20)];
+wrap(tinyLabel, rect(0, 0, 1, 1), { overflow: "hidden" });
+const ariaVisible = text("P", "Visibly rendered despite hidden and aria-hidden attributes.");
+ariaVisible.parentElement.hidden = true;
+ariaVisible.parentElement.getAttribute = name => name === "aria-hidden" ? "true" : null;
+sample = qa.sample("accessibility-clipping");
+for (const node of [legacyLabel, insetLabel, tinyLabel]) assert.equal(find(sample, node), undefined);
+assert.ok(find(sample, ariaVisible).rendered);
+legacyLabel.parentElement.css.clip = "auto";
+assert.ok(find(qa.sample("label-reveal"), legacyLabel));
+legacyLabel.parentElement.css.clip = "rect(0px 0px 0px 0px)";
+assert.equal(find(qa.sample("label-retire"), legacyLabel), undefined);
+const zeroOverflow = text("SPAN", "A nonrendering overflow aperture.");
+wrap(zeroOverflow, rect(0, 0, 0, 100), { overflow: "hidden" });
+assert.equal(find(qa.sample("zero-overflow"), zeroOverflow), undefined);
+const corner = text("P", "Even a small real corner of a partial line is observed.");
+corner.rects = [rect(-99, -19, 100, 20)];
+wrap(corner, rect(0, 0, 200, 100), { overflow: "hidden" });
+assert.equal(find(qa.sample("partial-corner"), corner).rects[0].width, 1);
+assert.equal(find(qa.sample("partial-corner"), corner).rects[0].height, 1);
+const cssReveal = text("P", "A descendant overrides inherited visibility.");
+const invisibleAncestor = wrap(cssReveal, rect(0, 0, 300, 100), { visibility: "hidden" });
+assert.ok(find(qa.sample("visibility-overridden"), cssReveal));
+cssReveal.parentElement.css = { visibility: "hidden" };
+assert.equal(find(qa.sample("visibility-hidden"), cssReveal), undefined);
+cssReveal.parentElement.css = { visibility: "visible" };
+invisibleAncestor.css.opacity = "0.0";
+assert.equal(find(qa.sample("opacity-zero"), cssReveal), undefined);
+invisibleAncestor.css.opacity = "1";
+invisibleAncestor.css.contentVisibility = "hidden";
+assert.equal(find(qa.sample("content-visibility-hidden"), cssReveal), undefined);
+const noOverflowBox = text("P", "Display contents has no overflow box.");
+wrap(noOverflowBox, rect(0, 0, 0, 0), { display: "contents", overflow: "hidden" });
+assert.ok(find(qa.sample("display-contents"), noOverflowBox));
+
+// A slot's composed ancestry, including its shadow host, supplies clipping.
+const slotted = text("P", "Assigned source in the composed slot tree.");
+slotted.rects = [rect(-10, 40, 60, 20)];
+const light = box(slotted.parentElement, rect(2000, 2000, 1, 1), { overflow: "hidden" });
+const host = { nodeType: 1, tagName: "SECTION", childNodes: [light], parentNode: body, parentElement: body,
+  hasAttribute: () => false, getAttribute: () => null };
+const shadow = { nodeType: 11, host, childNodes: [] };
+host.shadowRoot = shadow;
+const slot = box({ nodeType: 1, tagName: "SLOT", childNodes: [], parentNode: shadow,
+  assignedNodes: () => [slotted], hasAttribute: () => false, getAttribute: () => null },
+rect(0, 30, 100, 100), { overflow: "hidden" });
+shadow.childNodes.push(slot);
+slotted.assignedSlot = slot;
+body.childNodes[body.childNodes.indexOf(light)] = host;
+light.parentElement = light.parentNode = host;
+box(host, rect(5, 0, 30, 100), { overflow: "hidden" });
+sample = qa.sample("slot-composition");
+assert.equal(sample.nodes.filter(row => row.sourceText === slotted.nodeValue).length, 1);
+assert.equal(find(sample, slotted).rects[0].x, 5); assert.equal(find(sample, slotted).rects[0].width, 30);
+host.display = "none";
+assert.equal(find(qa.sample("host-hidden"), slotted), undefined);
+host.display = "block";
+slot.css.overflow = "visible";
+assert.ok(find(qa.sample("host-reveal"), slotted));
+
+// Blank withdrawal keeps prior independently clipped geometry; clipping the
+// entire old aperture retires it without manufacturing a retraction event.
+const retract = text("P", "Original source for geometry retraction.");
+retract.rects = [rect(-20, 100, 100, 20)];
+const retractBox = wrap(retract, rect(0, 90, 60, 60), { overflow: "hidden" });
+const retractRecord = { node: retract, source: retract.nodeValue, lastWritten: "真实译文", groupElement: retract.parentElement };
+state.records.set(retract, retractRecord); retract.nodeValue = retractRecord.lastWritten;
+const observed = find(qa.sample("clipped-translated"), retract);
+retract.nodeValue = retractRecord.lastWritten = ""; retract.rects = [];
+context.scrollY = 50;
+retractBox.getBoundingClientRect = () => rect(0, 40, 60, 60);
+sample = qa.sample("clipped-blank-withdrawal");
+const blankRow = find(sample, retract);
+assert.equal(blankRow.rendered, false); assert.equal(blankRow.rects[0].width, 60);
+assert.equal(blankRow.rects[0].documentY, observed.rects[0].documentY);
+assert.equal(blankRow.rects[0].y, 50);
+const retractionCount = sample.events.filter(event => event.type === "retraction").length;
+assert.equal(retractionCount, 5);
+context.scrollY = 0; retractBox.getBoundingClientRect = () => rect(0, 90, 60, 60);
+retract.nodeValue = retractRecord.lastWritten = "真实译文"; retract.rects = [rect(-20, 100, 100, 20)];
+qa.sample("translation-restored");
+retract.nodeValue = retractRecord.lastWritten = ""; retract.rects = [];
+retractBox.getBoundingClientRect = () => rect(1000, 90, 60, 60);
+sample = qa.sample("blank-aperture-retired");
+assert.equal(find(sample, retract), undefined);
+assert.equal(sample.events.filter(event => event.type === "retraction").length, retractionCount);
+assert.equal(sample.sourceNodes.find(row => row.id === observed.id).currentlyRendered, false);
+assertCompleteSources(sample);
 const packet = { type: "pageAutoCandidate", blocks: [{ id: "b", text: record.source }] };
 const promise = environment.send(packet);
 const outgoing = qa.drain(); assert.equal(outgoing[0].message, packet); assert.equal(qa.drain().length, 0);

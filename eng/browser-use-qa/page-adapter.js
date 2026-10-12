@@ -41,21 +41,99 @@
       for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
     }
   }
-  function geometry(node) {
-    const range = document.createRange(); range.selectNodeContents(node);
-    const rects = Array.from(range.getClientRects(), r => ({ x: r.x, y: r.y,
-      width: r.width, height: r.height, documentX: r.x + root.scrollX, documentY: r.y + root.scrollY }));
-    const parent = node.parentElement || node.getRootNode?.().host;
-    let visible = !!parent;
-    for (let element = parent; element; element = element.parentElement || element.getRootNode?.().host) {
-      const style = root.getComputedStyle(element);
-      if (style.visibility === "hidden" || style.visibility === "collapse" || style.display === "none"
-          || style.opacity === "0") { visible = false; break; }
-      if (element.tagName === "DETAILS" && !element.open) {
-        const summary = Array.from(element.children || []).find(child => child.tagName === "SUMMARY");
-        if (!summary?.contains(node)) { visible = false; break; }
+  function composedParent(node) {
+    return node.assignedSlot || node.parentElement || node.parentNode?.host || node.getRootNode?.().host;
+  }
+  function intersect(rect, bounds) {
+    const x = Math.max(rect.x, bounds.left), y = Math.max(rect.y, bounds.top);
+    const right = Math.min(rect.x + rect.width, bounds.right), bottom = Math.min(rect.y + rect.height, bounds.bottom);
+    return { x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y) };
+  }
+  function length(value, size) {
+    if (value === "0") return 0;
+    if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)(px|%)$/.test(value)) return null;
+    return parseFloat(value) * (value.endsWith("%") ? size / 100 : 1);
+  }
+  function clippingBounds(element, style) {
+    const box = element.getBoundingClientRect?.();
+    if (!box) return [];
+    const left = box.x ?? box.left, top = box.y ?? box.top;
+    const bounds = [];
+    // The document scrollport is deliberately not a visual-source boundary:
+    // loaded below-fold prose is evidence even before scrolling to it.
+    const htmlStyle = document.documentElement && root.getComputedStyle(document.documentElement);
+    const rootOverflow = element === document.documentElement || element === document.scrollingElement
+      || (element === document.body && (!htmlStyle || ["", "visible"].includes(htmlStyle.overflowX || htmlStyle.overflow || "visible")
+        && ["", "visible"].includes(htmlStyle.overflowY || htmlStyle.overflow || "visible")));
+    const clips = value => ["hidden", "clip", "scroll", "auto", "overlay"].includes(value);
+    const paint = /\b(paint|strict|content)\b/.test(style.contain || "");
+    const overflowBox = !["inline", "contents"].includes(style.display);
+    const clipX = paint || overflowBox && !rootOverflow && clips(style.overflowX || style.overflow);
+    const clipY = paint || overflowBox && !rootOverflow && clips(style.overflowY || style.overflow);
+    if (clipX || clipY) {
+      // Client geometry excludes borders and scrollbar gutters. Scale client
+      // dimensions into the same coordinates as transformed Range rectangles.
+      const sx = element.offsetWidth > 0 ? box.width / element.offsetWidth : 1;
+      const sy = element.offsetHeight > 0 ? box.height / element.offsetHeight : 1;
+      const x = left + (element.clientLeft || 0) * sx, y = top + (element.clientTop || 0) * sy;
+      const width = Number.isFinite(element.clientWidth) ? element.clientWidth * sx : box.width;
+      const height = Number.isFinite(element.clientHeight) ? element.clientHeight * sy : box.height;
+      bounds.push({ left: clipX ? x : -Infinity, right: clipX ? x + width : Infinity,
+        top: clipY ? y : -Infinity, bottom: clipY ? y + height : Infinity });
+    }
+    // Legacy accessibility clipping applies only to positioned elements.
+    const clip = /^(?:rect)\((.*)\)$/.exec(style.clip || "");
+    if (clip && ["absolute", "fixed"].includes(style.position)) {
+      const values = clip[1].trim().split(/[\s,]+/);
+      const offsets = values.map((value, i) => value === "auto" ? [0, box.width, box.height, 0][i]
+        : length(value, i % 2 ? box.width : box.height));
+      if (offsets.length === 4 && offsets.every(value => value !== null))
+        bounds.push({ left: left + offsets[3], top: top + offsets[0], right: left + offsets[1], bottom: top + offsets[2] });
+    }
+    const inset = /^inset\((.*?)\)(?:\s+border-box)?$/.exec(style.clipPath || "");
+    if (inset) {
+      const values = inset[1].split(/\s+round\s+/)[0].trim().split(/\s+/);
+      if (values.length >= 1 && values.length <= 4) {
+        const expanded = [values[0], values[1] || values[0], values[2] || values[0], values[3] || values[1] || values[0]];
+        const offsets = expanded.map((value, i) => length(value, i % 2 ? box.width : box.height));
+        if (offsets.every(value => value !== null)) bounds.push({ left: left + offsets[3], top: top + offsets[0],
+          right: left + box.width - offsets[1], bottom: top + box.height - offsets[2] });
       }
     }
+    return bounds;
+  }
+  function geometry(node, retainedRects) {
+    const range = document.createRange(); range.selectNodeContents(node);
+    let rects = retainedRects ? retainedRects.map(r => ({ x: r.documentX - root.scrollX,
+      y: r.documentY - root.scrollY, width: r.width, height: r.height }))
+      : Array.from(range.getClientRects(), r => ({ x: r.x, y: r.y, width: r.width, height: r.height }));
+    const parent = composedParent(node), bounds = [];
+    let visible = !!parent;
+    const seen = new Set();
+    for (let element = parent; element && !seen.has(element); element = composedParent(element)) {
+      seen.add(element);
+      const style = root.getComputedStyle(element);
+      // Visibility is inherited but can be overridden on descendants. Display
+      // and opacity suppress the entire subtree regardless of that override.
+      if ((element === parent && ["hidden", "collapse"].includes(style.visibility)) || style.display === "none"
+          || Number(style.opacity) === 0 || style.contentVisibility === "hidden") { visible = false; break; }
+      if (element.tagName === "DETAILS" && !element.open) {
+        const summary = Array.from(element.children || []).find(child => child.tagName === "SUMMARY");
+        if (!seen.has(summary) && !summary?.contains(node)) { visible = false; break; }
+      }
+      bounds.push(...clippingBounds(element, style));
+    }
+    rects = rects.filter(r => r.width > 0 && r.height > 0).flatMap(rect => {
+      let clipped = rect;
+      for (const bound of bounds) clipped = intersect(clipped, bound);
+      // A clipped accessibility aperture cannot supply readable visual text.
+      // Use geometry, never class names or aria-hidden. Preserve narrow partial
+      // lines whenever the aperture still has a readable extent on either axis.
+      const accessibilityAperture = bounds.some(bound => bound.right - bound.left <= 1 && bound.bottom - bound.top <= 1
+        && (rect.width > bound.right - bound.left || rect.height > bound.bottom - bound.top));
+      if (clipped.width <= 0 || clipped.height <= 0 || accessibilityAperture) return [];
+      return [{ ...clipped, documentX: clipped.x + root.scrollX, documentY: clipped.y + root.scrollY }];
+    });
     const rendered = visible && rects.some(r => r.width > 0 && r.height > 0);
     return { rects, ancestorsVisible: visible, rendered: !!rendered, inViewport: !!rendered && rects.some(r =>
       r.x < root.innerWidth && r.y < root.innerHeight && r.x + r.width > 0 && r.y + r.height > 0) };
@@ -69,12 +147,14 @@
       const id = identity(node, source), layout = geometry(node), before = previous.get(id);
       // Empty Text ranges have no geometry. Retain the previous visible position
       // when an unchanged, still connected translated node disappears to blank.
-      const disappeared = !String(node.nodeValue || "").trim() && before?.translated
+      let disappeared = !String(node.nodeValue || "").trim() && before?.translated
         && sources.has(id) && layout.ancestorsVisible && node.isConnected !== false;
-      if (!layout.rendered && !disappeared) continue;
-      if (disappeared && !layout.rects.some(r => r.width > 0 && r.height > 0)) {
-        layout.rects = before.rects; layout.inViewport = before.inViewport;
+      if (disappeared && !layout.rects.length) {
+        const retained = geometry(node, before.rects);
+        disappeared = retained.rendered;
+        if (disappeared) { layout.rects = retained.rects; layout.inViewport = retained.inViewport; }
       }
+      if (!layout.rendered && !disappeared) continue;
       const parent = node.parentElement || node.getRootNode?.().host;
       const value = String(node.nodeValue || "");
       const row = { id, sourceText: source, locator: locator(node),
