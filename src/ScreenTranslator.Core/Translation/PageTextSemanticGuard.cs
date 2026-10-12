@@ -27,6 +27,7 @@ public static class PageTextSemanticGuard
     private const string CurrencySuffix = @"(?:US|U\.S\.)\s+dollars?\b|dollars?\b|euros?\b|USD\b|EUR\b|美元|美金|欧元|歐元";
     private const string QuantityUnits = @"分钟|分鐘|小时|小時|居民|用户|用戶|传感器|傳感器|摄氏度|攝氏度|毫升|公斤|千米|毫米|厘米|参数|參數|维度|維度|维|維|令牌|词元|詞元|标记|標記|字节|字節|字符|向量|编码器|編碼器|种|種|类|類|项|項|组|組|层|層|帧|幀|倍|tokens?\b|天|个|個|位|名|人|户|戶|只|台|枚|件|本|瓶|所|艘|辆|輛|栋|棟|秒|歳|岁|歲|次|米|比|号|號";
     private static readonly Regex FollowingQuantityUnit = MakeRegex(@"\G\s*(?:多|余|餘|来|來)?\s*(?:" + QuantityUnits + @")");
+    private static readonly Regex FollowingIndefiniteClassifier = MakeRegex(@"\G\s*(?:个|個|位|名|只|台|枚|件|本|瓶|所|艘|辆|輛|栋|棟|种|種|类|類|项|項|组|組)");
     private static readonly Regex ExplicitHanBillion = MakeRegex(@"^[负負]?[零〇一二两兩三四五六七八九十百千]+(?:[点點][零〇一二两兩三四五六七八九]+[十百千]*)?(?:万亿|萬億|亿|億)$");
     private static readonly Regex ByteContext = MakeRegex(@"\b(?:bytes?|packets?|buffers?|files?|storage|memory|disk|downloads?)\b|字节|字節|数据包|資料包|缓冲|緩衝|文件大小|檔案大小|内存|記憶體");
     private static readonly Regex CountContext = MakeRegex(@"\b(?:parameters?|params?|models?|weights?|tokens?)\b|参数|參數|模型|权重|權重|词元|詞元");
@@ -53,6 +54,22 @@ public static class PageTextSemanticGuard
     private static readonly Regex JapaneseDateWeekday = MakeRegex(@"(?<![\d./])(?<month>\d{1,2})\s*/\s*(?<day>\d{1,2})\s*\(\s*(?<weekday>" + DateWeekdayWord + @")\s*\)");
     private static readonly Regex DateWeekdaySuffix = MakeRegex(@"\G\s*\(\s*(?<weekday>" + DateWeekdayWord + @")\s*\)");
     private const string MonthWords = PageCalendarText.EnglishMonthPattern + @"|janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre";
+    private const string RangeSeparator = @"\s*(?:[-–—]|to\b|至|到)\s*";
+    private const string CalendarDay = @"\d{1,2}|[一二三四五六七八九十]{1,3}";
+    // Only an explicitly connected range. An omitted endpoint month is shared
+    // inside that expression only. No context, adjacent ID,
+    // locale or inferred year supplies an endpoint or a missing component.
+    private static readonly Regex NamedDateRange = MakeRegex(
+        @"\b(?:(?<month>" + MonthWords + @")\b\.?\s+(?<day>\d{1,2})(?:st|nd|rd|th)?"
+        + RangeSeparator + @"(?:(?<endMonth>" + MonthWords + @")\b\.?\s+)?(?<endDay>\d{1,2})(?:st|nd|rd|th)?\b"
+        + @"|(?<day>\d{1,2})(?:st|nd|rd|th)?" + RangeSeparator + @"(?<endDay>\d{1,2})(?:st|nd|rd|th)?\s+(?<month>" + MonthWords
+        + @")\b\.?)(?:\s*,?\s*(?<year>\d{4})(?!\d))?");
+    private static readonly Regex ChineseDateRange = MakeRegex(
+        @"(?<![\d零〇一二三四五六七八九十])(?:(?<year>\d{4}|[零〇一二三四五六七八九]{4})\s*年\s*)?"
+        + @"(?<month>" + CalendarDay + @")\s*月\s*(?<day>" + CalendarDay + @")\s*日?" + RangeSeparator
+        + @"(?:(?<endMonth>" + CalendarDay + @")\s*月\s*)?(?<endDay>" + CalendarDay + @")\s*日(?!\d)");
+    private static readonly Regex AmbiguousDateLiteral = MakeRegex(
+        @"(?<![\p{L}\p{N}./／．－-])(?<first>\d{1,2})\s*(?<separator>[/／.．－-])\s*(?<second>\d{1,2})\s*\k<separator>\s*\d{4}(?![\p{N}./／．－-])");
     // A model/mission identifier such as Tianwen-3 Mars is not "3 March".
     private static readonly Regex NamedDate = MakeRegex(@"\b(?:(?<month>" + MonthWords + @")\b\.?\s+(?<day>\d{1,2})(?:st|nd|rd|th)?\b|(?<![\p{L}\p{N}][_-])(?<day>\d{1,2})(?:st|nd|rd|th)?\s+(?<month>" + MonthWords + @")\b\.?)(?:\s*,?\s*(?<year>\d{4})(?!\d))?");
     private static readonly Regex Arabic = MakeRegex(@"(?<![A-Za-z0-9])" + ArabicNumeric);
@@ -137,8 +154,10 @@ public static class PageTextSemanticGuard
         var originals = source.ToDictionary(block => block.Id, block => Facts(block.Text, sourceClock:true), StringComparer.Ordinal);
         var translated = source.ToDictionary(block => block.Id,
             block => translations.TryGetValue(block.Id, out var text)
-                ? Facts(text, originals[block.Id].Numbers.Contains("auth-factors:2")) : new TextFacts([], [], [], []), StringComparer.Ordinal);
+                ? Facts(text, originals[block.Id].Numbers.Contains("auth-factors:2")) : new TextFacts([], [], [], [], []), StringComparer.Ordinal);
         var rejected = new HashSet<string>(StringComparer.Ordinal);
+        var originalOwnership = originals.ToDictionary(pair => pair.Key, pair => OwnershipFacts(pair.Value), StringComparer.Ordinal);
+        var translatedOwnership = translated.ToDictionary(pair => pair.Key, pair => OwnershipFacts(pair.Value), StringComparer.Ordinal);
         var transfers = new HashSet<PageTextNumericTransfer>();
         foreach (var block in source)
         {
@@ -158,10 +177,25 @@ public static class PageTextSemanticGuard
         }
         foreach (var owner in source)
         {
-            var missing = originals[owner.Id].Numbers.Except(translated[owner.Id].Numbers).ToArray();
+            var missingNumbers = originals[owner.Id].Numbers.Except(translated[owner.Id].Numbers).ToArray();
+            // Keep the original numeric transfer check even when a retained
+            // calendar endpoint happens to have the same value as a lost count.
+            var missing = originalOwnership[owner.Id].Except(translatedOwnership[owner.Id])
+                .Concat(missingNumbers).Distinct(StringComparer.Ordinal).ToArray();
+            var missingCalendarNumbers = missing.Where(value => value.StartsWith("calendar-number:", StringComparison.Ordinal))
+                .Select(value => value["calendar-number:".Length..]).ToArray();
             foreach (var receiving in source.Where(block => block.Id != owner.Id))
-                if (missing.Any(value => translated[receiving.Id].Numbers.Contains(value)
-                    && !originals[receiving.Id].Numbers.Contains(value)))
+                if (missingNumbers.Any(value => translated[receiving.Id].Numbers.Contains(value)
+                        && !originals[receiving.Id].Numbers.Contains(value))
+                    || missing.Any(value => translatedOwnership[receiving.Id].Contains(value)
+                        && !originalOwnership[receiving.Id].Contains(value)
+                        && (!value.StartsWith("calendar-number:", StringComparison.Ordinal)
+                            || !originals[receiving.Id].Numbers.Contains(value["calendar-number:".Length..])))
+                    || missingNumbers.Any(value => translatedOwnership[receiving.Id].Contains("calendar-number:" + value)
+                        && !originalOwnership[receiving.Id].Contains("calendar-number:" + value)
+                        && !originals[receiving.Id].Numbers.Contains(value))
+                    || missingCalendarNumbers.Any(value => translated[receiving.Id].CalendarNumbers.Contains(value)
+                        && !originals[receiving.Id].Numbers.Contains(value)))
                 {
                     rejected.Add(owner.Id); rejected.Add(receiving.Id);
                     transfers.Add(new(owner.Id, receiving.Id));
@@ -170,6 +204,21 @@ public static class PageTextSemanticGuard
         return new(source.Where(block => rejected.Contains(block.Id)).Select(block => block.Id).ToArray(),
             transfers.OrderBy(edge => edge.OwnerId, StringComparer.Ordinal)
                 .ThenBy(edge => edge.ReceivingId, StringComparer.Ordinal).ToArray());
+    }
+
+    private static HashSet<string> OwnershipFacts(TextFacts facts)
+    {
+        var values = new HashSet<string>(facts.Numbers, StringComparer.Ordinal);
+        foreach (var date in facts.Dates)
+        {
+            values.Add("date:" + date);
+            // Keep ordinary numeric -> calendar transfers visible too (e.g. a
+            // neighbouring bare 2007 cannot become this range's explicit year).
+            foreach (Match component in Regex.Matches(date, @"\d+", RegexOptions.CultureInvariant, RegexBudget))
+                if (TryNumber(component.Value.Normalize(NormalizationForm.FormKC), out var number))
+                    values.Add("calendar-number:" + Canonical(number));
+        }
+        return values;
     }
 
     private static bool TimesEquivalent(HashSet<string> expected,HashSet<string> actual)
@@ -187,16 +236,58 @@ public static class PageTextSemanticGuard
     }
     private static TextFacts Facts(string text, bool twoFactorContext = false,bool sourceClock=false)
     {
-        var normalized = text.Normalize(NormalizationForm.FormKC).Replace('−', '-');
         var days = new HashSet<string>(StringComparer.Ordinal);
         var times = new HashSet<string>(StringComparer.Ordinal);
         var dates = new HashSet<string>(StringComparer.Ordinal);
         var numbers = new HashSet<string>(StringComparer.Ordinal);
+        var calendarNumbers = new HashSet<string>(StringComparer.Ordinal);
+        void AddNumber(string value, bool calendarOwnership = true)
+        {
+            numbers.Add(value);
+            if (calendarOwnership) calendarNumbers.Add(value);
+        }
+        // Retain the actual literal before Unicode normalization: neither of the
+        // possible month/day readings is evidence for an ambiguous numeric date.
+        var normalized = AmbiguousDateLiteral.Replace(text, match =>
+        {
+            if (!TryNumber(match.Groups["first"].Value.Normalize(NormalizationForm.FormKC), out var first) || first is < 1 or > 12
+                || !TryNumber(match.Groups["second"].Value.Normalize(NormalizationForm.FormKC), out var second) || second is < 1 or > 12)
+                return match.Value;
+            dates.Add("literal:" + match.Value); return " ";
+        })
+            .Normalize(NormalizationForm.FormKC).Replace('−', '-');
+        string ReadRange(Match match)
+        {
+            var monthText = match.Groups["month"].Value;
+            if (monthText == "may" && !match.Groups["year"].Success) return match.Value;
+            var month = CalendarMonth(monthText);
+            var endMonth = match.Groups["endMonth"].Success ? CalendarMonth(match.Groups["endMonth"].Value) : month;
+            if (month is < 1 or > 12 || endMonth is < 1 or > 12
+                || !TryNumber(match.Groups["day"].Value, out var day)
+                || !TryNumber(match.Groups["endDay"].Value, out var endDay)) return match.Value;
+            var year = 0m;
+            if (match.Groups["year"].Success && (!TryNumber(match.Groups["year"].Value, out year) || year is < 1 or > 9999))
+                return match.Value;
+            var calendarYear = year == 0 ? 2000 : (int)year;
+            if (day < 1 || day > DateTime.DaysInMonth(calendarYear, (int)month)
+                || endDay < 1 || endDay > DateTime.DaysInMonth(calendarYear, (int)endMonth)
+                || endMonth < month || endMonth == month && endDay < day) return match.Value;
+            dates.Add($"range:{(year == 0 ? "*" : Canonical(year))}:{Canonical(month)}-{Canonical(day)}:{Canonical(endMonth)}-{Canonical(endDay)}");
+            if (year != 0) dates.Add("year:" + Canonical(year));
+            var weekday = DateWeekdaySuffix.Match(normalized, match.Index + match.Length).Groups["weekday"].Value;
+            var key = weekday.StartsWith("周", StringComparison.Ordinal) || weekday.StartsWith("週", StringComparison.Ordinal)
+                || weekday.StartsWith("星期", StringComparison.Ordinal) || weekday.StartsWith("礼拜", StringComparison.Ordinal)
+                || weekday.StartsWith("禮拜", StringComparison.Ordinal) ? weekday[^1..] : weekday.Length > 0 ? weekday[..1] : "";
+            if (DayNumbers.TryGetValue(key, out var weekdayNumber)) days.Add(weekdayNumber);
+            return " ";
+        }
+        normalized = NamedDateRange.Replace(normalized, ReadRange);
+        normalized = ChineseDateRange.Replace(normalized, ReadRange);
         // 2FA may be translated as 双重身份验证 without retaining the digit 2.
         // Keep the authentication concept separately from ordinary quantities.
         // Ambiguous 二次/两步/双重验证 is recognized only when the source says 2FA;
         // a general instruction to double-check must not acquire an auth fact.
-        string ReadTwoFactor(Match _) { numbers.Add("auth-factors:2"); return " "; }
+        string ReadTwoFactor(Match _) { AddNumber("auth-factors:2"); return " "; }
         normalized = TwoFactorAuthentication.Replace(normalized, ReadTwoFactor);
         if (twoFactorContext) normalized = ContextualTwoFactor.Replace(normalized, ReadTwoFactor);
         // Keep a decade separate from its component numbers: 1960s is exactly
@@ -217,7 +308,7 @@ public static class PageTextSemanticGuard
                 year = (century - 1) * 100 + decade;
             }
             if (year is < 1000 or > 9990 || year % 10 != 0) return match.Value;
-            numbers.Add("decade:" + Canonical(year) + ":" + Phase(match.Groups["phase"].Value));
+            AddNumber("decade:" + Canonical(year) + ":" + Phase(match.Groups["phase"].Value));
             return " ";
         });
         normalized = EnglishDecades.Replace(normalized, match =>
@@ -236,7 +327,7 @@ public static class PageTextSemanticGuard
             if (!match.Groups["phase"].Success && (DurationSuffix.IsMatch(suffix)
                 || (!CalendarDecadePrefix.IsMatch(prefix) && (DurationPrefix.IsMatch(prefix) || DurationContext.IsMatch(prefix)))))
                 return match.Value;
-            numbers.Add("decade:" + Canonical(year) + ":" + Phase(match.Groups["phase"].Value));
+            AddNumber("decade:" + Canonical(year) + ":" + Phase(match.Groups["phase"].Value));
             return " ";
         });
         normalized = Centuries.Replace(normalized, match =>
@@ -246,7 +337,7 @@ public static class PageTextSemanticGuard
                 ? TryNumber(match.Groups["century"].Value, out var numericCentury) ? numericCentury : 0
                 : ReadCenturyOrdinal(ordinal);
             if (century is < 1 or > 99) return match.Value;
-            numbers.Add("century:" + Canonical(century) + ":" + Phase(match.Groups["phase"].Value));
+            AddNumber("century:" + Canonical(century) + ":" + Phase(match.Groups["phase"].Value));
             return " ";
         });
         // Extract units before clocks/bare numbers: 十二点五 percent is 12.5%, not 12:05,
@@ -260,7 +351,7 @@ public static class PageTextSemanticGuard
             else if (fraction is "万分之" or "萬分之") value /= 100;
             var unit = match.Groups["unit"].Value;
             var points = unit.Contains("point", StringComparison.OrdinalIgnoreCase) || unit is "个百分点" or "個百分點" or "百分點";
-            numbers.Add((points ? "percentage-points:" : "percent:") + Canonical(value));
+            AddNumber((points ? "percentage-points:" : "percent:") + Canonical(value));
             return " ";
         });
         normalized = Quantities.Replace(normalized, match =>
@@ -285,12 +376,20 @@ public static class PageTextSemanticGuard
             catch (OverflowException) { return match.Value; }
             if (match.Groups["sign"].Value == "-") value = -value;
             var currency = prefix.Length == 0 ? suffix : suffix.Length == 0 || suffix == prefix ? prefix : prefix + "/" + suffix;
-            numbers.Add((currency.Length == 0 ? "" : "money:" + currency + ":") + Canonical(value));
+            // 一 + a classifier can express an indefinite article (一个按钮).
+            // Keep it in the existing numeric guard, but it alone cannot prove
+            // that a missing calendar component moved into unrelated prose.
+            // Digits, ordinals, standalone numerals and explicit magnitudes stay
+            // factual, including when the same value also occurs incidentally.
+            AddNumber((currency.Length == 0 ? "" : "money:" + currency + ":") + Canonical(value),
+                numeral != "一" || currency.Length != 0 || scale.Length != 0
+                || match.Index > 0 && normalized[match.Index - 1] == '第'
+                || !FollowingIndefiniteClassifier.IsMatch(normalized, match.Index + match.Length));
             return " ";
         });
         var whole = WholeChineseNumber.Match(normalized);
         if (whole.Success && TryNumber(whole.Groups["number"].Value, out var wholeValue))
-        { numbers.Add(Canonical(wholeValue)); normalized = " "; }
+        { AddNumber(Canonical(wholeValue)); normalized = " "; }
         string ReadDate(Match match)
         {
             var monthText = match.Groups["month"].Value;
@@ -372,13 +471,23 @@ public static class PageTextSemanticGuard
         normalized=HanOrdinal.Replace(normalized,match=>
         {
             if(!TryNumber(match.Groups["number"].Value,out var number))return match.Value;
-            numbers.Add(Canonical(number));return " ";
+            AddNumber(Canonical(number));return " ";
         });
         foreach (Match match in Arabic.Matches(normalized))
-            if (TryNumber(match.Value, out var value)) numbers.Add(Canonical(value));
+            if (TryNumber(match.Value, out var value)) AddNumber(Canonical(value));
         foreach (Match match in ChineseNumber.Matches(normalized))
-            if (TryNumber(match.Value, out var value)) numbers.Add(Canonical(value));
-        return new(days, times, dates, numbers);
+            if (TryNumber(match.Value, out var value)) AddNumber(Canonical(value));
+        return new(days, times, dates, numbers, calendarNumbers);
+    }
+
+    private static decimal CalendarMonth(string text)
+    {
+        if (TryNumber(text, out var month)) return month;
+        month = PageCalendarText.EnglishMonthNumber(text);
+        if (month != 0) return month;
+        var names = new[] { "janvier", "février|fevrier", "mars", "avril", "mai", "juin",
+            "juillet", "août|aout", "septembre", "octobre", "novembre", "décembre|decembre" };
+        return Array.FindIndex(names, entry => entry.Split('|').Contains(text, StringComparer.OrdinalIgnoreCase)) + 1;
     }
 
     private static int ReadCenturyOrdinal(string ordinal)
@@ -550,5 +659,6 @@ public static class PageTextSemanticGuard
         || value.StartsWith("decade:", StringComparison.Ordinal) || value.StartsWith("century:", StringComparison.Ordinal);
 
     private static Regex MakeRegex(string pattern) => new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexBudget);
-    private sealed record TextFacts(HashSet<string> Weekdays, HashSet<string> Times, HashSet<string> Dates, HashSet<string> Numbers);
+    private sealed record TextFacts(HashSet<string> Weekdays, HashSet<string> Times, HashSet<string> Dates,
+        HashSet<string> Numbers, HashSet<string> CalendarNumbers);
 }
