@@ -602,7 +602,7 @@
     };
     const { document, token, send, onStatus = () => {}, onDecision = () => {}, onView = () => {}, schedule = callback => setTimeout(callback, 0), clearSchedule = clearTimeout } = environment;
     let config = { enabled: false, active: true, manualAvailable: false, generation: 0, targetLanguage: "简体中文", judgementMode: "program", concurrency: 10,
-      cacheScope: "", cacheEpoch: 0 };
+      chineseProseShareThresholdPercent: 50, cacheScope: "", cacheEpoch: 0 };
     let revision = 0, records = new Map(), blocks = new Map(), queue = [], jobs = new Map(), assessed = null, knownOpenRoots = new Set();
     let paused = false, viewMode = "translation", disposed = false, suspended = false, scanTimer = null, scanning = false, scanAgain = false, firstRequestId = null;
     let scanEligibility = null, resetScanLayout = null;
@@ -876,12 +876,12 @@
         for (const record of snapshot.records) if (record.node.nodeValue !== record.source
             || record.pieces.some(piece => piece.value !== piece.source)) write(record);
         renderBilingual();
-        const verdict = manualMode || config.siteMode === "allow" ? null : policy.localVerdict(snapshot.pageSummary, config.targetLanguage);
+        const verdict = manualMode || config.siteMode === "allow" ? null : policy.localVerdict(snapshot.pageSummary, config.targetLanguage, config.chineseProseShareThresholdPercent);
         if (verdict) {
           assessed = false; queue = [];
-          // Too little currently rendered prose can simply mean that scrolling
-          // collapsed a component. Its hidden translated nodes remain intact.
-          if (verdict.reason !== "too_little_prose" && !policy.isSocialFeed(document.location?.href)) restore();
+          // Page admission governs new work. Added Chinese prose or a changed
+          // threshold must keep published translations of unchanged source.
+          // Source invalidation and explicit original/pause controls own rollback.
           rememberDecision(snapshotKey, { needsTranslation: false, allowImages: verdict.reason !== "mixed_chinese_english", reason: verdict.reason });
           decision(true, verdict.reason !== "mixed_chinese_english"); notify("skipped", verdict.reason); return;
         }
@@ -1073,23 +1073,26 @@
         }
         return true;
       }
-      const flagsOnly = next.generation === config.generation && config.manualAvailable && next.manualAvailable
-        && JSON.stringify({ ...next, enabled: config.enabled, active: config.active, siteMode: config.siteMode, concurrency: config.concurrency }) === JSON.stringify(config);
+      const thresholdChanged = next.chineseProseShareThresholdPercent !== config.chineseProseShareThresholdPercent;
+      const flagsOnly = next.generation === config.generation && (config.manualAvailable && next.manualAvailable || thresholdChanged)
+        && JSON.stringify({ ...next, enabled: config.enabled, active: config.active, siteMode: config.siteMode, concurrency: config.concurrency,
+          chineseProseShareThresholdPercent: config.chineseProseShareThresholdPercent }) === JSON.stringify(config);
       if (flagsOnly) {
         const ruleChanged = next.siteMode !== config.siteMode;
-        if (!manualRunning && (!next.enabled || ruleChanged)) cancel(ruleChanged ? "site_rule_changed" : "automatic_disabled", false, true);
-        if (ruleChanged) { decisionMemo.clear(); decisionCharacters = 0; snapshotKey = null; }
+        const admissionChanged = ruleChanged || thresholdChanged;
+        if (!manualRunning && (!next.enabled || admissionChanged)) cancel(ruleChanged ? "site_rule_changed" : thresholdChanged ? "threshold_changed" : "automatic_disabled", false, true);
+        if (admissionChanged) { decisionMemo.clear(); decisionCharacters = 0; snapshotKey = null; }
         config = next; if (!readable()) pickingParagraph = false;
         if (!manualRunning && next.enabled) { manualMode = null; selectedRanges = null; selectionSources = null; }
         viewChanged(); for (const record of records.values()) write(record); renderBilingual(); decision();
-        if (active()) { if (jobs.size && !ruleChanged) pump(); else scheduleScan(); }
+        if (active()) { if (jobs.size && (!admissionChanged || manualRunning)) pump(); else scheduleScan(); }
         else notify(manualMode && assessed ? "completed" : "manual_ready");
         return true;
       }
       const retainCached = !!next.cacheScope && next.cacheScope === config.cacheScope && next.cacheEpoch === config.cacheEpoch
         && next.targetLanguage === config.targetLanguage;
       const preserveCompleted = retainCached && (config.enabled || config.manualAvailable) && (next.enabled || next.manualAvailable);
-      const sameJudgement = next.judgementMode === config.judgementMode;
+      const sameJudgement = next.judgementMode === config.judgementMode && !thresholdChanged;
       cancel("configuration_changed", !preserveCompleted, preserveCompleted); config = next; paused = false;
       preparationRetries = 0;
       manualMode = null; manualRunning = false; selectedRanges = null; selectionSources = null; selectionPending = false; pickingParagraph = false; manualImageRequest = null;

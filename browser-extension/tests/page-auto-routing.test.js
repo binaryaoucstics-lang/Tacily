@@ -83,6 +83,58 @@ test("native page config keeps inactive Chrome documents enabled with a separate
   const edge=fixture({edge:true});t.after(edge.dispose);edge.configure();await tick();assert.equal(edge.send({type:"queryPageAutoConfig"}).result.enabled,false);
 });
 
+test("native Chinese prose share reaches content with backward-compatible defaults and safe bounds without a quick menu field", async t => {
+  const f = fixture(); t.after(f.dispose); await tick();
+  for (const [value, expected] of [[undefined, 50], [30, 30], [-1, 10], [100, 90], [null, 50], ["20", 50],
+    [20.5, 50], [true, 50], [{}, 50], [Infinity, 50], [Number.MAX_SAFE_INTEGER + 1, 50]]) {
+    f.configure({ chineseProseShareThresholdPercent: value }); await tick();
+    const config = f.send({ type: "queryPageAutoConfig" }).result;
+    assert.equal(config.chineseProseShareThresholdPercent, expected);
+    assert.equal(Object.hasOwn(config.quickSettings, "chineseProseShareThresholdPercent"), false);
+  }
+  f.configure({ chineseProseShareThresholdPercent: 40 }); await tick();
+  for (const id of [11, 12]) assert.equal(f.tabMessages.filter(entry => entry.id === id && entry.message.type === "pageAutoConfig").at(-1).message.chineseProseShareThresholdPercent, 40);
+  f.configure(); await tick(); assert.equal(f.send({ type: "queryPageAutoConfig" }).result.chineseProseShareThresholdPercent, 50);
+});
+
+test("threshold-only native updates retire automatic routing while an accepted manual stream keeps its identity", async t => {
+  const f = fixture(); t.after(f.dispose); await tick(); f.configure({ manualAvailable: true }); await tick();
+  assert.equal((await f.sendAsync(f.candidate)).accepted, true);
+  assert.equal((await f.sendAsync({ ...f.candidate, requestId: "manual-threshold", manualMode: "page" })).accepted, true);
+  f.configure({ manualAvailable: true, chineseProseShareThresholdPercent: 30 }); await tick();
+  f.reply(); f.reply({ requestId: "manual-threshold", manualMode: "page", finished: true }); await tick(); await tick();
+  const translations = f.tabMessages.filter(entry => entry.message.type === "pageAutoTranslations");
+  assert.equal(translations.length, 1); assert.equal(translations[0].message.requestId, "manual-threshold");
+  assert.equal(translations[0].message.generation, 1);
+  assert.equal((await f.sendAsync({ ...f.candidate, requestId: "new-auto", revision: 2 })).accepted, true);
+});
+
+test("threshold update during document admission rejects an old automatic reservation but retains a manual reservation", async t => {
+  const wait = deferred(), f = fixture({ getTab: () => wait.promise }); t.after(f.dispose); await tick();
+  f.configure({ manualAvailable: true });
+  const automatic = f.send(f.candidate), manual = f.send({ ...f.candidate, requestId: "manual-wait", manualMode: "selection" });
+  f.configure({ manualAvailable: true, chineseProseShareThresholdPercent: 30 }); wait.resolve(); await tick(); await tick();
+  assert.equal(automatic.result.accepted, false); assert.equal(manual.result.accepted, true);
+  assert.equal(f.nativeMessages.filter(packet => packet.type === "pageAutoCandidate").length, 1);
+  assert.equal(f.nativeMessages.find(packet => packet.type === "pageAutoCandidate").manualMode, "selection");
+});
+
+test("threshold update during result forwarding drops an old automatic result while a manual result still completes", async t => {
+  let wait;
+  const f = fixture({ getTab: () => wait?.promise }); t.after(f.dispose); await tick();
+  f.configure({ manualAvailable: true }); await tick();
+  assert.equal((await f.sendAsync(f.candidate)).accepted, true);
+  assert.equal((await f.sendAsync({ ...f.candidate, requestId: "manual-forward", manualMode: "page" })).accepted, true);
+  wait = deferred();
+  f.reply({ finished: true }); f.reply({ requestId: "manual-forward", manualMode: "page", finished: true });
+  await tick();
+  f.configure({ manualAvailable: true, chineseProseShareThresholdPercent: 30 });
+  wait.resolve(); await tick(); await tick();
+  const translations = f.tabMessages.filter(entry => entry.message.type === "pageAutoTranslations");
+  assert.equal(translations.length, 1); assert.equal(translations[0].message.requestId, "manual-forward");
+  assert.equal(translations[0].message.finished, true);
+});
+
 test("loading with the same document token keeps admitted text streaming across fragment navigation",async t=>{
   const f=fixture();t.after(f.dispose);await tick();f.configure();await tick();
   f.send(f.candidate);await tick();await tick();
@@ -390,6 +442,23 @@ test("malformed or over-budget page summary rejects before native forwarding",as
     const request=f.send({...f.candidate,requestId:`summary-${index}`,pageSummary:summary});await tick();assert.equal(request.result.accepted,false,`summary ${index}`);
   }
   assert.equal(f.nativeMessages.filter(m=>m.type==="pageAutoCandidate").length,0);
+});
+
+test("optional non-Chinese body prose counts are bounded and projected while older summaries remain accepted", async t => {
+  const f = fixture(); t.after(f.dispose); await tick(); f.configure();
+  for (const [index, value] of [-1, 1.5, "40", Infinity, {}, 100000001].entries()) {
+    assert.equal((await f.sendAsync({ ...f.candidate, requestId: `bad-prose-${index}`,
+      pageSummary: { ...f.candidate.pageSummary, nonChineseProseCharacters: value } })).accepted, false);
+  }
+  for (const [index, value] of [0, 45, 100000000].entries()) {
+    const requestId = `prose-${index}`;
+    assert.equal((await f.sendAsync({ ...f.candidate, requestId,
+      pageSummary: { ...f.candidate.pageSummary, nonChineseProseCharacters: value, ignored: "do not forward" } })).accepted, true);
+    const summary = f.nativeMessages.find(packet => packet.requestId === requestId).pageSummary;
+    assert.equal(summary.nonChineseProseCharacters, value); assert.equal(Object.hasOwn(summary, "ignored"), false);
+  }
+  assert.equal((await f.sendAsync(f.candidate)).accepted, true);
+  assert.equal(Object.hasOwn(f.nativeMessages.find(packet => packet.requestId === f.candidate.requestId).pageSummary, "nonChineseProseCharacters"), false);
 });
 test("optional summary is omitted on the wire, preserving the nullable native protocol",async t=>{
   const f=fixture();t.after(f.dispose);await tick();f.configure();const request=f.send({...f.candidate,pageSummary:null});await tick();

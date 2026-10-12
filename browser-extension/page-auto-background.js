@@ -3,7 +3,7 @@
   const preferences = root.ScreenTranslatorBrowserPreferences || (typeof require === "function" ? require("./browser-preferences.js") : null);
   function create({ chrome, postNative, browserKind, ensureDocument, readDocument = ensureDocument }) {
     let config = { enabled: false, manualAvailable: false, targetLanguage: "zh-CN", generation: 0, judgementMode: "Rules", concurrency: 10,
-      cacheScope: "", cacheEpoch: 0, siteWhitelist: [], siteBlacklist: [], autoImages: false };
+      chineseProseShareThresholdPercent: 50, cacheScope: "", cacheEpoch: 0, siteWhitelist: [], siteBlacklist: [], autoImages: false };
     const pending = new Map();
     const reservations = new Map();
     const documents = new Map();
@@ -48,18 +48,22 @@
       const next = { enabled: message.enabled, manualAvailable: message.manualAvailable === true, generation: message.generation,
         targetLanguage: typeof message.targetLanguage === "string" ? message.targetLanguage.slice(0, 64) : "zh-CN",
         judgementMode: "Rules",
+        chineseProseShareThresholdPercent: Number.isSafeInteger(message.chineseProseShareThresholdPercent)
+          ? Math.max(10, Math.min(90, message.chineseProseShareThresholdPercent)) : 50,
         concurrency: Number.isInteger(message.concurrency) ? Math.max(1, Math.min(10, message.concurrency)) : 10,
         cacheScope: message.cacheScope?.toLowerCase() ?? "", cacheEpoch: message.cacheEpoch ?? 0,
         siteWhitelist: preferences.domains(message.siteWhitelist), siteBlacklist: preferences.domains(message.siteBlacklist), autoImages: message.autoImages === true };
       if (JSON.stringify(next) === JSON.stringify(config)) return;
       const keepManual = ["generation", "targetLanguage", "judgementMode", "cacheScope", "cacheEpoch", "manualAvailable"]
         .every(key => next[key] === config[key]);
+      const thresholdChanged = next.chineseProseShareThresholdPercent !== config.chineseProseShareThresholdPercent;
       config = next;
       if (keepManual) {
         // The automatic admission switch shares a generation with explicit user
         // work. Changing it must not retract an already accepted manual stream.
-        for (const [id, entry] of pending) if (!manual(entry.manualMode) && (!config.enabled
+        for (const [id, entry] of pending) if (!manual(entry.manualMode) && (thresholdChanged || !config.enabled
             || preferences.rule(entry.siteHost || "", config.siteWhitelist, config.siteBlacklist).mode === "block")) pending.delete(id);
+        if (thresholdChanged) for (const entry of reservations.values()) if (!manual(entry.manualMode)) entry.cancelled = true;
       } else { pending.clear(); documents.clear(); }
       void pushAll();
     }
@@ -108,7 +112,7 @@
       if (typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid summary");
       const result = {};
       for (const key of ["totalCharacters", "hanCharacters", "kanaCharacters", "latinCharacters", "proseBlocks",
-        "hanProseCharacters", "latinProseCharacters", "kanaProseCharacters"]) {
+        "hanProseCharacters", "latinProseCharacters", "kanaProseCharacters", "nonChineseProseCharacters"]) {
         if (value[key] == null) continue;
         if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 100000000) throw new Error("Invalid count");
         result[key] = value[key];
@@ -132,7 +136,7 @@
             || !validIdentity(message) || !identifier(message.requestId, 64) || pending.has(message.requestId) || reservations.has(message.requestId)
             || !validBlocks(message)) throw new Error("Rejected");
         const pageSummary = summary(message.pageSummary);
-        reservation = { tabId: sender.tab.id, cancelled: false };
+        reservation = { tabId: sender.tab.id, manualMode: message.manualMode, cancelled: false };
         reservations.set(message.requestId, reservation); reserved = true;
         failureReason = "page_unavailable";
         const tab = await chrome.tabs.get(sender.tab.id);
