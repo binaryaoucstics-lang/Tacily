@@ -22,6 +22,114 @@ public sealed class BrowserPageAutoCoordinatorTests
     private static Task Wait(Task signal) => signal.WaitAsync(TimeSpan.FromSeconds(3));
 
     [Fact]
+    public void ThresholdOnlyChangesPreserveManualGenerationButTranslationInputsDoNot()
+    {
+        var next = Settings with { BrowserChineseProseShareThresholdPercent = 70 };
+        Assert.True(BrowserAutoConfigurationPolicy.PreserveManualGeneration(Settings, next));
+        Assert.False(BrowserAutoConfigurationPolicy.OnlyAnimationPreferenceChanged(Settings, next));
+        Assert.False(BrowserAutoConfigurationPolicy.PreserveManualGeneration(Settings, next with { TargetLanguage = "fr" }));
+        Assert.False(BrowserAutoConfigurationPolicy.PreserveManualGeneration(Settings, next with { TranslationContext = "changed" }));
+    }
+
+    [Theory]
+    [InlineData("selection")]
+    [InlineData("page")]
+    public async Task ThresholdChangePreservesAnActiveManualStreamAndAutomaticPause(string mode)
+    {
+        var started = Signal(); var release = Signal(); var finished = Signal();
+        await using var coordinator = new BrowserPageAutoCoordinator((_, _, _) => Task.FromResult(Assessment),
+            async (_, _, update, token) =>
+            {
+                started.TrySetResult(); await release.Task.WaitAsync(token);
+                await update(new("node-1", "手动翻译完成", true), token); return Result;
+            }, (_, _) => Task.FromResult(true), (_, packet, _) =>
+            { if (packet.Finished) finished.TrySetResult(); return Task.CompletedTask; });
+        coordinator.Configure(Settings, 10);
+        var manual = Candidate(samples: false) with { ManualMode = mode };
+        Assert.True(coordinator.TryEnqueue(manual)); await Wait(started.Task);
+        coordinator.PauseThroughRevision(Connection, 1, "doc-1", 10, 1);
+        coordinator.Configure(Settings with { BrowserChineseProseShareThresholdPercent = 70 }, 10);
+        Assert.True(coordinator.IsCurrent(manual));
+        release.TrySetResult(); await Wait(finished.Task);
+        Assert.False(coordinator.TryEnqueue(Candidate("automatic-still-paused")));
+    }
+
+    [Fact]
+    public async Task ThresholdChangeRecalculatesTheSameRevisionAndRejectsPreparedOldJudgement()
+    {
+        var completed = 0;
+        var thresholds = new ConcurrentQueue<int>();
+        await using var coordinator = new BrowserPageAutoCoordinator((_, settings, _) =>
+        {
+            thresholds.Enqueue(settings.BrowserChineseProseShareThresholdPercent);
+            return Task.FromResult(Assessment);
+        }, (_, _, _, _) => Task.FromResult(Result), (_, _) => Task.FromResult(true), (_, packet, _) =>
+        { if (packet.Finished) Interlocked.Increment(ref completed); return Task.CompletedTask; });
+        coordinator.Configure(Settings, 10);
+        Assert.True(coordinator.TryEnqueue(Candidate())); await EventuallyAsync(() => completed == 1);
+        coordinator.Configure(Settings with { BrowserChineseProseShareThresholdPercent = 70 }, 10);
+        Assert.False(coordinator.TryEnqueue(Candidate("old-prepared"), Assessment, 50));
+        Assert.False(coordinator.TryEnqueue(Candidate("old-prepared-default"), Assessment));
+        Assert.False(coordinator.TryEnqueue(Candidate("no-new-samples", samples: false)));
+        await EventuallyAsync(() => coordinator.TryEnqueue(Candidate("new-threshold")));
+        await EventuallyAsync(() => completed == 2);
+        Assert.Equal(new[] { 50, 70 }, thresholds.ToArray());
+    }
+
+    [Fact]
+    public async Task ThresholdChangeCancelsAnInFlightOldJudgementBeforeItCanPopulateTheSession()
+    {
+        var started = Signal(); var canceled = Signal(); var finished = Signal(); var judges = 0;
+        await using var coordinator = new BrowserPageAutoCoordinator(async (_, settings, token) =>
+        {
+            Interlocked.Increment(ref judges);
+            if (settings.BrowserChineseProseShareThresholdPercent == 50)
+            {
+                started.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException) { canceled.TrySetResult(); }
+                return Assessment with { NeedsTranslation = false };
+            }
+            return Assessment;
+        }, (_, _, _, _) => Task.FromResult(Result), (_, _) => Task.FromResult(true), (candidate, packet, _) =>
+        { if (candidate.RequestId == "new" && packet.Finished) finished.TrySetResult(); return Task.CompletedTask; });
+        coordinator.Configure(Settings, 10);
+        var old = Candidate(); Assert.True(coordinator.TryEnqueue(old)); await Wait(started.Task);
+        coordinator.Configure(Settings with { BrowserChineseProseShareThresholdPercent = 70 }, 10);
+        Assert.False(coordinator.IsCurrent(old)); await Wait(canceled.Task);
+        await EventuallyAsync(() => coordinator.TryEnqueue(Candidate("new")));
+        await Wait(finished.Task); Assert.Equal(2, judges);
+    }
+
+    [Fact]
+    public async Task ThresholdChangeKeepsExistingAutomaticConfigurationFailure()
+    {
+        var finished = Signal();
+        await using var coordinator = new BrowserPageAutoCoordinator((_, _, _) => Task.FromResult(Assessment),
+            (_, _, _, _) => Task.FromException<BrowserPageTranslationResult>(
+                new ScreenTranslator.Core.Translation.TranslationAuthenticationException("existing failure")),
+            (_, _) => Task.FromResult(true), (_, packet, _) =>
+            { if (packet.Finished) finished.TrySetResult(); return Task.CompletedTask; });
+        coordinator.Configure(Settings, 10); Assert.True(coordinator.TryEnqueue(Candidate())); await Wait(finished.Task);
+        coordinator.Configure(Settings with { BrowserChineseProseShareThresholdPercent = 70 }, 10);
+        Assert.False(coordinator.TryEnqueue(Candidate("still-failed")));
+        Assert.Equal("api_key_error", coordinator.RejectionReason(Candidate("still-failed")));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(60, true)]
+    [InlineData(61, false)]
+    [InlineData(-1, false)]
+    [InlineData(int.MaxValue, false)]
+    public void NonChineseProseCountsStayWithinTheBoundedWholePageTotal(int foreign, bool expected)
+    {
+        var candidate = Candidate() with { Statistics = new(TotalCharacters: 100, HanProseCharacters: 40,
+            NonChineseProseCharacters: foreign) };
+        Assert.Equal(expected, BrowserPageAutoCoordinator.IsBounded(candidate));
+    }
+
+    [Fact]
     public async Task Blacklist_Prevents_Automatic_Work_And_Still_Allows_An_Explicit_Selection()
     {
         var sent = Signal(); var translations = 0;

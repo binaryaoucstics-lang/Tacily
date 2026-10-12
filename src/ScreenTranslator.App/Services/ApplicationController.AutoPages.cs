@@ -63,19 +63,9 @@ public sealed partial class ApplicationController
             var config = Volatile.Read(ref _autoPageConfiguration);
             if (_disposed || _browserBridgeServer is null) return;
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            await _browserBridgeServer.SendAsync(connection, JsonSerializer.Serialize(new
-            {
-                type = "pageAutoConfig", enabled = config.Settings.BrowserAutoPageTranslationEnabled
-                    && _browserConnections.GetValueOrDefault(connection) == BrowserKind.Chrome,
-                manualAvailable = _browserConnections.GetValueOrDefault(connection) == BrowserKind.Chrome,
-                targetLanguage = config.Settings.TargetLanguage, generation = config.Generation,
-                judgementMode = config.Settings.BrowserPageJudgementMode.ToString().ToLowerInvariant(),
-                concurrency = Math.Clamp(config.Settings.BrowserPageTranslationConcurrency, 1, 10),
-                siteWhitelist = config.Settings.BrowserTranslationWhitelist,
-                siteBlacklist = config.Settings.BrowserTranslationBlacklist,
-                autoImages = config.Settings.BrowserAutoImageTranslationEnabled,
-                cacheScope = PageCacheScope(config.Settings), cacheEpoch = Volatile.Read(ref _pageCacheEpoch),
-            }), timeout.Token).ConfigureAwait(false);
+            await _browserBridgeServer.SendAsync(connection, BrowserPageAutoProtocol.SerializeConfiguration(
+                config.Settings, config.Generation, _browserConnections.GetValueOrDefault(connection) == BrowserKind.Chrome,
+                PageCacheScope(config.Settings), Volatile.Read(ref _pageCacheEpoch)), timeout.Token).ConfigureAwait(false);
         }
         catch (Exception error) when (error is IOException or OperationCanceledException or InvalidOperationException) { }
     }
@@ -133,7 +123,8 @@ public sealed partial class ApplicationController
             // page can be recognized even while four older pages are translating.
             var assessment = candidate.ManualMode is null && candidate.Samples is not null
                 ? await JudgeAndRecordAsync(candidate, configuration.Settings, timeout.Token).ConfigureAwait(false) : null;
-            if (_autoPageCoordinator?.TryEnqueue(candidate, assessment) == true)
+            if (_autoPageCoordinator?.TryEnqueue(candidate, assessment,
+                    configuration.Settings.BrowserChineseProseShareThresholdPercent) == true)
             {
                 if (assessment is not null)
                     await _autoPageCoordinator.AnnounceAssessmentAsync(candidate, assessment, timeout.Token).ConfigureAwait(false);
@@ -161,7 +152,9 @@ public sealed partial class ApplicationController
         var (assessment, cached) = await _pageDecisionMemo.AssessAsync(candidate.Samples ?? [], settings.TargetLanguage,
             settings.BrowserPageJudgementMode, candidate.Statistics,
             current => _autoPageJudge.JudgeAsync(candidate.Samples ?? [], settings.TargetLanguage,
-                settings.BrowserPageJudgementMode, current, candidate.Statistics), token).ConfigureAwait(false);
+                settings.BrowserPageJudgementMode, current, candidate.Statistics,
+                settings.BrowserChineseProseShareThresholdPercent), token,
+            settings.BrowserChineseProseShareThresholdPercent).ConfigureAwait(false);
         AppDiagnostics.Write($"browser_page_assessment code={assessment.ReasonCode} needs={assessment.NeedsTranslation} rules=true cached={cached} ms={assessment.ElapsedMilliseconds:F0}");
         return assessment;
     }

@@ -63,13 +63,17 @@ public sealed class BrowserPageAutoCoordinator : IAsyncDisposable
                 BrowserAutoConfigurationPolicy.PreserveManualGeneration(_scope.Settings, settings))
             {
                 var previous = _scope.Settings; _scope.Settings = settings;
+                var thresholdChanged = Threshold(previous) != Threshold(settings);
                 foreach (var session in _sessions.Values) {
                     var site = BrowserSitePolicy.Resolve(session.SiteHost, settings);
                     if (site.Mode != BrowserSitePolicy.Resolve(session.SiteHost, previous).Mode) {
                         session.Assessment = null; session.AssessmentFingerprint = null;
                         session.AutoFailed = false; session.FailureCode = null;
                     }
-                    if (!settings.BrowserAutoPageTranslationEnabled || site.Mode == "block") {
+                    if (thresholdChanged) {
+                        session.Assessment = null; session.AssessmentFingerprint = null;
+                    }
+                    if (thresholdChanged || !settings.BrowserAutoPageTranslationEnabled || site.Mode == "block") {
                         if (session.ActiveManualMode is null) session.ActiveCancellation?.Cancel();
                         foreach (var request in session.FinishingRequests.Values) if (request.Mode is null) request.Cancellation.Cancel();
                     }
@@ -83,14 +87,17 @@ public sealed class BrowserPageAutoCoordinator : IAsyncDisposable
         }
     }
 
-    public bool TryEnqueue(AutoPageCandidate candidate, PageTranslationAssessment? preparedAssessment = null)
+    public bool TryEnqueue(AutoPageCandidate candidate, PageTranslationAssessment? preparedAssessment = null,
+        int preparedChineseProseShareThresholdPercent = PageTranslationDecision.DefaultChineseProseShareThresholdPercent)
     {
         ArgumentNullException.ThrowIfNull(candidate);
         lock (_gate)
         {
             if (_disposed || candidate.ManualMode is null && (!_scope.Settings.BrowserAutoPageTranslationEnabled
                     || BrowserSitePolicy.Resolve(candidate.SiteHost, _scope.Settings).Mode == "block") ||
-                candidate.Generation != _scope.Generation || !IsBounded(candidate)) return false;
+                candidate.Generation != _scope.Generation || !IsBounded(candidate) ||
+                candidate.ManualMode is null && preparedAssessment is not null &&
+                    PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(preparedChineseProseShareThresholdPercent) != Threshold(_scope.Settings)) return false;
             var key = new SessionKey(candidate.ConnectionId, candidate.TabId, candidate.DocumentToken);
             foreach (var old in _sessions.Where(pair => pair.Key.ConnectionId == candidate.ConnectionId
                 && pair.Key.TabId == candidate.TabId && pair.Key != key).ToArray())
@@ -105,7 +112,7 @@ public sealed class BrowserPageAutoCoordinator : IAsyncDisposable
                 // Even an image-only page sends an explicitly empty first sample array.
                 // Manual selections need no page sample and leave the automatic decision intact.
                 if (candidate.ManualMode is null && candidate.Samples is null) return false;
-                var fingerprint = candidate.ManualMode is null ? AssessmentFingerprint(candidate) : existing?.AssessmentFingerprint;
+                var fingerprint = candidate.ManualMode is null ? AssessmentFingerprint(candidate, _scope.Settings) : existing?.AssessmentFingerprint;
                 var assessment = existing?.AssessmentFingerprint == fingerprint ? existing?.Assessment : null;
                 var autoPaused = existing?.AutoPaused ?? false;
                 var autoFailed = candidate.ManualMode is not null && existing?.AutoFailed == true;
@@ -127,7 +134,7 @@ public sealed class BrowserPageAutoCoordinator : IAsyncDisposable
                 if (existing!.AutoPaused || existing.AutoFailed) return false;
                 if (candidate.Samples is not null)
                 {
-                    var fingerprint = AssessmentFingerprint(candidate);
+                    var fingerprint = AssessmentFingerprint(candidate, _scope.Settings);
                     if (existing.AssessmentFingerprint != fingerprint) existing.Assessment = null;
                     existing.AssessmentFingerprint = fingerprint;
                 }
@@ -270,6 +277,7 @@ public sealed class BrowserPageAutoCoordinator : IAsyncDisposable
                         token.ThrowIfCancellationRequested();
                         lock (_gate)
                         {
+                            token.ThrowIfCancellationRequested();
                             if (!IsCurrent(work.Candidate)) throw new OperationCanceledException(token);
                             work.Session.Assessment = assessment;
                         }
@@ -364,10 +372,14 @@ public sealed class BrowserPageAutoCoordinator : IAsyncDisposable
         await _send(candidate, packet, token).ConfigureAwait(false);
     }
 
-    private static string AssessmentFingerprint(AutoPageCandidate candidate) => Convert.ToHexString(
+    private static int Threshold(AppSettings settings) => PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(
+        settings.BrowserChineseProseShareThresholdPercent);
+
+    private static string AssessmentFingerprint(AutoPageCandidate candidate, AppSettings settings) => Convert.ToHexString(
         SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
         {
             candidate.DocumentLanguage, candidate.Samples, candidate.Statistics,
+            chineseProseShareThresholdPercent = Threshold(settings),
         })));
 
     private static void Retire(Scope scope)
@@ -448,7 +460,8 @@ public sealed class BrowserPageAutoCoordinator : IAsyncDisposable
         value.TotalCharacters is >= 0 and <= 10_000_000 && value.HanCharacters >= 0 && value.KanaCharacters >= 0 &&
         value.LatinCharacters >= 0 && (long)value.HanCharacters + value.KanaCharacters + value.LatinCharacters <= value.TotalCharacters &&
         value.ProseBlocks is >= 0 and <= 100_000 && value.HanProseCharacters >= 0 && value.LatinProseCharacters >= 0 &&
-        value.KanaProseCharacters >= 0 && (long)value.HanProseCharacters + value.LatinProseCharacters + value.KanaProseCharacters <= value.TotalCharacters;
+        value.KanaProseCharacters >= 0 && (long)value.HanProseCharacters + value.LatinProseCharacters + value.KanaProseCharacters <= value.TotalCharacters &&
+        value.NonChineseProseCharacters >= 0 && (long)value.HanProseCharacters + value.NonChineseProseCharacters <= value.TotalCharacters;
 
     private sealed class Scope(AppSettings settings, long generation, CancellationTokenSource cancellation)
     {

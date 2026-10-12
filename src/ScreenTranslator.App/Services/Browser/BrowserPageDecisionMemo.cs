@@ -38,14 +38,16 @@ public sealed class BrowserPageDecisionMemo
 
     public async Task<(PageTranslationAssessment Assessment, bool CacheHit)> AssessAsync(
         IReadOnlyList<PageTextSample> samples, string targetLanguage, BrowserPageJudgementMode mode,
-        PageTextStatistics? statistics, Func<CancellationToken, Task<PageTranslationAssessment>> judge, CancellationToken token)
+        PageTextStatistics? statistics, Func<CancellationToken, Task<PageTranslationAssessment>> judge, CancellationToken token,
+        int chineseProseShareThresholdPercent = PageTranslationDecision.DefaultChineseProseShareThresholdPercent)
     {
         ArgumentNullException.ThrowIfNull(samples); ArgumentNullException.ThrowIfNull(judge);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetLanguage);
         token.ThrowIfCancellationRequested();
         var key = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
         {
-            contract = "page-decision-original-sources-v2-html-whitespace", policy = _policyVersion,
+            contract = "page-decision-original-sources-v3-chinese-prose-share", policy = _policyVersion,
+            chineseProseShareThresholdPercent = PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(chineseProseShareThresholdPercent),
             targetLanguage, mode, samples = samples.Select(sample => sample with
             { Text = Regex.Replace(sample.Text, "[ \\t\\r\\n\\f]+", " ").Trim() }).ToArray(), statistics,
         })));

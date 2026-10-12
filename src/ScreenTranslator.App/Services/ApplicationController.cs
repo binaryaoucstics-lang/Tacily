@@ -1214,6 +1214,7 @@ public sealed partial class ApplicationController : IDisposable
             Behaviors.TranslationMotion.AppEnabled = GeneralSettings.TranslationAnimationsEnabled;
         if ((sender == GeneralSettings && e.PropertyName is nameof(GeneralSettings.BrowserAutoImageTranslationEnabled) or nameof(GeneralSettings.BrowserAutoPageTranslationEnabled) or nameof(GeneralSettings.TranslationAnimationsEnabled)
                 or nameof(GeneralSettings.BrowserPageCacheEnabled) or nameof(GeneralSettings.BrowserPageCacheMegabytes)
+                or nameof(GeneralSettings.BrowserChineseProseShareThresholdPercent)
                 or nameof(GeneralSettings.BrowserTranslationWhitelist) or nameof(GeneralSettings.BrowserTranslationBlacklist)
                 or nameof(GeneralSettings.BrowserPageJudgementMode) or nameof(GeneralSettings.BrowserPageTranslationConcurrency) or nameof(GeneralSettings.TargetLanguage))
             || (sender == TranslationSettings && e.PropertyName is nameof(TranslationSettings.TargetLanguage)
@@ -1357,6 +1358,8 @@ public sealed partial class ApplicationController : IDisposable
             GeneralSettings.TranslationAnimationsEnabled = settings.TranslationAnimationsEnabled;
             GeneralSettings.BrowserAutoImageTranslationEnabled = settings.BrowserAutoImageTranslationEnabled;
             GeneralSettings.BrowserAutoPageTranslationEnabled = settings.BrowserAutoPageTranslationEnabled;
+            GeneralSettings.BrowserChineseProseShareThresholdPercent = PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(
+                settings.BrowserChineseProseShareThresholdPercent);
             GeneralSettings.BrowserTranslationWhitelist = settings.BrowserTranslationWhitelist;
             GeneralSettings.BrowserTranslationBlacklist = settings.BrowserTranslationBlacklist;
             GeneralSettings.BrowserPageTranslationConcurrency = Math.Clamp(settings.BrowserPageTranslationConcurrency, 1, 10);
@@ -1418,6 +1421,8 @@ public sealed partial class ApplicationController : IDisposable
             BrowserFollowingEnabled = BrowserIntegration.IsEnabled,
             BrowserAutoImageTranslationEnabled = GeneralSettings.BrowserAutoImageTranslationEnabled,
             BrowserAutoPageTranslationEnabled = GeneralSettings.BrowserAutoPageTranslationEnabled,
+            BrowserChineseProseShareThresholdPercent = PageTranslationDecision.NormalizeChineseProseShareThresholdPercent(
+                GeneralSettings.BrowserChineseProseShareThresholdPercent),
             BrowserTranslationWhitelist = GeneralSettings.BrowserTranslationWhitelist,
             BrowserTranslationBlacklist = GeneralSettings.BrowserTranslationBlacklist,
             BrowserPageJudgementMode = BrowserPageJudgementMode.Rules,
