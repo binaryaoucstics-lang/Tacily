@@ -469,6 +469,41 @@
     return { text, positions };
   }
   function canonicalSpace(code) { return code === 32 || code === 9 || code === 10 || code === 12 || code === 13; }
+  function completedPdfSpacing(previous, next) {
+    if (!previous.length || !next.length) return false;
+    const source = previous.map(record => record.source).join("");
+    if (source === next.map(record => record.source).join("")
+        || previous.some(record => record.groupText !== source || record.selectionScoped || record.atomicOwner
+          || record.pieces.some(piece => piece.id && (!piece.complete || piece.failed)))
+        || !previous.some(record => record.source === "(PDF)" && record.pieces.some(piece => piece.id && piece.complete))) return false;
+    const previousByNode = new Map(previous.map(record => [record.node, record]));
+    const nextByNode = new Map(next.map(record => [record.node, record]));
+    function sameSlots(left, right) {
+      return (left?.renderSlots?.size || 0) === (right?.renderSlots?.size || 0)
+        && [...(left?.renderSlots || [])].every(slot => right.renderSlots.has(slot));
+    }
+    if (previous.some(record => !sameSlots(record, nextByNode.get(record.node)))
+        || next.some(record => !sameSlots(previousByNode.get(record.node), record))) return false;
+    // Only separate horizontal separator nodes before an unchanged PDF label
+    // are optional. Every word, fact, selected source and its DOM owner stays
+    // exact; this is deliberately not a whitespace-normalized paragraph cache.
+    function substantive(records) {
+      return records.filter((record, index) => {
+        if (!/^[ \t]+$/u.test(record.source)) return true;
+        let left = index - 1, right = index + 1;
+        while (left >= 0 && /^[ \t]+$/u.test(records[left].source)) left--;
+        while (right < records.length && /^[ \t]+$/u.test(records[right].source)) right++;
+        return !(left >= 0 && /\p{L}$/u.test(records[left].source)
+          && records[right]?.source === "(PDF)");
+      });
+    }
+    const before = substantive(previous), after = substantive(next);
+    return before.length === after.length && before.every((record, index) => {
+      const current = after[index];
+      return record.node === current.node && record.source === current.source && record.groupElement === current.groupElement
+        && sameSlots(record, current);
+    });
+  }
   function randomIdentifier(implementation = root.crypto) {
     if (typeof implementation?.randomUUID === "function") return implementation.randomUUID();
     const bytes = new Uint8Array(16); implementation.getRandomValues(bytes);
@@ -479,6 +514,12 @@
   async function extractPageSnapshot(environment, previous = new Map()) {
     const { document, getStyle, makeId, yieldWork = () => Promise.resolve(), viewportHeight = 800, targetLanguage = "简体中文" } = environment;
     const records = [], groups = new Map(), openRoots = new Set(), groupParents = new WeakMap();
+    const previousGroups = new Map();
+    for (const record of previous.values()) {
+      if (!previousGroups.has(record.groupElement)) previousGroups.set(record.groupElement, []);
+      previousGroups.get(record.groupElement).push(record);
+    }
+    for (const group of previousGroups.values()) group.sort((left, right) => left.groupOrder - right.groupOrder);
     let fragmentDelay = 0, visibleFragmentDelay = 0;
     let eligibility = new WeakMap(); const checkedFragments = new WeakSet();
     const fragmentGroups = environment.fragmentGroups || new WeakSet();
@@ -569,16 +610,17 @@
       const groupBlockStart = blocks.length;
       const unchanged = group.records.every(record => record.before?.groupId && record.before.source === record.source
         && record.before.groupElement === group.element && record.before.groupText === group.text);
-      if (unchanged) {
-        group.id = group.records[0].before.groupId;
+      const pdfSpacing = !selectedRanges && completedPdfSpacing(previousGroups.get(group.element) || [], group.records);
+      if (unchanged || pdfSpacing) {
+        group.id = (pdfSpacing ? previousGroups.get(group.element)[0] : group.records[0].before).groupId;
         for (const record of group.records) record.groupId = group.id;
       }
       for (const record of group.records) {
-        // Carry a prefix/completed translation only when the whole semantic
-        // paragraph is unchanged. A changed date or inline neighbour must not
-        // leave the other fragments displaying facts from the previous paragraph.
+        // Prefixes require an exact paragraph; complete output also tolerates
+        // the proven separate PDF gap. A changed date or inline neighbour must
+        // not leave fragments displaying facts from the previous paragraph.
         const before = record.before;
-        if (before?.source === record.source && before.groupElement === group.element && before.groupText === group.text)
+        if (before?.source === record.source && before.groupElement === group.element && (before.groupText === group.text || pdfSpacing))
           record.pieces = before.pieces.map(piece => ({ ...piece }));
         record.groupText = group.text; record.groupHash = group.sourceDigest; delete record.before;
         if (selectedRanges) applySelectedPieces(record, selectedRanges.get(record.node) || []);
@@ -1606,6 +1648,38 @@
         return changed;
       }
       let changed = false;
+      const pdfSpacingGroups = new Set(), checkedPdfSpacingGroups = new Set();
+      if (!selectedRanges) for (const mutation of mutations) {
+        if (ownedNodes.has(mutation.target) || !["characterData", "childList"].includes(mutation.type)) continue;
+        if (mutation.type === "characterData" && records.get(mutation.target)?.lastWritten === mutation.target.nodeValue) continue;
+        const element = groupElement(mutation.target.nodeType === 3 ? mutation.target : { assignedSlot: mutation.target });
+        if (!element || checkedPdfSpacingGroups.has(element)) continue;
+        checkedPdfSpacingGroups.add(element);
+        const previous = [...records.values()].filter(record => record.groupElement === element)
+          .sort((left, right) => left.groupOrder - right.groupOrder);
+        if (!previous.some(record => record.source === "(PDF)" && record.pieces.some(piece => piece.id && piece.complete))
+            || previous.some(record => record.pieces.some(piece => piece.id && (!piece.complete || piece.failed)))) continue;
+        const next = [];
+        for (const node of walkAccessibleNodes(element)) {
+          if (node.nodeType !== 3 || groupElement(node) !== element
+              || !permitted(node, environment.getStyle, environment.fragmentGroups)
+              || !renderedRecord(records.get(node) || { node }, environment.isRenderedText)) continue;
+          const before = records.get(node), source = before && node.nodeValue === before.lastWritten ? before.source : node.nodeValue;
+          if (!source) continue;
+          const renderSlots = new Set();
+          for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") renderSlots.add(ancestor);
+          next.push({ node, source, groupElement: element, renderSlots });
+        }
+        if (!completedPdfSpacing(previous, next)) continue;
+        // Retire this paragraph's old response authority without rolling back
+        // completed display. The next snapshot computes the current SHA/ranges
+        // from the new exact source, and carries only the proven complete pieces.
+        const ids = new Set(previous.flatMap(record => record.pieces.map(piece => piece.id).filter(Boolean)));
+        for (const job of jobs.values()) for (const id of ids) job.ids.delete(id);
+        queue = queue.filter(block => !ids.has(block.id));
+        pdfSpacingGroups.add(element); changed = true; invalidated = true;
+        for (const record of previous) if (record.node.nodeValue === record.source) { record.lastWritten = record.source; write(record); }
+      }
       if (mutations.some(mutation => mutation.type === "childList" && !ownedNodes.has(mutation.target)
           && touchesManualSelection(mutation))) rebindRegroupedCompleted();
       // normalize() reports characterData before childList. Rebind against the
@@ -1621,6 +1695,8 @@
       for (const mutation of mutations) {
         if (ownedNodes.has(mutation.target)) continue;
         if (!touchesManualSelection(mutation)) continue;
+        if (["characterData", "childList"].includes(mutation.type)
+            && pdfSpacingGroups.has(groupElement(mutation.target.nodeType === 3 ? mutation.target : { assignedSlot: mutation.target }))) continue;
         if (mutation.type === "characterData") {
           const record = records.get(mutation.target);
           if (record && mutation.target.nodeValue === record.lastWritten) continue;
@@ -1635,9 +1711,11 @@
           }
           if (!policy.hasLanguageText(nextSource)) {
             const hadLanguage = record && policy.hasLanguageText(record.source);
-            const changedParagraphFact = record && [...records.values()].some(peer => peer !== record
-              && peer.groupElement === record.groupElement && peer.pieces.some(piece => piece.id));
-            if (changedParagraphFact) { invalidateGroup(record.groupElement); changed = true; }
+            const element = record?.groupElement || groupElement(mutation.target);
+            const changedParagraphFact = [...records.values()].some(peer => peer !== record
+              && peer.groupElement === element && peer.pieces.some(piece => piece.id)
+              && (record || !hasUnchangedGroupSource(element, peer.groupText)));
+            if (changedParagraphFact) { invalidateGroup(element); changed = true; }
             if (record) refreshUntranslated(record, nextSource);
             // Remove the changed node from outstanding work. A visible numeric
             // clock never restarts other paragraphs, while a formerly decisive
