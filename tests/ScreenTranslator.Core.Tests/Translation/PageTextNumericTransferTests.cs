@@ -5,6 +5,16 @@ namespace ScreenTranslator.Core.Tests.Translation;
 
 public sealed class PageTextNumericTransferTests
 {
+    [Theory]
+    [InlineData("The entrance is blue.", false)]
+    [InlineData("Bring bottles on Monday", true)]
+    [InlineData("with capacity 250 ml", true)]
+    [InlineData("The event began in 1951.", true)]
+    [InlineData("Meet at 14:30.", true)]
+    [InlineData("Its 740M parameters produce 768-dimensional embeddings.", true)]
+    public void SourceFactPresenceUsesTheExistingGuardParser(string source, bool expected)
+        => Assert.Equal(expected, PageTextSemanticGuard.HasProtectedFacts(source));
+
     [Fact]
     public void TransferEdgesRemainVisibleWhenReceiverAlsoChangesWeekday()
     {

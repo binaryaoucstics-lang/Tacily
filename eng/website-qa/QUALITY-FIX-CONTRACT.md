@@ -42,6 +42,13 @@ loop. `FindUnsafeIds` remains compatible. Retry code must use these real edges
 instead of synthesizing source-plus-answer probes; independent errors must not
 be joined. Retain the original owner source/answer as an invocation-local witness
 so correcting the owner cannot make a receiver's transferred fact acceptable.
+`HasProtectedFacts(text)` uses the same source fact parser. Hold translations of
+these nodes until final validation, including a single independent technical
+paragraph. This prevents visible wrong numeric prefixes followed by rollback.
+Update the technical and financial streaming regressions to await the provider's
+prefix signal and assert no provisional UI/cache output before releasing final
+content; retain quantity rejection, bounded retry and persisted cache assertions.
+The page prompt retains the existing 80..120-word budget and per-ID invariants.
 Test a receiver that initially also changes Monday to Tuesday, then corrects only
 the weekday while retaining a transferred quantity. No guard rule is weakened.
 

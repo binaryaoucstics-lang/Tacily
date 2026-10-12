@@ -82,6 +82,15 @@ public static class PageTextSemanticGuard
         IReadOnlyDictionary<string, string> translations)
         => Assess(source, translations).UnsafeIds;
 
+    /// <summary>Whether this source has facts requiring validation before display.</summary>
+    public static bool HasProtectedFacts(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        var facts = Facts(text, sourceClock: true);
+        return facts.Numbers.Count != 0 || facts.Dates.Count != 0
+            || facts.Times.Count != 0 || facts.Weekdays.Count != 0;
+    }
+
     /// <summary>Reports the same guard verdict plus actual numeric ownership edges.</summary>
     public static PageTextSemanticAssessment Assess(
         IReadOnlyList<BrowserPageTextBlock> source,
