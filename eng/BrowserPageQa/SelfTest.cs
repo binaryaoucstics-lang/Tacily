@@ -22,6 +22,8 @@ internal static class SelfTest
             ("assessment-and-skip-without-provider", AssessmentAsync),
             ("native-candidate-boundaries", InvalidAsync),
             ("id-scoped-cancellation", CancellationAsync),
+            ("completed-message-cancel-is-case-scoped-and-idempotent", CompletedCancellationAsync),
+            ("completion-cancel-race-emits-one-terminal", CompletionRaceAsync),
             ("bounded-admission-and-shutdown", CapacityAsync),
             ("interrupted-stream-is-failure", InterruptedAsync),
             ("live-factory-failure-never-falls-back", NoFallbackAsync),
@@ -144,6 +146,53 @@ internal static class SelfTest
         Check(Events(output).Any(e => Id(e) == "cancel-one" && Type(e) == "error" && e.GetProperty("code").GetString() == "cancelled"));
         Check(Events(output).Where(e => Id(e) == "cancel-one" && Type(e) == "packet").Last()
             .GetProperty("packet").GetProperty("error").GetString() == "cancelled");
+        var count = Events(output).Count;
+        await host.HandleAsync(Request("cancel-one", "cancel"));
+        Check(Events(output).Count == count); // Retrying cancellation cannot create a second terminal.
+    }
+
+    private static async Task CompletedCancellationAsync()
+    {
+        var output = new StringWriter();
+        await using var host = Host(output, _ => new SyntheticProvider(FinishAsync));
+        await host.HandleAsync(Candidate("completed")); await host.DrainAsync();
+        var count = Events(output).Count;
+        for (var i = 0; i < 3; i++) await host.HandleAsync(Request("completed", "cancel"));
+        Check(Events(output).Count == count && Terminal(output, "completed").GetProperty("success").GetBoolean());
+        await host.HandleAsync(Request("completed", "cancel").Replace("\"caseId\":\"case\"", "\"caseId\":\"CASE\""));
+        await host.HandleAsync(Request("unknown", "cancel"));
+        await host.HandleAsync(Request("cap", "capabilities"));
+        await host.HandleAsync(Request("cap", "cancel"));
+        await host.HandleAsync(Request("assess", "assess", new { samples = new[] { new { text = Source, kind = "body" } } }));
+        await host.HandleAsync(Request("assess", "cancel"));
+        await host.HandleAsync(Request("invalid", "message", new { message = new { type = "invalid" } }));
+        await host.HandleAsync(Request("invalid", "cancel"));
+        Check(Events(output).Count(e => Type(e) == "error" && e.GetProperty("code").GetString() == "unknown_request") == 5);
+        await host.HandleAsync(Candidate("completed"));
+        Check(Events(output).Last().GetProperty("code").GetString() == "duplicate_id");
+        Check(Events(output).Count(e => Type(e) == "terminal") == 1);
+    }
+
+    private static async Task CompletionRaceAsync()
+    {
+        // Pause actual terminal output while the admitted work is still active.
+        // Completion owns the result by this point; cancellation must neither
+        // use a retired token source nor emit unknown_request/another terminal.
+        var output = new PausedTerminalWriter();
+        await using var host = Host(output, _ => new SyntheticProvider(FinishAsync));
+        await host.HandleAsync(Candidate("race"));
+        try
+        {
+            await output.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await host.HandleAsync(Request("race", "cancel"));
+            host.CancelAll();
+        }
+        finally { output.Release.TrySetResult(); }
+        await host.DrainAsync();
+        await host.HandleAsync(Request("race", "cancel"));
+        Check(Events(output).All(e => Type(e) != "error"));
+        Check(Terminal(output, "race").GetProperty("success").GetBoolean());
+        Check(Events(output).Count(e => Type(e) == "terminal") == 1);
     }
 
     private static async Task CapacityAsync()
@@ -159,6 +208,8 @@ internal static class SelfTest
         for (var i = 0; i <= JsonlHost.MaximumActiveRequests; i++) await host.HandleAsync(Candidate("capacity-" + i));
         await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Check(Events(output).Any(e => Type(e) == "error" && e.GetProperty("code").GetString() == "busy"));
+        await host.HandleAsync(Request("capacity-" + JsonlHost.MaximumActiveRequests, "cancel"));
+        Check(Events(output).Last().GetProperty("code").GetString() == "unknown_request");
         host.CancelAll(); await host.DrainAsync();
         Check(entered == JsonlHost.MaximumActiveRequests && ended == entered
             && Events(output).Count(e => Type(e) == "terminal") == entered
@@ -371,5 +422,20 @@ internal static class SelfTest
     {
         public override Encoding Encoding => Encoding.UTF8;
         public override Task WriteLineAsync(string? value) => throw new IOException("DO_NOT_LEAK");
+    }
+    private sealed class PausedTerminalWriter : StringWriter
+    {
+        public TaskCompletionSource Started { get; } = Signal();
+        public TaskCompletionSource Release { get; } = Signal();
+        public override async Task WriteLineAsync(string? value)
+        {
+            using var document = JsonDocument.Parse(value!);
+            if (Type(document.RootElement) == "terminal")
+            {
+                Started.TrySetResult();
+                await Release.Task;
+            }
+            await base.WriteLineAsync(value);
+        }
     }
 }

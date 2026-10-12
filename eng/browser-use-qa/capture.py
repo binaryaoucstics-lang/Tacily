@@ -222,6 +222,15 @@ class BrowserCli:
     def qa(self, method, *args):
         return self.evaluate("globalThis.__websiteQa." + method + "(" + ",".join(map(encode, args)) + ")")
 
+    def drain_sample(self, phase):
+        """One synchronous CLI round trip; sample before draining preserves rpcPending."""
+        value = self.evaluate("(()=>{const q=globalThis.__websiteQa;return {sample:q.sample(" +
+                              encode(phase) + "),outbound:q.drain()}})()")
+        if not isinstance(value, dict) or not isinstance(value.get("sample"), dict) \
+                or not isinstance(value.get("outbound"), list):
+            raise CaptureError("adapter_lost_or_invalid")
+        return value
+
     def deliver_batch(self, frames):
         """Deliver a bounded ordered batch of [rpcId, original packet, acknowledge]."""
         if not frames:
@@ -546,8 +555,9 @@ class CaseCapture:
         def save():
             atomic_json(path / "case.json", case, on_retry=log.append)
 
-        def sample(phase):
-            value = self.browser.qa("sample", phase)
+        def sample(phase, value=None):
+            if value is None:
+                value = self.browser.qa("sample", phase)
             if not isinstance(value, dict):
                 raise CaptureError("adapter_lost_or_invalid")
             log.append({"kind": "sample", "phase": phase, "value": value})
@@ -582,7 +592,7 @@ class CaseCapture:
                                         "sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "fullPage": full})
             save()
 
-        def forward():
+        def forward(phase=None):
             frames = []
 
             def flush():
@@ -613,8 +623,80 @@ class CaseCapture:
                         len(delivery_expression(frames).encode("utf-16-le")) > EVAL_LIMIT_BYTES:
                     flush()
 
+            events_read = 0
+
+            def receive():
+                nonlocal events_read
+                for _ in range(FORWARD_EVENT_LIMIT - events_read):
+                    check_deadline(deadline)
+                    event = self.host.poll()
+                    if event is None:
+                        break
+                    events_read += 1
+                    log.append({"kind": "host_event", "event": event})
+                    check_deadline(deadline)
+                    if event.get("code") in ("host_eof", "host_invalid_jsonl"):
+                        flush()
+                        raise CaptureError(event["code"])
+                    if event.get("caseId") != site["id"]:
+                        # Late cancellation from a previous site is audited but cannot finish this site.
+                        continue
+                    entry = pending.get(event.get("id"))
+                    if not entry:
+                        flush()
+                        raise CaptureError("host_uncorrelated_event")
+                    if event["type"] == "error":
+                        flush()
+                        if entry.get("rpcId") and not entry.get("acknowledged"):
+                            self.browser.qa("acknowledge", entry["rpcId"], {"accepted": False, "reason": event.get("code", "host_error")})
+                            entry["acknowledged"] = True
+                        raise CaptureError(event.get("code", "host_error"))
+                    if event["type"] == "packet":
+                        try:
+                            packet = event["packet"]
+                            wire = json.loads(packet) if isinstance(packet, str) else packet
+                            if not isinstance(wire, dict) or not entry.get("rpcId"):
+                                raise CaptureError("host_invalid_packet")
+                        except (KeyError, TypeError, ValueError, CaptureError):
+                            flush()
+                            raise
+                        # Preserve raw serialized frame for receive; acknowledge the transport
+                        # once, before delivering its first frame (even across batch boundaries).
+                        acknowledge = not entry["acknowledged"]
+                        # Do not retry an acknowledgement after a partially executed
+                        # eval fails; that case is failed evidence, not a replay.
+                        entry["acknowledged"] = True
+                        queue_frame(entry["rpcId"], packet, acknowledge)
+                        if wire.get("error"):
+                            flush()
+                            raise CaptureError("backend_packet_error")
+                    if event["type"] == "terminal":
+                        flush()
+                        entry["terminal"] = True
+                        case["terminals"].append(event)
+                        if event.get("success") is not True or event.get("failedCount", 0):
+                            raise CaptureError("backend_terminal_failed")
+                    if event["type"] == "assessment":
+                        flush()
+                        case["localAssessment"] = event
+                        entry["terminal"] = True
+                flush()
+                return events_read < FORWARD_EVENT_LIMIT
+
+            if not receive():
+                save()
+                return False  # Preserve the per-pass event bound; next pass drains first again.
+            value = None
+            collect = getattr(self.browser, "drain_sample", None)
+            # Admit the first candidate via the cheap drain before a full DOM
+            # traversal. Later polls can share the sample/drain wrapper call.
+            if phase is not None and collect is not None and pending:
+                collected = collect(phase)
+                value, outbound = collected["sample"], collected["outbound"]
+            else:
+                outbound = self.browser.qa("drain")
             check_deadline(deadline)
-            for item in self.browser.qa("drain"):
+            for item in outbound:
                 check_deadline(deadline)
                 message = item["message"]
                 rpc_id = item["rpcId"]
@@ -638,68 +720,19 @@ class CaseCapture:
                                 "url": case["finalUrl"], "action": action, "message": message})
                 if action == "cancel":
                     self.browser.qa("acknowledge", rpc_id, {"accepted": True})
-            for _ in range(FORWARD_EVENT_LIMIT):
-                check_deadline(deadline)
-                event = self.host.poll()
-                if event is None:
-                    break
-                log.append({"kind": "host_event", "event": event})
-                check_deadline(deadline)
-                if event.get("code") in ("host_eof", "host_invalid_jsonl"):
-                    flush()
-                    raise CaptureError(event["code"])
-                if event.get("caseId") != site["id"]:
-                    # Late cancellation from a previous site is audited but cannot finish this site.
-                    continue
-                entry = pending.get(event.get("id"))
-                if not entry:
-                    flush()
-                    raise CaptureError("host_uncorrelated_event")
-                if event["type"] == "error":
-                    flush()
-                    if entry.get("rpcId") and not entry.get("acknowledged"):
-                        self.browser.qa("acknowledge", entry["rpcId"], {"accepted": False, "reason": event.get("code", "host_error")})
-                        entry["acknowledged"] = True
-                    raise CaptureError(event.get("code", "host_error"))
-                if event["type"] == "packet":
-                    try:
-                        packet = event["packet"]
-                        wire = json.loads(packet) if isinstance(packet, str) else packet
-                        if not isinstance(wire, dict) or not entry.get("rpcId"):
-                            raise CaptureError("host_invalid_packet")
-                    except (KeyError, TypeError, ValueError, CaptureError):
-                        flush()
-                        raise
-                    # Preserve raw serialized frame for receive; acknowledge the transport
-                    # once, before delivering its first frame (even across batch boundaries).
-                    acknowledge = not entry["acknowledged"]
-                    # Do not retry an acknowledgement after a partially executed
-                    # eval fails; that case is failed evidence, not a replay.
-                    entry["acknowledged"] = True
-                    queue_frame(entry["rpcId"], packet, acknowledge)
-                    if wire.get("error"):
-                        flush()
-                        raise CaptureError("backend_packet_error")
-                if event["type"] == "terminal":
-                    flush()
-                    entry["terminal"] = True
-                    case["terminals"].append(event)
-                    if event.get("success") is not True or event.get("failedCount", 0):
-                        raise CaptureError("backend_terminal_failed")
-                if event["type"] == "assessment":
-                    flush()
-                    case["localAssessment"] = event
-                    entry["terminal"] = True
-            flush()
+            drained = receive()
             save()
+            return value if drained else False
 
         def settle(phase):
             quiet_since, signature = None, None
             geometry, geometry_changes = None, 0
             while time.monotonic() - started < self.case_timeout:
-                forward()
+                value = forward(phase)
                 check_deadline(deadline)
-                value = sample(phase)
+                if value is False:
+                    continue
+                value = sample(phase, value)
                 check_deadline(deadline)
                 candidate_signature = semantic_signature(value)
                 candidate_geometry = geometry_signature(value)
