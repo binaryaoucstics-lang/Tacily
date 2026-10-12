@@ -8,6 +8,103 @@ public sealed class PageTranslationDecisionTests
     private const string English = "The library provides a simple way to translate public articles while keeping the original page layout intact. Independent paragraphs can be processed together without changing links or controls.";
     private const string Chinese = "这个页面介绍如何配置浏览器插件，并说明如何在保持网页布局的同时阅读文章。用户可以打开设置，选择目标语言，然后查看已经翻译的文字。";
 
+    // Source-only synthetic news list, mirrored in page-auto-policy.test.js.
+    // No sentence punctuation or connective-word requirement is appropriate here.
+    private static readonly string[] Headlines =
+    [
+        "高质量发展创新成果集中发布", "国际合作交流重点项目正式启动",
+        "绿色能源产业持续增长创新高", "科研团队公布最新重大实验成果",
+        "AI技术推动制造产业转型升级",
+    ];
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReadableChineseNewsListCountsAtExplicitFixed50(bool fullPageStatistics)
+    {
+        var samples = Enumerable.Range(0, 180).Select(index => new PageTextSample(Headlines[index % Headlines.Length]))
+            .Append(new PageTextSample("Latest news and reports")).ToArray();
+        var hanLetters = samples.Sum(sample => sample.Text.Count(character => character is >= '\u3400' and <= '\u9fff'));
+        var latinLetters = samples.Sum(sample => sample.Text.Count(character => character is >= 'A' and <= 'Z' or >= 'a' and <= 'z'));
+        // The extension supplies full-body statistics even if its sample is sparse.
+        PageTextStatistics? statistics = fullPageStatistics
+            ? new(HanProseCharacters: hanLetters, NonChineseProseCharacters: latinLetters, LatinProseCharacters: latinLetters)
+            : null;
+        var result = PageTranslationDecision.Inspect(fullPageStatistics ? [new("Latest news and reports")] : samples,
+            "zh", statistics, chineseProseShareThresholdPercent: 50).RuleDecision;
+        Assert.True(hanLetters > 2000);
+        Assert.False(result.NeedsTranslation);
+        Assert.Equal("mixed-target-body", result.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData(-1, false)]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    public void HeadlineSampleShareKeepsExactFixed50Equality(int extraForeignLetters, bool expected)
+    {
+        var headline = Headlines[0] + Headlines[0];
+        var foreign = new string('a', headline.Length - 8 + extraForeignLetters) + " abcd efgh";
+        var result = PageTranslationDecision.Inspect([new(headline), new(foreign)], "zh",
+            chineseProseShareThresholdPercent: 50).RuleDecision;
+        Assert.Equal(expected, result.NeedsTranslation);
+    }
+
+    [Theory]
+    [InlineData("", false)]
+    [InlineData("。", false)]
+    [InlineData("", true)]
+    [InlineData("。", true)]
+    public void HanOnlyNewsListInJapaneseBodyContextDoesNotBecomeChinese(string punctuation, bool sparseSample)
+    {
+        var headline = string.Concat(Enumerable.Repeat("東京都議会議員選挙結果速報" + punctuation, 6));
+        var japanese = "このページでは最新のニュースを読みながら研究内容を確認できます。";
+        var fullBody = headline + japanese + japanese;
+        PageTextStatistics? statistics = sparseSample
+            ? new(NonChineseProseCharacters: fullBody.Count(char.IsLetter),
+                KanaProseCharacters: fullBody.Count(character => character is >= '\u3040' and <= '\u30ff' && char.IsLetter(character)))
+            : null;
+        var result = PageTranslationDecision.Inspect(sparseSample ? [new(headline)] : [new(headline), new(japanese + japanese)],
+            "zh", statistics, chineseProseShareThresholdPercent: 50).RuleDecision;
+        Assert.True(result.NeedsTranslation);
+        Assert.Equal("ja", result.DetectedLanguage);
+        Assert.False(result.IsMixedTargetLanguage);
+    }
+
+    [Fact]
+    public void AMinorJapaneseQuoteOrForeignHeadingDoesNotOverrideChineseHeadlineBody()
+    {
+        foreach (var kind in new[] { "body", "heading", "navigation", "code" })
+        {
+            var samples = Enumerable.Range(0, 180).Select(index => new PageTextSample(Headlines[index % Headlines.Length]))
+                .Append(new PageTextSample("このページでは最新のニュースを読みながら研究内容を確認できます。", kind)).ToArray();
+            var result = PageTranslationDecision.Inspect(samples, "zh", chineseProseShareThresholdPercent: 50).RuleDecision;
+            Assert.False(result.NeedsTranslation);
+            Assert.Equal("zh", result.DetectedLanguage);
+        }
+    }
+
+    [Fact]
+    public void ShortChineseLabelsDoNotHideMeaningfulForeignBodyAtFixed50()
+    {
+        var samples = Enumerable.Repeat(new PageTextSample("中文新闻"), 30).Append(new PageTextSample(English)).ToArray();
+        var result = PageTranslationDecision.Inspect(samples, "zh", chineseProseShareThresholdPercent: 50).RuleDecision;
+        Assert.True(result.NeedsTranslation);
+        Assert.Equal("latin", result.DetectedLanguage);
+    }
+
+    [Theory]
+    [InlineData("科研成果发布")]
+    [InlineData("国际合作交流项目启动")]
+    public void ShortMainBodyHeadlinesAreNotDiscardedByTheProseSampleMinimum(string headline)
+    {
+        var samples = Enumerable.Repeat(new PageTextSample(headline), 40).Append(new PageTextSample(English)).ToArray();
+        var result = PageTranslationDecision.Inspect(samples, "zh", chineseProseShareThresholdPercent: 50).RuleDecision;
+        Assert.Contains(result.EligibleBlocks, block => block.Text == headline);
+        Assert.False(result.NeedsTranslation);
+        Assert.Equal("mixed-target-body", result.ReasonCode);
+    }
+
     [Theory]
     [InlineData("zh-CN", true)]
     [InlineData("ja", true)]

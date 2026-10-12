@@ -11,6 +11,73 @@ test("social paragraphs skip only when Chinese reaches half of letters, preservi
   assert.equal(socialForeignText("This release adds API support，测试。\n这是一段以中文为主的介绍，支持 API。"),"This release adds API support，测试。");
 });
 const policy = require("../page-auto-policy.js");
+
+// Source-only synthetic news list, mirrored in PageTranslationDecisionTests.cs.
+const headlines = ["高质量发展创新成果集中发布", "国际合作交流重点项目正式启动",
+  "绿色能源产业持续增长创新高", "科研团队公布最新重大实验成果", "AI技术推动制造产业转型升级"];
+test("readable Chinese news lists count full-body letters at explicit fixed 50 without punctuation or connectives", () => {
+  const groups = Array.from({ length: 180 }, (_, index) => ({ text: headlines[index % headlines.length], kind: "body" }));
+  groups.push({ text: "Latest news and reports", kind: "body" });
+  const { pageSummary, samples } = policy.summarize(groups, [groups.at(-1)]);
+  const counts = policy.languageCounts(groups.map(group => group.text).join("\n"));
+  assert.ok(counts.hanCharacters > 2000);
+  assert.equal(pageSummary.hanProseCharacters, counts.hanCharacters);
+  assert.equal(pageSummary.nonChineseProseCharacters, counts.latinCharacters);
+  assert.deepEqual(samples, [groups.at(-1)]);
+  assert.equal(policy.localVerdict(pageSummary, "简体中文", 50).needsTranslation, false);
+  assert.equal(policy.localVerdict(pageSummary, "简体中文", 50).reason, "mixed_chinese_english");
+});
+
+test("headline sample share keeps exact fixed-50 equality and admits a foreign majority", () => {
+  const headline = headlines[0].repeat(2);
+  for (const extraForeignLetters of [-1, 0, 1]) {
+    const foreign = "a".repeat(headline.length - 8 + extraForeignLetters) + " abcd efgh";
+    const summary = policy.summarize([{ text: headline, kind: "body" }, { text: foreign, kind: "body" }]).pageSummary;
+    assert.equal(summary.hanProseCharacters, headline.length);
+    assert.equal(summary.nonChineseProseCharacters, headline.length + extraForeignLetters);
+    assert.equal(policy.localVerdict(summary, "简体中文", 50)?.needsTranslation ?? null, extraForeignLetters <= 0 ? false : null);
+  }
+});
+
+test("Han-only news lists in Japanese body context count as foreign even with sentence punctuation", () => {
+  for (const punctuation of ["", "。"]) {
+    const headline = ("東京都議会議員選挙結果速報" + punctuation).repeat(6);
+    const japanese = "このページでは最新のニュースを読みながら研究内容を確認できます。".repeat(2);
+    const summary = policy.summarize([{ text: headline, kind: "body" }, { text: japanese, kind: "body" }]).pageSummary;
+    assert.equal(summary.hanProseCharacters, 0);
+    assert.equal(summary.nonChineseProseCharacters, (headline + japanese).match(/\p{L}/gu).length);
+    assert.equal(policy.localVerdict(summary, "简体中文", 50), null);
+  }
+});
+
+test("a minor Japanese quote or foreign heading does not override Chinese headline body", () => {
+  for (const kind of ["body", "heading", "navigation", "code"]) {
+    const groups = Array.from({ length: 180 }, (_, index) => ({ text: headlines[index % headlines.length], kind: "body" }));
+    groups.push({ text: "このページでは最新のニュースを読みながら研究内容を確認できます。", kind });
+    const summary = policy.summarize(groups).pageSummary;
+    assert.equal(summary.hanProseCharacters, policy.languageCounts(groups.slice(0, -1).map(group => group.text).join("\n")).hanCharacters);
+    assert.equal(policy.localVerdict(summary, "简体中文", 50).needsTranslation, false);
+  }
+});
+
+test("short Chinese labels do not hide meaningful foreign body at fixed 50", () => {
+  const groups = Array.from({ length: 30 }, () => ({ text: "中文新闻", kind: "body" }));
+  groups.push({ text: "The library provides a simple way to translate public articles while keeping the original page layout intact. Independent paragraphs can be processed together without changing links or controls.", kind: "body" });
+  const summary = policy.summarize(groups).pageSummary;
+  assert.equal(summary.hanProseCharacters, 0);
+  assert.equal(policy.localVerdict(summary, "简体中文", 50), null);
+});
+
+test("short main-body headlines contribute letters without a paragraph-length minimum", () => {
+  for (const headline of ["科研成果发布", "国际合作交流项目启动"]) {
+    const groups = Array.from({ length: 40 }, () => ({ text: headline, kind: "body" }));
+    groups.push({ text: "The library provides a simple way to translate public articles while keeping the original page layout intact. Independent paragraphs can be processed together without changing links or controls.", kind: "body" });
+    const summary = policy.summarize(groups).pageSummary;
+    assert.equal(summary.hanProseCharacters, headline.length * 40);
+    assert.equal(policy.localVerdict(summary, "简体中文", 50).needsTranslation, false);
+  }
+});
+
 test("complete English calendar and relative labels localize without a model or inferred year", () => {
   const cases = [["Sep 1", "9月1日"], ["Jul 13", "7月13日"], ["Sep. 1, 2026", "2026年9月1日"],
     ["1 Sept. 2026", "2026年9月1日"], ["Apr 10,2025", "2025年4月10日"], ["May 12", "5月12日"], ["Feb 29", "2月29日"],
