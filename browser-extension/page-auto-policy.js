@@ -215,7 +215,12 @@
       .map(item => item.counts);
     const bodyProse = counted.filter(item => (!item.group.kind || item.group.kind === "body")
       && !skipTranslationText(item.group.text, { foreignHanContext: true }));
-    const hanProseCharacters = bodyProse.filter(item => chineseProse(item.group.text))
+    const bodyLetters = bodyProse.reduce((sum, item) => sum + (item.group.text.match(/\p{L}/gu) || []).length, 0);
+    const bodyKana = bodyProse.reduce((sum, item) => sum + item.counts.kanaCharacters, 0);
+    // Same established 12% script signal as Core, using body groups only. Shared
+    // Han news-list text follows substantial Japanese context, not a tiny quote.
+    const japaneseBodyContext = bodyKana >= 3 && bodyKana >= bodyLetters * .12;
+    const hanProseCharacters = bodyProse.filter(item => chineseProse(item.group.text, japaneseBodyContext))
       .reduce((sum, item) => sum + (item.group.text.match(/\p{L}/gu) || []).filter(character => han.test(character)).length, 0);
     const summary = { ...counts,
       // This is Chinese evidence, not all Han glyphs: Japanese paragraphs often
@@ -223,7 +228,7 @@
       hanProseCharacters,
       // Every other readable body letter counts, including Japanese Han, kana,
       // Cyrillic and Latin within a Chinese paragraph. Noise is not prose.
-      nonChineseProseCharacters: bodyProse.reduce((sum, item) => sum + (item.group.text.match(/\p{L}/gu) || []).length, 0) - hanProseCharacters,
+      nonChineseProseCharacters: bodyLetters - hanProseCharacters,
       latinProseCharacters: proseCounts.reduce((sum, count) => sum + count.latinCharacters, 0),
       kanaProseCharacters: proseCounts.reduce((sum, count) => sum + count.kanaCharacters, 0), proseBlocks: prose.length,
       sourceHash: stableHash(groups.map(group => group.text).join("\n")) };
@@ -256,13 +261,13 @@
     if (summary.totalCharacters < 24) return { needsTranslation: false, reason: "too_little_prose" };
     return null;
   }
-  function chineseProse(text) {
+  function chineseProse(text, japaneseBodyContext = false) {
     const count = languageCounts(text);
-    const letters = (String(text).match(/\p{L}/gu) || []).length;
+    const letters = String(text).match(/\p{L}/gu) || [];
+    const hanLetters = letters.filter(character => han.test(character)).length;
     const grammar = (String(text).match(/[的了是在和与为我你可请不该請為與這]/gu) || []).length;
-    return count.kanaCharacters === 0 && count.hangulCharacters === 0 && count.hanCharacters * 2 >= letters
-      && (count.hanCharacters >= 6 && grammar >= 2 && (count.hanCharacters >= 12 || count.hanCharacters * 4 >= count.latinCharacters)
-        || count.hanCharacters >= 12 && count.hanCharacters >= count.latinCharacters * .4 && /[。！？]/u.test(text));
+    return count.kanaCharacters === 0 && count.hangulCharacters === 0 && hanLetters >= 6 && hanLetters * 2 >= letters.length
+      && (!japaneseBodyContext || grammar >= 2);
   }
   function isSocialFeed(href) {
     try { return /^(?:www\.)?(?:x\.com|twitter\.com)$/iu.test(new URL(href).hostname); }

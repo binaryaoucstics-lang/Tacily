@@ -49,7 +49,8 @@ public static partial class PageTranslationDecision
             var text = sample.Text.Trim();
             if (LooksLikeCode(text) || !PageTextEligibility.NeedsTranslation(text, "und", kind: sample.Kind)) continue;
             var count = Count(text);
-            if (count.Letters < 12 || count.Latin == count.Letters && Words().Matches(text).Count < 3) continue;
+            var readableHanBody = count.Letters < 12 && sample.Kind == "body" && IsChineseProse(text, japaneseBodyContext: false);
+            if ((count.Letters < 12 && !readableHanBody) || (count.Latin == count.Letters && Words().Matches(text).Count < 3)) continue;
             text = text[..Math.Min(text.Length, Math.Min(4096, remaining))];
             remaining -= text.Length;
             eligible.Add(sample with { Text = text });
@@ -62,9 +63,17 @@ public static partial class PageTranslationDecision
             { ReasonCode = code, EligibleBlocks = eligible.ToArray() }, true);
 
         if (target == "und") return Result(false, "unsupported-target", "目标语言未列入程序自动判断范围。", "und", .5);
-        // Compare identified Chinese body prose with all other body letters.
-        // Japanese Han, headings, navigation and code are not Chinese evidence.
-        var chinese = body.Where(block => IsChineseProse(block.Text)).ToArray();
+        // Compare readable Chinese body text, including headline/news-list groups,
+        // with all other body letters. Shared Han alone is ambiguous when the
+        // body has a substantial kana share; a minor quotation is not enough.
+        var bodyCount = Count(string.Join("\n", body.Select(block => block.Text)));
+        var reportedBodyLetters = (long)Math.Max(0, statistics?.HanProseCharacters ?? 0)
+            + (statistics is { NonChineseProseCharacters: > 0 }
+                ? statistics.NonChineseProseCharacters
+                : (long)Math.Max(0, statistics?.LatinProseCharacters ?? 0) + Math.Max(0, statistics?.KanaProseCharacters ?? 0));
+        var japaneseBodyContext = HasJapaneseBodyContext(bodyCount.Kana, bodyCount.Letters)
+            || HasJapaneseBodyContext(statistics?.KanaProseCharacters ?? 0, reportedBodyLetters);
+        var chinese = body.Where(block => IsChineseProse(block.Text, japaneseBodyContext)).ToArray();
         var sampledChineseLetters = chinese.Sum(block => Count(block.Text).Han);
         var sampledNonChineseLetters = body.Sum(block => Count(block.Text).Letters) - sampledChineseLetters;
         var chineseLetters = Math.Max(sampledChineseLetters, statistics?.HanProseCharacters ?? 0);
@@ -91,12 +100,12 @@ public static partial class PageTranslationDecision
                 return Result(true, "foreign-script", "整页存在日语正文。", "ja");
             return Result(false, "insufficient-body", "可读正文不足，继续观察页面加载。", "und");
         }
-        if (all.Han > 0 && all.Kana == 0 && all.Latin < 12 && all.Hangul == 0 && all.Other == 0)
+        if (!japaneseBodyContext && all.Han > 0 && all.Kana == 0 && all.Latin < 12 && all.Hangul == 0 && all.Other == 0)
             return target is "zh" or "ja"
                 ? Result(false, "han-only-ambiguous", "仅汉字内容可直接阅读。", "zh-or-ja", .8)
                 : Result(true, "foreign-script", "正文文字与目标语言不同。", "zh-or-ja");
         bool Dominant(int count, int minimum) => count >= minimum && (count >= all.Letters * .12 || count > all.Latin * .5);
-        var language = Dominant(all.Kana, 3) || all.Kana >= 3 && all.Kana + all.Han > all.Latin * .5 ? "ja"
+        var language = (japaneseBodyContext && all.Han > 0) || Dominant(all.Kana, 3) || all.Kana >= 3 && all.Kana + all.Han > all.Latin * .5 ? "ja"
             : Dominant(all.Hangul, 4) ? "ko" : all.Han >= 12 && all.Han * 2 >= all.Letters ? "zh"
             : Dominant(all.Cyrillic, 12) ? "ru-script" : Dominant(all.Arabic, 12) ? "ar"
             : Dominant(all.Greek, 12) ? "el" : Dominant(all.Devanagari, 12) ? "hi" : Dominant(all.Thai, 12) ? "th"
@@ -122,13 +131,16 @@ public static partial class PageTranslationDecision
         return Result(false, "unidentified-script", "正文语言证据不足，继续观察页面加载。", "und", .5);
     }
 
-    private static bool IsChineseProse(string text)
+    // Reuse the established 12% script signal, using body letters only. Full
+    // statistics can carry it when the bounded samples contain only Han groups.
+    private static bool HasJapaneseBodyContext(int kana, long letters) => kana >= 3 && kana >= letters * .12;
+
+    private static bool IsChineseProse(string text, bool japaneseBodyContext)
     {
         var count = Count(text);
         var grammar = text.Count(c => "的了是在和与为我你可请不该請為與這".Contains(c));
-        return count.Kana == 0 && count.Hangul == 0 && count.Han * 2 >= count.Letters && (count.Han >= 6 && grammar >= 2
-            && (count.Han >= 12 || count.Han * 4 >= count.Latin)
-            || count.Han >= 12 && count.Han >= count.Latin * .4 && text.IndexOfAny(['。', '！', '？']) >= 0);
+        return count.Kana == 0 && count.Hangul == 0 && count.Han >= 6 && count.Han * 2 >= count.Letters
+            && (!japaneseBodyContext || grammar >= 2);
     }
 
     private static string DetectLatinLanguage(string text)
