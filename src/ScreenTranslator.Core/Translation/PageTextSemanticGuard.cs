@@ -76,9 +76,29 @@ public static class PageTextSemanticGuard
     private static readonly Regex DurationPrefix = MakeRegex(@"\b(?:for|lasts?|lasted|lasting|takes?|took|taking|wait|waited|waiting|duration|timeout|delay|runtime|elapsed)\s*(?:(?:of|was|is)\s*|[=:]\s*)?$");
     private static readonly Regex DurationSuffix = MakeRegex(@"^\s*(?:elapsed|long|duration|timeout|delay|runtime|wait)\b");
     private static readonly Regex DurationContext = MakeRegex(@"\b(?:duration|timeout|delay|runtime|elapsed|wait|waited|waiting|lasted|lasting|takes?|took|taking|completed|finished|seconds?)\b");
+    // A finite English ordinal grammar, used only immediately before century.
+    // Keep the existing 1..99 calendar bound; never guess prose quantities.
+    private const string CenturySeparator = @"(?:\s+|\s*[-\u2010\u2011]\s*)";
+    private const string EnglishUnitOrdinal = @"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth";
+    private const string EnglishSmallOrdinal = EnglishUnitOrdinal + @"|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth";
+    private const string EnglishTensCardinal = @"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety";
+    private const string EnglishTensOrdinal = @"twentieth|thirtieth|fortieth|fiftieth|sixtieth|seventieth|eightieth|ninetieth";
     private static readonly Regex Centuries = MakeRegex(
         @"(?<![\d零〇一二三四五六七八九十百千])(?<century>\d{1,2}|[零〇一二三四五六七八九十]{1,4})\s*世[纪紀]\s*(?<phase>" + CalendarPhase + @")?"
-        + @"|\b(?:(?<phase>early|mid|late)[\s-]+)?(?<century>\d{1,2})(?:st|nd|rd|th)\s+century\b");
+        // Retain the original numeric ordinal boundaries and phase grammar.
+        + @"|\b(?:(?<phase>early|mid|late)[\s\-\u2010\u2011]+)?(?<century>\d{1,2})(?:st|nd|rd|th)" + CenturySeparator + @"century\b"
+        + @"|(?<![\p{L}\p{N}_.+\-\u2010\u2011])(?:(?<phase>early|mid|late)" + CenturySeparator + @")?"
+        + @"(?<ordinal>(?:" + EnglishTensCardinal + @")" + CenturySeparator
+        + @"(?:" + EnglishUnitOrdinal + @")|" + EnglishSmallOrdinal + "|" + EnglishTensOrdinal + @")" + CenturySeparator + @"century\b");
+    private static readonly string[] SmallCenturyOrdinals =
+    [
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+        "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth"
+    ];
+    private static readonly string[] TensCenturyOrdinals =
+        ["twentieth", "thirtieth", "fortieth", "fiftieth", "sixtieth", "seventieth", "eightieth", "ninetieth"];
+    private static readonly string[] TensCenturyCardinals =
+        ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
     private static readonly IReadOnlyDictionary<string, string> DayNumbers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["Monday"] = "1", ["lundi"] = "1", ["月"] = "1",
@@ -220,7 +240,11 @@ public static class PageTextSemanticGuard
         });
         normalized = Centuries.Replace(normalized, match =>
         {
-            if (!TryNumber(match.Groups["century"].Value, out var century) || century is < 1 or > 99) return match.Value;
+            var ordinal = match.Groups["ordinal"].Value;
+            var century = ordinal.Length == 0
+                ? TryNumber(match.Groups["century"].Value, out var numericCentury) ? numericCentury : 0
+                : ReadCenturyOrdinal(ordinal);
+            if (century is < 1 or > 99) return match.Value;
             numbers.Add("century:" + Canonical(century) + ":" + Phase(match.Groups["phase"].Value));
             return " ";
         });
@@ -342,6 +366,23 @@ public static class PageTextSemanticGuard
         foreach (Match match in ChineseNumber.Matches(normalized))
             if (TryNumber(match.Value, out var value)) numbers.Add(Canonical(value));
         return new(days, times, dates, numbers);
+    }
+
+    private static int ReadCenturyOrdinal(string ordinal)
+    {
+        var parts = ordinal.ToLowerInvariant().Replace('-', ' ').Replace('\u2010', ' ').Replace('\u2011', ' ')
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 1)
+        {
+            var small = Array.IndexOf(SmallCenturyOrdinals, parts[0]);
+            if (small >= 0) return small + 1;
+            var tens = Array.IndexOf(TensCenturyOrdinals, parts[0]);
+            return tens >= 0 ? (tens + 2) * 10 : 0;
+        }
+        if (parts.Length != 2) return 0;
+        var cardinal = Array.IndexOf(TensCenturyCardinals, parts[0]);
+        var unit = Array.IndexOf(SmallCenturyOrdinals, parts[1]);
+        return cardinal >= 0 && unit is >= 0 and < 9 ? (cardinal + 2) * 10 + unit + 1 : 0;
     }
 
     private static bool TryNumber(string value, out decimal result)

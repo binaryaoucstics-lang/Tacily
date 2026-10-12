@@ -6,6 +6,120 @@ namespace ScreenTranslator.Core.Tests.Translation;
 public sealed class PageTextSemanticGuardTests
 {
     [Theory]
+    [InlineData("a ninth-century Arabic", "9世纪的阿拉伯语")]
+    [InlineData("a 9th-century Arabic", "九世纪的阿拉伯语")]
+    [InlineData("ninth century", "九世紀")]
+    [InlineData("NINTH-CENTURY", "9世纪")]
+    [InlineData("ninth‐century", "九世纪")]
+    [InlineData("ninth‑century", "9世纪")]
+    [InlineData("early-ninth-century", "九世纪初期")]
+    [InlineData("mid ninth-century", "九世纪中叶")]
+    [InlineData("late-9th-century", "九世纪晚期")]
+    [InlineData("early twenty-first-century", "二十一世纪初")]
+    [InlineData("mid-twenty first-century", "21世紀中葉")]
+    [InlineData("late seventeenth century", "十七世纪後期")]
+    [InlineData("first-century", "一世纪")]
+    [InlineData("second century", "二世纪")]
+    [InlineData("third century", "三世纪")]
+    [InlineData("eighth century", "八世纪")]
+    [InlineData("twelfth-century", "十二世纪")]
+    [InlineData("nineteenth century", "十九世纪")]
+    [InlineData("twentieth century", "二十世纪")]
+    [InlineData("thirty-second-century", "三十二世纪")]
+    [InlineData("fortieth century", "四十世纪")]
+    [InlineData("fifty-fifth century", "五十五世纪")]
+    [InlineData("sixtieth century", "六十世纪")]
+    [InlineData("seventy-sixth century", "七十六世纪")]
+    [InlineData("eightieth century", "八十世纪")]
+    [InlineData("ninetieth century", "九十世纪")]
+    [InlineData("ninety-ninth-century", "九十九世纪")]
+    [InlineData("99th-century", "九十九世纪")]
+    [InlineData("pre-19th century studies", "19世纪以前的研究")]
+    [InlineData("mid-19th-century studies", "19世纪中期的研究")]
+    [InlineData("ninth-century Arabic text", "9世紀のアラビア語文献")]
+    [InlineData("9世紀の文献", "ninth-century text")]
+    public void WrittenAndAdjectivalCenturiesPreserveTypedFactsBeforeDisplay(string source, string translation)
+    {
+        Assert.True(PageTextSemanticGuard.HasProtectedFacts(source));
+        Assert.True(PageTextSemanticGuard.HasProtectedFacts(translation));
+        Assert.Empty(Check(source, translation));
+        Assert.Empty(Check(translation, source));
+    }
+
+    [Theory]
+    [InlineData("ninth-century Arabic", "十世纪阿拉伯语")]
+    [InlineData("9th-century Arabic", "阿拉伯语")]
+    [InlineData("ninth-century Arabic", "九年阿拉伯语")]
+    [InlineData("ninth-century Arabic", "阿拉伯语，共9篇")]
+    [InlineData("ninth-century Arabic", "九世纪和十世纪的阿拉伯语")]
+    [InlineData("early-ninth-century", "九世纪中叶")]
+    [InlineData("mid-ninth-century", "九世纪晚期")]
+    [InlineData("late ninth-century", "九世纪早期")]
+    [InlineData("late ninth-century", "九世纪")]
+    [InlineData("ninth-century", "九世纪后期")]
+    [InlineData("twenty-first-century", "二十世纪")]
+    [InlineData("ninety-ninth-century", "九十八世纪")]
+    [InlineData("ninth-century Arabic", "10世紀のアラビア語")]
+    public void WrittenCenturiesCannotChangeLoseOrAcquireFacts(string source, string translation)
+        => Assert.Equal(new[] { "node" }, Check(source, translation));
+
+    [Theory]
+    [InlineData("ninth", false)]
+    [InlineData("twenty-first prize", false)]
+    [InlineData("ninth-centuryish", false)]
+    [InlineData("ninth-century2", false)]
+    [InlineData("ninth-century_version", false)]
+    [InlineData("ninth centuries", false)]
+    [InlineData("ninth-centuryold", false)]
+    [InlineData("ninety-tenth-century", false)]
+    [InlineData("hundredth-century", false)]
+    [InlineData("twenty-zero-century", false)]
+    [InlineData("twentyfirst-century", false)]
+    [InlineData("twenty--first-century", false)]
+    [InlineData("aninth-century", false)]
+    [InlineData("v9th-century", false)]
+    [InlineData("一時停止しています。", false)]
+    [InlineData("世紀末の物語", false)]
+    public void CenturyGrammarDoesNotGuessOtherWordsOrMalformedOrdinals(string source, bool expected)
+        => Assert.Equal(expected, PageTextSemanticGuard.HasProtectedFacts(source));
+
+    [Theory]
+    [InlineData("Version 1.9 is used for ninth-century texts; 12 sensors remain.", "版本1.9用于九世纪文献；还剩十二个传感器。", false)]
+    [InlineData("Version 1.9 is used for ninth-century texts; 12 sensors remain.", "版本1.8用于九世纪文献；还剩十二个传感器。", true)]
+    [InlineData("Version 1.9 is used for ninth-century texts; 12 sensors remain.", "版本1.9用于九世纪文献；还剩十一个传感器。", true)]
+    public void CenturyNormalizationPreservesOrdinaryVersionsAndQuantities(string source, string translation, bool unsafeResult)
+        => Assert.Equal(unsafeResult, Check(source, translation).Count != 0);
+
+    [Fact]
+    public void PublicWikipediaOriginsInlineNodesKeepCenturiesAndYearOnTheirOwnIds()
+    {
+        BrowserPageTextBlock[] source =
+        [
+            new("origins", "The origins of machine translation can be traced back to "),
+            new("al-kindi", "Al-Kindi"),
+            new("ninth", ", a ninth-century Arabic cryptographer who developed techniques for systemic language translation, including cryptanalysis, frequency analysis, and probability and statistics, which are used in modern machine translation. The idea of machine translation later appeared in the 17th century. In 1629, "),
+            new("descartes", "René Descartes"),
+            new("ending", " proposed a universal language, with equivalent ideas in different tongues sharing one symbol.")
+        ];
+        var translations = new Dictionary<string, string>
+        {
+            ["origins"] = "机器翻译的起源可以追溯到",
+            ["al-kindi"] = "肯迪",
+            ["ninth"] = "，他是9世纪的阿拉伯密码学家，开发了系统语言翻译技术，包括密码分析、频率分析以及概率与统计，这些技术用于现代机器翻译。机器翻译的想法后来在17世纪出现。1629年，",
+            ["descartes"] = "勒内·笛卡尔",
+            ["ending"] = "提出了一种通用语言，让不同语言中相同的思想共享一个符号。"
+        };
+        Assert.Empty(PageTextSemanticGuard.FindUnsafeIds(source, translations));
+        translations["ninth"] = translations["ninth"].Replace("9世纪", "10世纪", StringComparison.Ordinal);
+        Assert.Equal(new[] { "ninth" }, PageTextSemanticGuard.FindUnsafeIds(source, translations));
+        translations["ninth"] = translations["ninth"].Replace("10世纪", "", StringComparison.Ordinal);
+        translations["al-kindi"] = "9世纪的肯迪";
+        var assessment = PageTextSemanticGuard.Assess(source, translations);
+        Assert.Equal(new[] { "al-kindi", "ninth" }, assessment.UnsafeIds);
+        Assert.Equal(new PageTextNumericTransfer("ninth", "al-kindi"), Assert.Single(assessment.NumericTransfers));
+    }
+
+    [Theory]
     // Original Stanford phrase: 晚期 must not lose the source's late phase.
     [InlineData("in the late 19th century", "在19世纪晚期")]
     [InlineData("early 19th century", "19世纪早期")]
