@@ -7,7 +7,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from types import FunctionType, SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -21,6 +23,44 @@ review = importlib.util.module_from_spec(review_spec)
 review_spec.loader.exec_module(review)
 SITE = {"id": "site-001", "registeredDomain": "example.org", "url": "https://www.example.org/article",
         "category": "reference", "language": "en", "expectedPageTranslation": True, "split": "holdout"}
+
+
+def local_capture_time(*, monotonic=time.monotonic, sleep=time.sleep):
+    # Replacing capture's namespace keeps subprocess, cleanup and background
+    # threads on the real standard-library clock. Never patch time's fields.
+    return SimpleNamespace(monotonic=monotonic, sleep=sleep, time_ns=time.time_ns)
+
+
+class CaptureClockIsolationTests(unittest.TestCase):
+    def test_background_standard_library_sleep_does_not_advance_capture_clock(self):
+        clock = [1.0]
+        standard_sleep, standard_monotonic = time.sleep, time.monotonic
+        background_finished = threading.Event()
+
+        def background():
+            # This unrelated delay contaminated the old process-wide patches.
+            time.sleep(.016)
+            background_finished.set()
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=sleep)):
+            worker = threading.Thread(target=background)
+            worker.start()
+            try:
+                self.assertTrue(background_finished.wait(timeout=2))
+                self.assertIs(time.sleep, standard_sleep)
+                self.assertIs(time.monotonic, standard_monotonic)
+                self.assertEqual(capture.time.monotonic(), 1.0)
+                # Only a capture poll advances the exact artificial deadline.
+                capture.time.sleep(.01)
+                self.assertEqual(capture.time.monotonic(), 1.01)
+            finally:
+                worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+        self.assertIs(capture.time, time)
 
 
 class Fixture(unittest.TestCase):
@@ -55,14 +95,14 @@ class AtomicEvidenceTests(Fixture):
             if len(calls) <= 2:
                 raise windows_replace_error(source, target, 5 if len(calls) == 1 else 32)
             replace(source, target)
-        with mock.patch.object(capture.os, "replace", conflict), mock.patch.object(capture.time, "sleep") as sleep:
+        with mock.patch.object(capture.os, "replace", conflict), mock.patch.object(capture, "time", local_capture_time(sleep=mock.Mock())) as timing:
             capture.atomic_json(destination, {"new": "中文😀"}, on_retry=diagnostics.append)
         self.assertEqual(len(calls), 3)
         self.assertEqual(len({str(call[0]) for call in calls}), 1)
         self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"new": "中文😀"})
         self.assertEqual([event["winerror"] for event in diagnostics], [5, 32])
         self.assertEqual([event["operation"] for event in diagnostics], ["replace", "replace"])
-        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(timing.sleep.call_count, 2)
         self.assertFalse(list(self.root.glob("case.json.*.tmp")))
 
     def test_exhausted_conflict_preserves_previous_json_and_failed_temporary(self):
@@ -73,11 +113,11 @@ class AtomicEvidenceTests(Fixture):
             calls.append((source, target))
             raise windows_replace_error(source, target)
         with mock.patch.object(capture.os, "replace", denied), \
-                mock.patch.object(capture.time, "sleep") as sleep:
+                mock.patch.object(capture, "time", local_capture_time(sleep=mock.Mock())) as timing:
             with self.assertRaises(PermissionError):
                 capture.atomic_json(destination, {"pending": 1}, on_retry=diagnostics.append)
             self.assertEqual(len(calls), 4)
-            self.assertEqual(sleep.call_count, 3)
+            self.assertEqual(timing.sleep.call_count, 3)
         self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"old": True})
         temporary = next(self.root.glob("case.json.*.tmp"))
         self.assertEqual(json.loads(temporary.read_text(encoding="utf-8")), {"pending": 1})
@@ -88,17 +128,17 @@ class AtomicEvidenceTests(Fixture):
     def test_no_retry_for_non_windows_permission_or_file_open_denial(self):
         destination = self.root / "case.json"
         with mock.patch.object(capture.os, "replace", side_effect=PermissionError(13, "denied")) as replace, \
-                mock.patch.object(capture.time, "sleep") as sleep:
+                mock.patch.object(capture, "time", local_capture_time(sleep=mock.Mock())) as timing:
             with self.assertRaises(PermissionError):
                 capture.atomic_json(destination, {"failed": True})
             self.assertEqual(replace.call_count, 1)
-            sleep.assert_not_called()
+            timing.sleep.assert_not_called()
         with mock.patch.object(Path, "open", side_effect=windows_replace_error(destination, destination)), \
-                mock.patch.object(capture.os, "replace") as replace, mock.patch.object(capture.time, "sleep") as sleep:
+                mock.patch.object(capture.os, "replace") as replace, mock.patch.object(capture, "time", local_capture_time(sleep=mock.Mock())) as timing:
             with self.assertRaises(PermissionError):
                 capture.atomic_json(destination, {})
             replace.assert_not_called()
-            sleep.assert_not_called()
+            timing.sleep.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "Actual Windows handle-sharing regression")
     def test_actual_windows_destination_handle_conflict_is_released_before_retry(self):
@@ -297,8 +337,8 @@ process.stdout.write(JSON.stringify({data:{result:eval(expression)}}));
         clock = [0.0]
         def sleep(seconds):
             clock[0] += seconds
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", sleep):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=sleep)):
             with self.assertRaisesRegex(capture.CaptureError, "probe_timeout"):
                 cli.probe("zh-CN", timeout=.3, poll_seconds=.1)
         self.assertEqual(sum(".probeStatus(" in value for value in calls), 3)
@@ -447,7 +487,7 @@ process.stdout.write(JSON.stringify({calls, error,
             return subprocess.CompletedProcess(argv, 0, '{"data":{"result":true}}', "")
         cli = capture.BrowserCli("deadline-test", self.journal, runner)
         cli.deadline = 10.5
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+        with mock.patch.object(capture, "time", local_capture_time(monotonic=lambda: clock[0])):
             with self.assertRaisesRegex(capture.CaptureError, "case_timeout_without_settlement"):
                 cli.deliver_batch([["r", "{}", True]])
             with self.assertRaisesRegex(capture.CaptureError, "case_timeout_without_settlement"):
@@ -463,7 +503,7 @@ process.stdout.write(JSON.stringify({calls, error,
             return subprocess.CompletedProcess(argv, 0, '{"data":{"result":true}}', "")
         cli = capture.BrowserCli("deadline-chunks", self.journal, runner)
         cli.deadline = .35
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+        with mock.patch.object(capture, "time", local_capture_time(monotonic=lambda: clock[0])):
             with self.assertRaisesRegex(capture.CaptureError, "case_timeout_without_settlement"):
                 cli.deliver_batch([["r", "😀" * 50000, True]])
         self.assertEqual(len(expressions), 4)
@@ -560,6 +600,35 @@ class SourceObservationTests(unittest.TestCase):
         self.assertFalse(observations["peer"]["rendered"])
         self.assertEqual("s1", observations["peer"]["representedBy"])
         self.assertEqual("p1", observations["peer"]["pieces"][0]["id"])
+
+    def test_clipped_retirement_preserves_unknown_pending_observation(self):
+        observations, value = {}, self.value(pending=1)
+        value["predictions"] = []
+        value["productionEligibility"][0]["eligible"] = False
+        capture.record_source_observations(observations, value, "visible-scanning")
+        self.assertIsNone(observations["s1"]["eligible"])
+        retained = copy.deepcopy(observations)
+        # An idle observation of a now clipped source is no observation of
+        # rejection or completion. Its genuinely visible history is retained.
+        value["jobs"] = 0
+        value["nodes"] = []
+        value["sourceNodes"][0]["currentlyRendered"] = False
+        capture.record_source_observations(observations, value, "clipped-idle")
+        self.assertEqual(retained, observations)
+        value["nodes"] = [{"id": "s1"}]
+        value["jobs"] = 1
+        value["sourceNodes"][0]["currentlyRendered"] = True
+        capture.record_source_observations(observations, value, "revealed-scanning")
+        self.assertIsNone(observations["s1"]["eligible"])
+        self.assertEqual("revealed-scanning", observations["s1"]["phase"])
+
+    def test_clipped_never_observed_atomic_peer_has_no_source_verdict(self):
+        observations, value = {}, self.value()
+        value["predictions"][0]["sourceIds"] = ["s1", "clipped-peer"]
+        value["productionEligibility"].append({"sourceId": "clipped-peer", "eligible": True})
+        capture.record_source_observations(observations, value, "atomic-visible-owner")
+        self.assertNotIn("clipped-peer", observations)
+        self.assertEqual(["s1"], list(observations))
 
 
 class CompletionTests(Fixture):
@@ -856,10 +925,19 @@ class WorkflowTests(Fixture):
                 return self.events.pop(0) if self.events else None
         host = ScriptedHost()
         browser = browser or self.browser()
-        run = capture.EvidenceRun(self.root, run_id, {"sourceHead": "a" * 40})
-        result = capture.CaseCapture(browser, host, run, HERE.parents[2], case_timeout=case_timeout,
-                                     stable_seconds=stable_seconds, poll_seconds=.002,
-                                     full_screenshots=full_screenshots).capture(site or SITE)
+        # Run the original writer bytecode with its own real-time namespace.
+        # Windows artifact retries are actual I/O, not synthetic browser/host
+        # polls: their backoff must not advance the fixture's artificial quiet
+        # period or deadline. Keep real writes, retries and diagnostics intact;
+        # production capture and the dedicated real I/O tests are unchanged.
+        writer = capture.atomic_json
+        persistence = FunctionType(writer.__code__, {**writer.__globals__, "time": time},
+                                   writer.__name__, writer.__defaults__, writer.__closure__)
+        with mock.patch.object(capture, "atomic_json", persistence):
+            run = capture.EvidenceRun(self.root, run_id, {"sourceHead": "a" * 40})
+            result = capture.CaseCapture(browser, host, run, HERE.parents[2], case_timeout=case_timeout,
+                                         stable_seconds=stable_seconds, poll_seconds=.002,
+                                         full_screenshots=full_screenshots).capture(site or SITE)
         log = next(run.path.glob("*/attempt-*/events.jsonl"))
         rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
         return result, browser, host, rows
@@ -945,8 +1023,8 @@ class WorkflowTests(Fixture):
         for skipped in (False, True):
             with self.subTest(skipped=skipped):
                 clock = [1.0]
-                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                with mock.patch.object(capture, "time", local_capture_time(
+                        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                     result, _, _, rows = self.scripted_case(
                         self.motion_events, browser=self.moving_browser(skipped=skipped),
                         run_id=f"motion-{skipped}", case_timeout=.3, stable_seconds=.01,
@@ -969,10 +1047,106 @@ class WorkflowTests(Fixture):
                 self.assertTrue(result["simulation"])
                 self.assertFalse(result["completed"])
 
+    def test_transient_replace_conflicts_preserve_synthetic_motion_sequence_and_deadline(self):
+        preserved = self.root / "original-evidence.json"
+        preserved.write_bytes(b'{"original":"retained"}\n')
+        original_hash = capture.hashlib.sha256(preserved.read_bytes()).hexdigest()
+        replace = capture.os.replace
+
+        for scenario in ("positive-motion", "skipped-motion", "missing-terminal"):
+            runs = []
+            for forced in (False, True):
+                with self.subTest(scenario=scenario, forced=forced):
+                    clock, polls, attempts = [1.0], [], []
+                    conflict_source, previous_bytes, temporary_bytes = None, None, None
+                    winerrors = (5, 32, 33)
+
+                    def conflict(source, destination):
+                        nonlocal conflict_source, previous_bytes, temporary_bytes
+                        source, destination = Path(source), Path(destination)
+                        value = json.loads(source.read_text(encoding="utf-8"))
+                        checkpoint = (bool(value.get("failureSnapshot")) if scenario == "missing-terminal"
+                                      else value.get("stability", {}).get("after", {}).get("stableForSeconds") == 0)
+                        if forced and conflict_source is None and destination.name == "case.json" and checkpoint:
+                            conflict_source = source
+                            previous_bytes = destination.read_bytes()
+                            temporary_bytes = source.read_bytes()
+                        if source == conflict_source:
+                            # Every failed rename retains both the previous evidence
+                            # and the same fully serialized replacement, including hashes.
+                            self.assertEqual(destination.read_bytes(), previous_bytes)
+                            self.assertEqual(source.read_bytes(), temporary_bytes)
+                            self.assertEqual(capture.hashlib.sha256(destination.read_bytes()).hexdigest(),
+                                             capture.hashlib.sha256(previous_bytes).hexdigest())
+                            self.assertEqual(capture.hashlib.sha256(source.read_bytes()).hexdigest(),
+                                             capture.hashlib.sha256(temporary_bytes).hexdigest())
+                            attempts.append(clock[0])
+                            if len(attempts) <= len(winerrors):
+                                raise windows_replace_error(source, destination, winerrors[len(attempts) - 1])
+                        replace(source, destination)
+
+                    def sleep(seconds):
+                        polls.append(seconds)
+                        clock[0] += seconds
+
+                    def failed_events(request, requests):
+                        return [self.packet_event(request,
+                            '{"type":"pageAutoTranslations","error":"synthetic_failure"}')]
+
+                    missing = scenario == "missing-terminal"
+                    skipped = scenario == "skipped-motion"
+                    with mock.patch.object(capture, "time", local_capture_time(
+                            monotonic=lambda: clock[0], sleep=sleep)), \
+                            mock.patch.object(capture.os, "replace", conflict):
+                        result, browser, host, rows = self.scripted_case(
+                            failed_events if missing else self.motion_events,
+                            browser=self.failed_browser() if missing else self.moving_browser(skipped=skipped),
+                            run_id=f"retry-clock-{scenario}-{forced}",
+                            case_timeout=.01 if missing else .3, stable_seconds=.01,
+                            site={**SITE, "expectedPageTranslation": not skipped})
+                    samples = [(row["phase"], row["value"]) for row in rows if row["kind"] == "sample"]
+                    stability = [{key: value for key, value in row.items() if key != "at"}
+                                 for row in rows if row["kind"] == "stability"]
+                    runs.append((clock[0], polls, samples, stability, host.requests, browser.delivered))
+                    if forced:
+                        self.assertEqual(len(attempts), 4)
+                        self.assertEqual(attempts, [attempts[0]] * 4)
+                        retries = [row for row in rows if row["kind"] == "evidence_io_retry"
+                                   and row["filename"] == str(conflict_source)]
+                        self.assertEqual([row["winerror"] for row in retries], list(winerrors))
+                        self.assertEqual([row["attempt"] for row in retries], [1, 2, 3])
+                        self.assertEqual([row["delaySeconds"] for row in retries], [.02, .05, .1])
+                        self.assertTrue(all(row["operation"] == "replace" and row["trace"] for row in retries))
+                        self.assertFalse(conflict_source.exists())
+                    if missing:
+                        self.assertEqual(clock[0], 1.01)
+                        self.assertEqual(result["errors"][0]["code"], "backend_packet_error")
+                        self.assertIn("case_timeout_without_settlement", [e["code"] for e in result["errors"]])
+                        self.assertEqual(result["terminals"], [])
+                        self.assertTrue(result["failureSnapshot"]["predictions"][0]["failed"])
+                        self.assertFalse(result["settled"])
+                    else:
+                        self.assertEqual(result["errors"], [])
+                        self.assertTrue(result["settled"])
+                        self.assertGreater(sum(phase == "after" for phase, _ in samples), 4)
+                        self.assertTrue(all(row["semanticStable"] and row["stableForSeconds"] >= .01
+                                            for row in result["stability"].values()))
+                    self.assertFalse(result["completed"])
+                    self.assertTrue(result["simulation"])
+                    attempt = next((self.root / f"retry-clock-{scenario}-{forced}").glob("*/attempt-*"))
+                    self.assertEqual(json.loads((attempt / "case.json").read_text(encoding="utf-8")), result)
+                    for shot in result["screenshots"]:
+                        self.assertEqual(shot["sha256"],
+                                         capture.hashlib.sha256((attempt / shot["path"]).read_bytes()).hexdigest())
+                    self.assertEqual(capture.hashlib.sha256(preserved.read_bytes()).hexdigest(), original_hash)
+            # Forced real persistence backoff changes only its diagnostic journal;
+            # every synthetic sample, quiet observation, packet and poll is exact.
+            self.assertEqual(runs[0], runs[1])
+
     def test_identical_replacement_content_keeps_every_source_and_unknown_annotation(self):
         clock = [1.0]
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
             result, _, _, rows = self.scripted_case(
                 self.motion_events, browser=self.moving_browser(skipped=True, replace_sources=True),
                 run_id="replaced-sources", case_timeout=.3, stable_seconds=.01,
@@ -988,8 +1162,8 @@ class WorkflowTests(Fixture):
 
     def test_skipped_page_retains_13_untranslated_candidates_and_captures_all_phases(self):
         clock = [1.0]
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
             result, browser, host, rows = self.scripted_case(
                 self.motion_events,
                 browser=self.moving_browser(skipped=True, replace_sources=True, skipped_candidates=13),
@@ -1042,8 +1216,8 @@ class WorkflowTests(Fixture):
         for kind, key in checks:
             with self.subTest(kind=kind, key=key):
                 clock = [1.0]
-                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                with mock.patch.object(capture, "time", local_capture_time(
+                        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                     result, _, host, rows = self.scripted_case(
                         self.motion_events,
                         browser=self.moving_browser(skipped=True, skipped_candidates=13, **{kind: key}),
@@ -1059,8 +1233,8 @@ class WorkflowTests(Fixture):
     def test_skipped_live_ticker_records_content_changes_without_waiting_for_static_content(self):
         for field in ("sourceText", "displayedText"):
             clock = [1.0]
-            with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            with mock.patch.object(capture, "time", local_capture_time(
+                    monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                 result, _, host, rows = self.scripted_case(
                     self.motion_events,
                     browser=self.moving_browser(skipped=True, skipped_candidates=13, change=field),
@@ -1091,8 +1265,8 @@ class WorkflowTests(Fixture):
                 return value
             browser.qa = qa
             clock = [1.0]
-            with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            with mock.patch.object(capture, "time", local_capture_time(
+                    monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                 result, _, _, _ = self.scripted_case(self.motion_events, browser=browser,
                     run_id="retired-pending-" + str(unmatched), case_timeout=.3, stable_seconds=.01)
             self.assertEqual(result["errors"], [])
@@ -1122,8 +1296,8 @@ class WorkflowTests(Fixture):
                     # arrives; None is a temporarily empty host queue.
                     return packets if terminal is None else packets + [None, self.terminal_event(request, **terminal)]
                 clock = [1.0]
-                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                with mock.patch.object(capture, "time", local_capture_time(
+                        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                     result, _, _, rows = self.scripted_case(
                         events, browser=browser, run_id="negative-terminal-" + name,
                         case_timeout=.04, stable_seconds=.01,
@@ -1159,8 +1333,8 @@ class WorkflowTests(Fixture):
         def events(request, requests):
             return [self.packet_event(request, packet), None, self.terminal_event(request)]
         clock = [1.0]
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
             result, browser, host, rows = self.scripted_case(events, browser=self.native_negative_browser(),
                 run_id="native-negative-zero", case_timeout=.3, stable_seconds=.01,
                 site={**SITE, "expectedPageTranslation": False})
@@ -1188,8 +1362,8 @@ class WorkflowTests(Fixture):
                     del terminal["requestCount"]
                 return [self.packet_event(request, '{"type":"pageAutoAssessment","needsTranslation":false}'), terminal]
             clock = [1.0]
-            with self.subTest(count=count), mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            with self.subTest(count=count), mock.patch.object(capture, "time", local_capture_time(
+                    monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                 result, _, _, _ = self.scripted_case(events, browser=self.native_negative_browser(),
                     run_id="native-negative-" + label, case_timeout=.04, stable_seconds=.01,
                     site={**SITE, "expectedPageTranslation": False})
@@ -1242,8 +1416,8 @@ class WorkflowTests(Fixture):
             def events(request, requests):
                 return [self.packet_event(request, '{"type":"pageAutoAssessment","needsTranslation":false}'),
                         self.terminal_event(request)]
-            with self.subTest(kind=kind), mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                    mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            with self.subTest(kind=kind), mock.patch.object(capture, "time", local_capture_time(
+                    monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                 result, _, host, rows = self.scripted_case(events, browser=browser,
                     run_id="negative-storm-" + kind, case_timeout=.04, stable_seconds=.01,
                     site={**SITE, "expectedPageTranslation": False})
@@ -1345,8 +1519,8 @@ class WorkflowTests(Fixture):
         browser = self.failed_browser()
         def events(request, requests):
             return [self.packet_event(request, '{"type":"pageAutoTranslations","error":"synthetic_failure"}')]
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
             result, browser, _, _ = self.scripted_case(events, browser=browser,
                 run_id="failed-missing-terminal", case_timeout=.01)
         self.assertAlmostEqual(clock[0], 1.01)
@@ -1392,7 +1566,7 @@ class WorkflowTests(Fixture):
         def events(request, requests):
             return [self.packet_event(request, '{"type":"pageAutoTranslations","error":"synthetic_failure"}'),
                     self.terminal_event(request, success=False, requestCount=7, failedCount=15)]
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+        with mock.patch.object(capture, "time", local_capture_time(monotonic=lambda: clock[0])):
             result, browser, host, _ = self.scripted_case(events, browser=browser,
                 run_id="failed-deadline", case_timeout=.01)
         self.assertEqual(result["errors"][0]["code"], "backend_packet_error")
@@ -1411,8 +1585,8 @@ class WorkflowTests(Fixture):
         for kind, key in checks:
             with self.subTest(kind=kind, key=key):
                 clock = [1.0]
-                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                        mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                with mock.patch.object(capture, "time", local_capture_time(
+                        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
                     result, _, _, rows = self.scripted_case(
                         self.motion_events, browser=self.moving_browser(**{kind: key}),
                         run_id=f"unsettled-{key}", case_timeout=.04, stable_seconds=.01)
@@ -1450,8 +1624,8 @@ class WorkflowTests(Fixture):
             return value
         browser.qa = qa
         clock = [1.0]
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))):
             result, _, _, rows = self.scripted_case(self.motion_events, browser=browser,
                                                     run_id="text-only-changes", case_timeout=.04, stable_seconds=.01)
         self.assertFalse(result["settled"])
@@ -1582,7 +1756,7 @@ class WorkflowTests(Fixture):
             clock[0] += .1
         browser = self.browser()
         browser.deadline = 99
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]):
+        with mock.patch.object(capture, "time", local_capture_time(monotonic=lambda: clock[0])):
             result, browser, host, rows = self.scripted_case(events, browser=browser, poll_hook=poll_hook, case_timeout=.25)
         self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
         self.assertEqual(host.polls, 3)
@@ -1645,8 +1819,8 @@ class WorkflowTests(Fixture):
                     return [None, self.packet_event(request, packet), self.terminal_event(request)]
                 def sleep(seconds):
                     clock[0] += seconds
-                with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                        mock.patch.object(capture.time, "sleep", sleep):
+                with mock.patch.object(capture, "time", local_capture_time(
+                        monotonic=lambda: clock[0], sleep=sleep)):
                     result, browser, _, rows = self.scripted_case(events, browser=browser,
                         run_id="host-first-" + str(combined), case_timeout=2)
                 self.assertEqual(result["errors"], [])
@@ -1691,8 +1865,8 @@ class WorkflowTests(Fixture):
                 browser.predictions[0].update(completed=False, failed=True)
                 browser.outgoing.append({"rpcId": "cancel-rpc", "message": {
                     "type": "pageAutoCancel", "requestId": "req1", "reason": "translation_timeout"}})
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", sleep):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=sleep)):
             result, browser, host, rows = self.scripted_case(events, browser=browser,
                 run_id="frontend-timeout", case_timeout=.03)
         self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
@@ -1718,8 +1892,8 @@ class WorkflowTests(Fixture):
             return [self.packet_event(request, packet)]
         def sleep(seconds):
             clock[0] += seconds
-        with mock.patch.object(capture.time, "monotonic", lambda: clock[0]), \
-                mock.patch.object(capture.time, "sleep", sleep):
+        with mock.patch.object(capture, "time", local_capture_time(
+                monotonic=lambda: clock[0], sleep=sleep)):
             result, browser, _, _ = self.scripted_case(events, case_timeout=.01)
         self.assertEqual(browser.delivered, [packet])
         self.assertEqual(result["errors"][0]["code"], "case_timeout_without_settlement")
@@ -1883,7 +2057,7 @@ class WorkflowTests(Fixture):
 
 
 class AdapterTests(unittest.TestCase):
-    def test_synthetic_dom_rpc_retractions_and_listener_interfaces(self):
+    def test_synthetic_dom_clipping_composition_rpc_and_retraction_interfaces(self):
         node = shutil.which("node")
         self.assertIsNotNone(node, "Node is required for the offline JavaScript adapter checks")
         result = subprocess.run([node, str(HERE / "adapter-check.js")], shell=False,
