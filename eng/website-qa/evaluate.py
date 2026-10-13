@@ -223,10 +223,62 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
            or not e["id"] for e in events):
         reasons.append("host_event_case_identity_mismatch")
     if coverage_scope == "automatic-page" and any(
-            e.get("type") not in ("capabilities", "terminal") for e in events):
+            e.get("type") not in ("capabilities", "terminal", "assessment") for e in events):
         reasons.append("invalid_host_event_type")
     capabilities = [e for e in events if e.get("type") == "capabilities"]
     terminals = [e for e in events if e.get("type") == "terminal"]
+    assessments = [e for e in events if e.get("type") == "assessment"]
+    assessment_requests_ok = False
+    if coverage_scope == "automatic-page":
+        if any(not isinstance(e.get("id"), str) or not e["id"].strip()
+               or not isinstance(e.get("caseId"), str) or not e["caseId"].strip()
+               or e["caseId"] != case.get("id") for e in assessments):
+            reasons.append("host_event_case_identity_mismatch")
+        # An assessment is original evidence with its own identity. Repeated
+        # copies or ids borrowed from capabilities/terminals cannot prove a
+        # policy skip, even when successful native work accompanies them.
+        assessment_ids = Counter(e["id"] for e in assessments
+                                 if isinstance(e.get("id"), str))
+        if any(count > 1 for count in assessment_ids.values()):
+            reasons.append("duplicate_assessment_event")
+        other_event_ids = {e["id"] for e in capabilities + terminals
+                           if isinstance(e.get("id"), str)}
+        if assessment_ids.keys() & other_event_ids:
+            reasons.append("host_event_identity_collision")
+        if any(type(e.get("schemaVersion")) is not int or e["schemaVersion"] != 1
+               or e.get("live") is not True or e.get("needsTranslation") is not False
+               for e in assessments):
+            reasons.append("invalid_host_assessment")
+        # Legacy normalized terminal fixtures may omit these raw fields. An
+        # assessment alternative must carry both, and any supplied identities
+        # must agree with the actual host terminals (including mixed requests).
+        if assessments or "requestIds" in case or "terminals" in case:
+            requests = case.get("requestIds")
+            request_ids_ok = (isinstance(requests, list)
+                              and all(isinstance(r, str) and r for r in requests)
+                              and len(set(requests)) == len(requests))
+            if not request_ids_ok:
+                reasons.append("invalid_request_identities")
+            raw_terminals = case.get("terminals")
+            terminal_list_ok = (isinstance(raw_terminals, list)
+                                and all(isinstance(e, dict) for e in raw_terminals)
+                                and all(e.get("type") == "terminal"
+                                        and type(e.get("success")) is bool
+                                        and type(e.get("failedCount")) is int
+                                        and _count(e.get("cacheHits"))
+                                        and _count(e.get("requestCount"))
+                                        for e in raw_terminals)
+                                and raw_terminals == terminals)
+            if not terminal_list_ok:
+                reasons.append("terminal_host_events_mismatch")
+            terminal_ids = [e.get("id") for e in terminals]
+            terminal_ids_ok = all(isinstance(i, str) and i for i in terminal_ids)
+            if (request_ids_ok and terminal_ids_ok
+                    and (len(requests) != len(terminal_ids)
+                         or set(requests) != set(terminal_ids))):
+                reasons.append("request_terminal_identity_mismatch")
+            assessment_requests_ok = (request_ids_ok and terminal_list_ok
+                                      and not requests and not terminals)
     if len({e.get("id") for e in terminals if isinstance(e.get("id"), str)}) != len(terminals):
         reasons.append("duplicate_terminal_event")
     if any(e.get("live") is not True for e in capabilities) or case.get("liveTranslation") is not True and site["expectedPageTranslation"]:
@@ -248,9 +300,15 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
     if site["expectedPageTranslation"] and (
             not terminal_ok or not _count(request_count) or request_count == 0):
         reasons.append("missing_live_request_or_successful_terminal")
-    # Automatic skips require live capabilities plus a successful local/native
-    # zero-call terminal. Neither declaration alone establishes the exemption.
-    if automatic_negative and not terminal_ok:
+    # An actual live negative assess event has no translation terminal. It is
+    # proof only with explicit empty request/terminal lists and reviewed page
+    # agreement; it never substitutes for a terminal for issued work.
+    assessment_zero_call = (automatic_negative and bool(assessments)
+                            and assessment_requests_ok and _count(request_count)
+                            and request_count == 0 and case.get("pageDecision") is False
+                            and page_known and page_label["needTranslation"] is False)
+    zero_call_proof = terminal_ok or assessment_zero_call
+    if automatic_negative and not zero_call_proof:
         reasons.append("missing_or_invalid_zero_call_terminal")
     # Mock evidence and incomplete screenshots cannot contribute correct results.
     # A live run with an unsuccessful terminal remains auditable for omissions
@@ -315,7 +373,7 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
                    and page_known and page_label["needTranslation"] is False
                    and case.get("pageDecision") is False and request_count == 0
                    and capabilities and all(e.get("live") is True for e in capabilities)
-                   and terminal_ok and case.get("completed") is True
+                   and zero_call_proof and case.get("completed") is True
                    and isinstance(case.get("errors"), list) and not case["errors"]
                    and case.get("blockedReason") in (None, ""))
     for node_id in node_ids:
