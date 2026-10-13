@@ -13,7 +13,8 @@ case directory). Pass that same root to evaluate.py. No screenshots are copied.
 The original capture/review objects and byte hashes remain in provenance.
 Coverage defaults to strict. Explicit automatic-page scope can defer coverage
 only for independently reviewed negative pages correctly skipped at zero calls,
-with live capabilities and successful, identified local terminal evidence.
+with live capabilities and successful, identified local terminal evidence or a
+matching live negative host assessment with no translation requests/terminals.
 """
 
 from __future__ import annotations
@@ -318,7 +319,8 @@ def _predictions(case, nodes, issues, *, coverage_scope="strict"):
     return result
 
 
-def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid):
+def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid,
+                     assessment_zero_call_valid):
     """Derive coverage from labels, predictions and accounted host evidence."""
     terminals = [e for e in result["hostEvents"] if e.get("type") == "terminal"]
     terminal_ok = bool(terminals) and all(
@@ -345,7 +347,7 @@ def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_v
                    and _known(page) and page["needTranslation"] is False
                    and result.get("pageDecision") is False
                    and _count(request_count) and request_count == 0
-                   and terminal_ok and request_evidence_valid
+                   and (terminal_ok or assessment_zero_call_valid) and request_evidence_valid
                    and any(e.get("type") == "capabilities" and e.get("live") is True
                            for e in result["hostEvents"]))
     for label, prediction, valid, translated in rows:
@@ -443,8 +445,24 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None, *, c
     if not isinstance(terminals, list) or not all(isinstance(e, dict) for e in terminals):
         raise NormalizationError("invalid_terminals")
     events = ([deepcopy(capabilities)] if capabilities is not None else []) + deepcopy(terminals)
+    # The assess action emits an assessment, not a translation terminal. Keep
+    # that original event verbatim; strict mode retains its legacy host events.
+    assessment = None
+    if coverage_scope == "automatic-page" and "localAssessment" in case:
+        assessment = case["localAssessment"]
+        if not isinstance(assessment, dict):
+            raise NormalizationError("invalid_local_assessment")
+        events.append(deepcopy(assessment))
     result["hostEvents"] = events
     request_issue_start = len(issues)
+    if assessment is not None and (
+            type(assessment.get("schemaVersion")) is not int or assessment["schemaVersion"] != 1
+            or assessment.get("type") != "assessment"
+            or not isinstance(assessment.get("id"), str) or not assessment["id"].strip()
+            or not isinstance(case.get("id"), str) or not case["id"].strip()
+            or assessment.get("caseId") != case["id"]
+            or assessment.get("live") is not True or assessment.get("needsTranslation") is not False):
+        issues.append("invalid_local_assessment")
     terminal_ids = [e.get("id") for e in terminals]
     if any(e.get("caseId") != case.get("id") or not isinstance(e.get("id"), str) or not e["id"]
            for e in events):
@@ -472,18 +490,21 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None, *, c
             or set(requests) != {i for i in terminal_ids if isinstance(i, str)}):
         issues.append("request_terminal_identity_mismatch")
     request_evidence_valid = len(issues) == request_issue_start
+    # Empty lists must be present and valid in the raw capture. An assessment
+    # never substitutes for terminal accounting of an admitted request.
+    assessment_zero_call_valid = (assessment is not None and request_evidence_valid
+                                  and case.get("requestIds") == [] and case.get("terminals") == []
+                                  and case.get("pageDecision") is False)
     if case.get("expectedPageTranslation") is True:
         if (not capabilities or capabilities.get("live") is not True
                 or case.get("liveTranslation") is not True or not requests or not terminals
                 or not counts_valid or result["requestCount"] == 0):
             issues.append("missing_live_translation_evidence")
     elif case.get("expectedPageTranslation") is False:
-        # Native request identities include local assessments. Only the original
-        # terminal model-call counts establish unnecessary cloud translation;
-        # an empty terminal list is not evidence of a successful local assessment.
-        # Strict retains its legacy behavior; automatic scope needs both proofs.
+        # Legacy zero-call terminal proof remains valid. The separate assess
+        # action qualifies only with its real event and no admitted requests.
         if coverage_scope == "automatic-page":
-            if not terminals:
+            if not terminals and not assessment_zero_call_valid:
                 issues.append("missing_local_terminal_evidence")
             if not capabilities or capabilities.get("live") is not True:
                 issues.append("missing_live_capabilities_evidence")
@@ -510,7 +531,8 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None, *, c
     if (case.get("completed") is not True
             and not (case.get("completed") is False and "screenshot_review_pending" in reasons)):
         issues.append("capture_completion_not_established")
-    _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid)
+    _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid,
+                     assessment_zero_call_valid)
     if not issues:
         reasons = [r for r in reasons if r != "screenshot_review_pending"]
     issues = list(dict.fromkeys(reasons + issues))
