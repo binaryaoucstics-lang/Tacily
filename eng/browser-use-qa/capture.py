@@ -706,7 +706,16 @@ def _validate_source_geometry(source):
 
 
 def _independent_source_versions(value, source_history, sample_at):
+    export = value.get("independentSourceObservationExport")
+    references_only = "independentSourceObservationExport" in value
+    if references_only and (not isinstance(export, dict)
+            or set(export) != {"schemaVersion", "scope"}
+            or type(export.get("schemaVersion")) is not int or export["schemaVersion"] != 1
+            or export.get("scope") != "references"):
+        raise CaptureError("invalid_independent_source_observations")
     if "independentSourceObservations" not in value:
+        if references_only:
+            raise CaptureError("invalid_independent_source_observations")
         return None
     versions = value["independentSourceObservations"]
     dropped = value.get("independentSourceObservationDropped")
@@ -737,9 +746,59 @@ def _independent_source_versions(value, source_history, sample_at):
         indexed[key] = _source_snapshot(source)
         if source_id not in latest or latest[source_id][0] < (at, sequence):
             latest[source_id] = ((at, sequence), source)
-    for source_id, (_, source) in latest.items():
+    necessary = set()
+    if references_only:
+        # Validate historical exports against actual references, never silently
+        # treat a historical row as the latest traversal. source_history remains
+        # the full independent current facts; subsequent row validation checks
+        # exact snapshots, geometry, visibility, ownership and piece flags.
+        transport = value.get("producerObservationTransport", {})
+        if not isinstance(transport, dict) or not isinstance(transport.get("values", {}), dict):
+            raise CaptureError("invalid_producer_observation_transport")
+        definitions = transport.get("values", {})
+        for row in value["producerObservations"]:
+            if not isinstance(row, dict) or not isinstance(row.get("pieces"), list):
+                raise CaptureError("invalid_producer_observation")
+            for field, member in (("sourceObservation", row.get("sourceId")),
+                                  ("representedSourceObservation", row.get("representedBy"))):
+                reference = row.get(field)
+                if member is None:
+                    continue
+                if (not isinstance(member, str) or not isinstance(reference, dict)
+                        or set(reference) != {"at", "sequence"}
+                        or type(reference["sequence"]) is not int or reference["sequence"] <= 0):
+                    raise CaptureError("invalid_producer_observation_source")
+                necessary.add((member, _observation_time(reference["at"]), reference["sequence"]))
+        earliest, witnessed = {}, {}
+        for key in indexed:
+            if key[0] not in earliest or key[1:] < earliest[key[0]][1:]:
+                earliest[key[0]] = key
+        for key in necessary:
+            if key[0] not in witnessed or key[1:] < witnessed[key[0]][1:]:
+                witnessed[key[0]] = key
+        for row in value["producerObservations"]:
+            # Some member rows were refreshed after an older atomic view. Keep
+            # the earliest retained traversal proving membership at that time.
+            order = (_observation_time(row.get("at")), row.get("sequence"))
+            if type(order[1]) is not int or order[1] <= 0:
+                raise CaptureError("invalid_producer_observation")
+            for reference in row["pieces"]:
+                piece = definitions.get(str(reference)) if type(reference) is int else reference
+                if not isinstance(piece, dict) or not isinstance(piece.get("sourceIds"), list):
+                    raise CaptureError("invalid_producer_observation_piece")
+                for member in piece["sourceIds"]:
+                    if not isinstance(member, str):
+                        raise CaptureError("invalid_producer_observation_piece")
+                    candidate, prior = earliest.get(member), witnessed.get(member)
+                    if candidate and candidate[1:] <= order and (prior is None or prior[1:] > order):
+                        necessary.add(candidate)
+                        witnessed[member] = candidate
+        if not necessary.issubset(indexed):
+            raise CaptureError("invalid_producer_observation_source")
+    for source_id, (order, source) in latest.items():
         if _source_snapshot(source) != _source_snapshot(source_history[source_id]):
-            raise CaptureError("independent_source_observation_not_current")
+            if not references_only or (source_id, *order) not in necessary:
+                raise CaptureError("independent_source_observation_not_current")
     return indexed
 
 

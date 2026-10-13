@@ -349,9 +349,44 @@
       versions.set(JSON.stringify([version.source.id, version.sequence]), version);
     for (const { versions: retained } of producerObservations.values()) for (const version of retained)
       versions.set(JSON.stringify([version.source.id, version.sequence]), version);
+    // Keep the legacy export unless its union exceeds a bound. At pressure only
+    // exact producer/owner references and membership-time witnesses are needed;
+    // the complete latest traversal still lives, unchanged, in sourceNodes.
+    const versionSize = version => JSON.stringify(version).length;
+    const referencesOnly = versions.size > observationLimit ||
+      Array.from(versions.values()).reduce((size, version) => size + versionSize(version), 0) > observationCharacterLimit;
+    if (referencesOnly) {
+      const required = new Map(), earliest = new Map();
+      const key = version => JSON.stringify([version.source.id, version.sequence]);
+      const before = (left, right) => left.at < right.at || left.at === right.at && left.sequence <= right.sequence;
+      for (const version of versions.values()) {
+        const prior = earliest.get(version.source.id);
+        if (!prior || before(version, prior)) earliest.set(version.source.id, version);
+      }
+      for (const { versions: retained } of producerObservations.values()) for (const version of retained)
+        required.set(key(version), version);
+      const witnessed = new Map();
+      for (const version of required.values()) {
+        const prior = witnessed.get(version.source.id);
+        if (!prior || before(version, prior)) witnessed.set(version.source.id, version);
+      }
+      for (const entry of producerObservations.values()) {
+        const row = JSON.parse(entry.serialized);
+        for (const id of row.pieces) for (const member of JSON.parse(observationValues.get(id).serialized).sourceIds) {
+          const prior = witnessed.get(member), candidate = earliest.get(member);
+          // Never invent an earlier witness when none was retained. That
+          // membership remains unknown in capture, just as in the full export.
+          if ((!prior || !before(prior, row)) && candidate && before(candidate, row)) {
+            required.set(key(candidate), candidate); witnessed.set(member, candidate);
+          }
+        }
+      }
+      versions.clear();
+      for (const [id, version] of required) versions.set(id, version);
+    }
     const independentSourceObservations = []; let versionCharacters = 0, versionOverflow = 0;
     for (const version of versions.values()) {
-      const size = JSON.stringify(version).length;
+      const size = versionSize(version);
       if (independentSourceObservations.length >= observationLimit || versionCharacters + size > observationCharacterLimit) {
         versionOverflow++; continue;
       }
@@ -378,6 +413,7 @@
       ...(transport ? { producerObservationTransport: transport } : {}),
       producerObservationDropped: observationDropped,
       independentSourceObservations,
+      ...(referencesOnly ? { independentSourceObservationExport: { schemaVersion: 1, scope: "references" } } : {}),
       independentSourceObservationDropped: sourceVersionDropped + versionOverflow,
       pageDecision: typeof state?.assessed === "boolean" ? state.assessed : null,
       jobs: work.jobs, pending: work.pending, scanning: work.scanning,
