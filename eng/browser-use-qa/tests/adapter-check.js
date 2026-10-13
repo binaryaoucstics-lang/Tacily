@@ -839,3 +839,121 @@ if (process.argv.includes("--bounded-fixture")) console.log("BOUNDED_FIXTURE=" +
     independentSourceObservations: characterOverflowFixture.independentSourceObservations,
     independentSourceObservationDropped: characterOverflowFixture.independentSourceObservationDropped } }));
 console.log("adapter 1900-source interned historical/atomic transport and true row/character overflow checks passed");
+
+// >1800 real independent DOM rows, with old atomic views followed by a full
+// admission-reset reflow. These fixtures exercise the adapter, not fabricated
+// references or a reconstruction of the interrupted Wiki failure sample.
+function referenceExportFixture(mode = "reflow") {
+  let selected;
+  const count = mode === "characterPressure" ? 1000 : 1844;
+  const normal = ["reflow", "membership", "characterPressure"].includes(mode);
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, childNodes: [body], body, visibilityState: "visible", title: "Offline reflow article",
+    createRange: () => ({ selectNodeContents(node) { selected = node; },
+      getClientRects: () => [{ x: selected.x, y: selected.y, width: 220, height: 24 }] }),
+    addEventListener() {}, removeEventListener() {} };
+  body.parentNode = document;
+  const records = [];
+  for (let i = 0; i < count; i++) {
+    const parent = { nodeType: 1, tagName: "SPAN", childNodes: [], parentNode: body, parentElement: body,
+      hasAttribute: () => false, getAttribute: () => null, getRootNode: () => document };
+    const source = `Public article row ${i}: Independent source and reference material.` +
+      " Extra independently authored explanatory prose.".repeat(mode === "characters" ? 6 : mode === "characterPressure" ? 10 : 0);
+    const node = { nodeType: 3, nodeValue: source, parentNode: parent, parentElement: parent,
+      isConnected: true, x: i % 10 * 12, y: Math.floor(i / 10) * 28 };
+    parent.childNodes.push(node); body.childNodes.push(parent);
+    records.push({ node, source, lastWritten: source });
+  }
+  const state = { records: new Map(), blocks: new Map(), jobs: 0, pending: 0, scanning: false,
+    assessed: null, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  const session = { inspect: () => state, configure: () => true, mutated() {}, receive: () => true,
+    control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const context = { document, location: { href: "https://offline.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console,
+    getComputedStyle: node => ({ display: node.display || "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "offline", createRenderedTextTester: () => () => true,
+      createPageAutoSession: () => session, createOpenRootObserver: () => ({ configure() {}, found() {}, replace() {}, dispose() {} }) },
+    MutationObserver: function () {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {} };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa;
+  qa.sample("independent-reflow");
+  state.assessed = true; state.jobs = 1; state.scanning = true;
+  const width = normal ? 10 : 2;
+  for (let i = 0; i < count; i += width) {
+    const members = records.slice(i, i + width), record = members[0];
+    for (const member of members) {
+      state.records.set(member.node, member);
+      if (mode === "membership" && i === 0) member.node.parentElement.display = member === members[1] ? "block" : "none";
+      else if (member !== record) member.node.parentElement.display = "none";
+    }
+    for (let j = 0; j < (normal ? 4 : 1); j++) {
+      const id = `reflow-piece-${i}-${j}`;
+      state.blocks.set(id, { id, record, atomicRecords: members, text: `Public section ${i}, part ${j}`,
+        piece: { complete: false, failed: false } });
+    }
+  }
+  const partial = qa.sample("reflow-partial");
+  state.jobs = 0; state.scanning = false;
+  for (const block of state.blocks.values()) block.piece.complete = true;
+  const complete = qa.sample("reflow-complete");
+  if (!normal) {
+    // Peers retain old owner references; owners now have separate actual views.
+    state.blocks.clear();
+    for (let i = 0; i < count; i += width) {
+      const record = records[i], id = `new-owner-${i}`;
+      state.blocks.set(id, { id, record, atomicRecords: [record], text: "New independent owner piece",
+        piece: { complete: true, failed: false } });
+    }
+    const overflow = qa.sample("new-owner-views");
+    assert.equal(overflow.producerObservationDropped, 0);
+    assert.equal(overflow.independentSourceObservationExport.scope, "references");
+    assert.ok(overflow.independentSourceObservationDropped > 0);
+    assert.ok(overflow.independentSourceObservations.length <= 2048);
+    if (mode === "characters") assert.ok(overflow.independentSourceObservations.length < 2048);
+    qa.dispose(); return { overflow };
+  }
+  state.assessed = null;
+  for (const [i, { node }] of records.entries()) {
+    if (mode === "membership" && i < 10 && i !== 1) continue;
+    const old = node.parentElement, moved = { ...old, childNodes: [], display: "block" };
+    body.childNodes.push(moved); old.childNodes.length = 0; moved.childNodes.push(node);
+    node.parentElement = node.parentNode = moved; node.x += 77; node.y += 111;
+  }
+  const reflow = qa.sample("unassessed-full-reflow");
+  {
+    assert.equal(reflow.independentSourceObservationExport.schemaVersion, 1);
+    assert.equal(reflow.independentSourceObservationExport.scope, "references");
+    assert.equal(reflow.independentSourceObservations.length, count);
+    assert.equal(reflow.independentSourceObservationDropped, 0);
+    assert.equal(reflow.producerObservationDropped, 0);
+    assert.equal(reflow.sourceNodes.length, count);
+    assert.ok(JSON.stringify(reflow.independentSourceObservations).length <= 2000000);
+    // Exact old geometry/owner witnesses are preserved, while latest facts move.
+    const sortedVersions = value => JSON.stringify([...value.independentSourceObservations]
+      .sort((a, b) => a.source.id.localeCompare(b.source.id)));
+    assert.equal(sortedVersions(reflow), sortedVersions(complete));
+    const movedIndex = mode === "membership" ? 1 : 0;
+    assert.notEqual(reflow.sourceNodes[movedIndex].locator, complete.sourceNodes[movedIndex].locator);
+    assert.notEqual(reflow.sourceNodes[movedIndex].rects[0].x, complete.sourceNodes[movedIndex].rects[0].x);
+    const visibleReflow = JSON.parse(JSON.stringify(reflow));
+    reflow.independentSourceObservations[0].source.rects[0].x = -999;
+    for (const { node } of records) node.parentElement.display = "none";
+    const fresh = qa.sample("unassessed-reflow-again");
+    assert.notEqual(fresh.independentSourceObservations[0].source.rects[0].x, -999);
+    qa.dispose(); return { partial, complete, visibleReflow, reflow: fresh };
+  }
+  qa.dispose(); return { overflow: reflow };
+}
+if (process.argv.includes("--version-export-fixture")) {
+  const fixture = referenceExportFixture();
+  const requiredOverflow = referenceExportFixture("requiredOverflow").overflow;
+  const characterOverflow = referenceExportFixture("characters").overflow;
+  const characterPressure = referenceExportFixture("characterPressure").reflow;
+  const membership = referenceExportFixture("membership").reflow;
+  console.log("VERSION_EXPORT_FIXTURE=" + JSON.stringify({ ...fixture, requiredOverflow, characterOverflow,
+    characterPressure, membership }));
+  console.log("adapter reference-only reflow and necessary witness overflow checks passed");
+}
