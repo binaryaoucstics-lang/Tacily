@@ -11,6 +11,9 @@ sourceUnchanged booleans; missing reviews never dismiss observed events.
 Screenshot paths in the result are relative to --evidence-root (default: the
 case directory). Pass that same root to evaluate.py. No screenshots are copied.
 The original capture/review objects and byte hashes remain in provenance.
+Coverage defaults to strict. Explicit automatic-page scope can defer coverage
+only for independently reviewed negative pages correctly skipped at zero calls,
+with live capabilities and successful, identified local terminal evidence.
 """
 
 from __future__ import annotations
@@ -177,7 +180,7 @@ def _retractions(case, review, source_ids, issues):
     return result
 
 
-def _predictions(case, nodes, issues):
+def _predictions(case, nodes, issues, *, coverage_scope="strict"):
     pieces = case.get("predictions")
     if not isinstance(pieces, list) or not all(isinstance(p, dict) for p in pieces):
         raise NormalizationError("invalid_prediction_evidence")
@@ -297,6 +300,9 @@ def _predictions(case, nodes, issues):
                 completed = False
             if eligibility.get(source_id) is False and eligible:
                 issues.append("contradictory_production_eligibility:" + source_id)
+            elif (coverage_scope == "automatic-page" and eligibility.get(source_id) is True
+                  and valid and not eligible):
+                issues.append("contradictory_production_eligibility:" + source_id)
             item = {"nodeId": source_id, "eligible": eligible if valid or eligible else None,
                     "completed": completed, "failed": failed if valid or failed else None,
                     "pieceIds": [p.get("id") for p in rows]}
@@ -312,8 +318,57 @@ def _predictions(case, nodes, issues):
     return result
 
 
-def normalize_case(case_path, review_path, output_path, evidence_root=None):
+def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid):
+    """Derive coverage from labels, predictions and accounted host evidence."""
+    terminals = [e for e in result["hostEvents"] if e.get("type") == "terminal"]
+    terminal_ok = bool(terminals) and all(
+        e.get("success") is True and type(e.get("failedCount")) is int
+        and e["failedCount"] == 0 and _count(e.get("cacheHits"))
+        and _count(e.get("requestCount")) for e in terminals)
+    request_count = result["requestCount"]
+    positive = translated_count = untranslated = skipped = 0
+    rows = []
+    for label, prediction in zip(result["annotations"], result["predictions"]):
+        valid = all(type(prediction.get(k)) is bool for k in ("eligible", "completed", "failed"))
+        translated = (valid and prediction["eligible"] and prediction["completed"]
+                      and not prediction["failed"] and _count(request_count) and request_count > 0
+                      and result.get("liveTranslation") is True and terminal_ok and request_evidence_valid)
+        # A completion claim on a zero-call skipped page is contradictory even
+        # when its individual boolean flags have the correct types.
+        if coverage_scope == "automatic-page" and prediction["completed"] and not translated:
+            issues.append("contradictory_node_completion:" + prediction["nodeId"])
+        rows.append((label, prediction, valid, translated))
+    page = result["pageAnnotation"]
+    policy_page = (coverage_scope == "automatic-page" and not issues
+                   and all(r == "screenshot_review_pending" for r in reasons)
+                   and result.get("expectedPageTranslation") is False
+                   and _known(page) and page["needTranslation"] is False
+                   and result.get("pageDecision") is False
+                   and _count(request_count) and request_count == 0
+                   and terminal_ok and request_evidence_valid
+                   and any(e.get("type") == "capabilities" and e.get("live") is True
+                           for e in result["hostEvents"]))
+    for label, prediction, valid, translated in rows:
+        if not _known(label) or label["needTranslation"] is not True:
+            continue
+        positive += 1
+        translated_count += int(translated)
+        untranslated += int(not translated)
+        policy_skip = (policy_page and valid and not prediction["failed"]
+                       and not prediction["completed"])
+        skipped += int(policy_skip)
+        if coverage_scope == "automatic-page" and not translated and not policy_skip:
+            issues.append("confirmed_omission:" + label["nodeId"])
+    result.update(annotatedPositiveNodes=positive, translatedPositiveNodes=translated_count,
+                  translationCoverage=translated_count / positive if positive else None,
+                  unTranslatedPositiveNodes=untranslated, policySkippedPositiveNodes=skipped,
+                  confirmedOmissions=untranslated - skipped)
+
+
+def normalize_case(case_path, review_path, output_path, evidence_root=None, *, coverage_scope="strict"):
     """Create one scorer case exclusively, retaining the original evidence."""
+    if not isinstance(coverage_scope, str) or coverage_scope not in ("strict", "automatic-page"):
+        raise NormalizationError("invalid_coverage_scope")
     case_path, review_path, output_path = map(Path, (case_path, review_path, output_path))
     if output_path.exists() or output_path.resolve() in (case_path.resolve(), review_path.resolve()):
         raise NormalizationError("output_must_be_new_file")
@@ -327,6 +382,7 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
         raise NormalizationError("evidence_root_must_be_directory")
     issues = []
     result = deepcopy(case)
+    result["coverageScope"] = {"schemaVersion": 1, "mode": coverage_scope}
     result["provenance"] = {"casePath": str(case_path.resolve()), "caseSha256": case_hash,
                             "reviewPath": str(review_path.resolve()),
                             "reviewSha256": hashlib.sha256(review_raw).hexdigest(),
@@ -369,11 +425,14 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
     result["pageAnnotation"] = _label(review.get("pageAnnotation"))
     if not _known(result["pageAnnotation"]):
         issues.append("unknown_page_label")
+    elif (coverage_scope == "automatic-page" and type(case.get("expectedPageTranslation")) is bool
+          and result["pageAnnotation"]["needTranslation"] != case["expectedPageTranslation"]):
+        issues.append("initial_page_label_disagrees_with_review")
     for label in result["annotations"]:
         if not _known(label):
             issues.append("unknown_node_label:" + label["nodeId"])
-    result["predictions"] = _predictions(case, nodes, issues)
-    if case.get("pageDecision") is False:
+    result["predictions"] = _predictions(case, nodes, issues, coverage_scope=coverage_scope)
+    if coverage_scope == "strict" and case.get("pageDecision") is False:
         for label in result["annotations"]:
             if _known(label) and label["needTranslation"] is True:
                 issues.append("confirmed_omission:" + label["nodeId"])
@@ -385,6 +444,7 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
         raise NormalizationError("invalid_terminals")
     events = ([deepcopy(capabilities)] if capabilities is not None else []) + deepcopy(terminals)
     result["hostEvents"] = events
+    request_issue_start = len(issues)
     terminal_ids = [e.get("id") for e in terminals]
     if any(e.get("caseId") != case.get("id") or not isinstance(e.get("id"), str) or not e["id"]
            for e in events):
@@ -411,6 +471,7 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
     if (len(requests) != len(terminal_ids)
             or set(requests) != {i for i in terminal_ids if isinstance(i, str)}):
         issues.append("request_terminal_identity_mismatch")
+    request_evidence_valid = len(issues) == request_issue_start
     if case.get("expectedPageTranslation") is True:
         if (not capabilities or capabilities.get("live") is not True
                 or case.get("liveTranslation") is not True or not requests or not terminals
@@ -419,7 +480,13 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
     elif case.get("expectedPageTranslation") is False:
         # Native request identities include local assessments. Only the original
         # terminal model-call counts establish unnecessary cloud translation;
-        # invalid/missing/failed terminals remain blocking through checks above.
+        # an empty terminal list is not evidence of a successful local assessment.
+        # Strict retains its legacy behavior; automatic scope needs both proofs.
+        if coverage_scope == "automatic-page":
+            if not terminals:
+                issues.append("missing_local_terminal_evidence")
+            if not capabilities or capabilities.get("live") is not True:
+                issues.append("missing_live_capabilities_evidence")
         if result["requestCount"] != 0:
             issues.append("unnecessary_translation_request")
     else:
@@ -443,6 +510,7 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None):
     if (case.get("completed") is not True
             and not (case.get("completed") is False and "screenshot_review_pending" in reasons)):
         issues.append("capture_completion_not_established")
+    _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid)
     if not issues:
         reasons = [r for r in reasons if r != "screenshot_review_pending"]
     issues = list(dict.fromkeys(reasons + issues))
@@ -463,10 +531,13 @@ def main(argv=None):
     parser.add_argument("--review", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--evidence-root", type=Path)
+    parser.add_argument("--coverage-scope", choices=("strict", "automatic-page"), default="strict")
     args = parser.parse_args(argv)
     try:
-        result = normalize_case(args.case, args.review, args.output, args.evidence_root)
-        print(json.dumps({"completed": result["completed"], "blockedReason": result["blockedReason"]}))
+        result = normalize_case(args.case, args.review, args.output, args.evidence_root,
+                                coverage_scope=args.coverage_scope)
+        print(json.dumps({"completed": result["completed"], "blockedReason": result["blockedReason"],
+                          "coverageScope": result["coverageScope"]}))
         return 0 if result["completed"] else 1
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
         print(json.dumps({"completed": False, "error": str(error)}), file=sys.stderr)
