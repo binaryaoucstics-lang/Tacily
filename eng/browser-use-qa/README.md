@@ -1,14 +1,19 @@
 # Browser Use CLI 真实网页采集基础设施
 
-此目录实现采集驱动，不包含已认证的百站结果或准确率结论。主控留存的公开开发证据已包含真实浏览器访问及重排/隐藏源观察；这些观察不等于已完成翻译或质量审核。本任务的开发验收只运行合成 DOM、mock CLI 输出与离线 JSONL 主机；它们不计真实 case。统一口径见 [网页 QA 证据指南](../../docs/WEBSITE-QA-EVIDENCE.md) 和 [本轮回归约束](../website-qa/REFLOW-REGRESSIONS-20261013.md)。
+此目录实现采集驱动，不包含已认证的百站结果或准确率结论。主控留存的公开开发证据已包含真实浏览器访问及重排/隐藏源观察；这些观察不等于已完成翻译或质量审核。本任务的开发验收只运行合成 DOM、mock CLI 输出与离线 JSONL 主机；它们不计真实 case。统一口径见 [网页 QA 证据指南](../../docs/WEBSITE-QA-EVIDENCE.md)、[本轮回归约束](../website-qa/REFLOW-REGRESSIONS-20261013.md) 与 [真实零调用 assessment / 引用版本契约](../website-qa/ASSESSMENT-PROOF-20261013.md)。开发事实引用公开契约，不链接本机或私有日志/产物。
 
 正式页面判断固定使用 **fixed50（中文正文占比阈值 50%）**：采集端的 session 配置与 QA 主机规则判断均使用该基线。产品可配置比例是用户偏好，不能据此调整正式评分的判断口径或更改用户设置。正文识别、站点规则、手动控制、模型/请求预算与期限仍按原接口执行。
 
 ## 捕获与覆盖口径分开记录
 
-[覆盖与有界证据契约](../website-qa/COVERAGE-EVIDENCE-20261013.md) 发布 `coverageScope={"schemaVersion":1,"mode":"strict"}` / `{"schemaVersion":1,"mode":"automatic-page"}`，由离线归一化与评分明确选择。`normalize_case`、`evaluate`、`_score_case` 的新增关键字为 `coverage_scope="strict"`；两项离线 CLI 使用 `--coverage-scope strict|automatic-page`。这些是公共集成要求，本固定基线尚无新增参数，文档任务不认证其他任务已实现。capture 不新增覆盖开关，不更改生产识别、独立标签或原始捕获。
+[覆盖与有界证据契约](../website-qa/COVERAGE-EVIDENCE-20261013.md) 发布 `coverageScope={"schemaVersion":1,"mode":"strict"}` / `{"schemaVersion":1,"mode":"automatic-page"}`，由离线归一化与评分明确选择。固定基线已有 `normalize_case`、`evaluate`、`_score_case` 的关键字 `coverage_scope="strict"`；两项离线 CLI 使用 `--coverage-scope strict|automatic-page`。此次按 [assessment 契约](../website-qa/ASSESSMENT-PROOF-20261013.md) 扩展既有 automatic-page 的证据识别，元数据仍是显式 v1；扩展实现仍待主控集成验收。capture 不新增覆盖开关，不更改生产识别、独立标签或原始捕获。
 
-strict 是默认原覆盖义务，旧的无口径元数据案例只允许 strict。automatic-page 必须有匹配的版本/模式元数据，不能静默使用旧或 strict 案例；strict 也拒绝 automatic-page 案例。只有固定 `expectedPageTranslation=false`、独立已审核的页面 false 标签、实际 `pageDecision=false`，且全部请求核算后证明有效零模型调用及合法 host terminal/事件的负页，才允许调整部分正节点的覆盖义务。automatic-page 必须有 `type=capabilities, live=true`，以及至少一个成功的零模型调用本地/native assessment terminal（`type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`）。事件须有非空 `id` 和本案例 `caseId`；terminal 身份唯一，全部候选请求与 terminal 一一对应，计数是明确的非负整数且总和与顶层 `requestCount=0` 一致。空 terminal 列表、只有 capabilities 或独立 `assessment` 事件均不能证明 policy skip；strict 的原规则与测试不变。正页误跳过、标签分歧、非零调用、损坏计数/事件、节点预测缺失/失败/矛盾/unknown 均不能取得 policy skip。截图、真实最终 idle、来源、错误、未知与撤回门禁仍适用。
+strict 是默认原覆盖义务，旧的无口径元数据案例只允许 strict。automatic-page 必须有匹配的版本/模式元数据，不能静默使用旧或 strict 案例；strict 也拒绝 automatic-page 案例。只有固定 `expectedPageTranslation=false`、独立已审核的页面 false 标签、实际 boolean `pageDecision=false`，且全部请求核算后证明有效整数 `requestCount=0` 的负页，才允许调整部分正节点的覆盖义务。必须有 `type=capabilities, live=true`，加以下一种证明：
+
+- 原有至少一个成功零调用 terminal（`type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`）。事件须有非空 `id` 和匹配本案例的 `caseId`；terminal 身份唯一，全部 candidate 请求与 terminal 一一对应，计数是明确非负整数且总和与顶层计数一致。
+- 实际 assess-only 主机事件：原始 `localAssessment` 为 `type=assessment, schemaVersion=1, live=true, needsTranslation=false`，非空 `id` 和匹配本案例的 `caseId`，且 requestIds/terminals 都是有效空列表。归一化保留原始事件到 `hostEvents`，不合成翻译 terminal。
+
+版本必须是整数而非 boolean；计数不能是 null、boolean 或字符串。只有 capabilities、空列表本身、缺能力证明、缺失/损坏请求列表、非 live/正向/unknown 或无效身份/版本的 assessment 不构成证明。其他未知事件类型仍拒绝。正页误跳过、标签分歧、非零调用、失败/非零/损坏 terminal、已发工作缺成功 terminal、节点预测缺失/失败/矛盾/unknown 均不能取得 policy skip。默认 strict 的原规则与所有旧测试不变；截图、真实最终 idle、来源归属、错误、未知与撤回门禁仍适用。
 
 正确跳过不会把英文改标为中文或已翻译。GMW 公开开发案例有 412 个独立审核节点，契约提及的九个英文正标签及 FOLLOW 原文仍须保留。实际生产 eligible 决定原混淆矩阵项；未翻译英文列入 `unTranslatedPositiveNodes`，满足全部 automatic-page 条件的子集另列 `policySkippedPositiveNodes`。`confirmedOmissions` 只在该显式口径下调整必须覆盖的遗漏，strict 保留原含义。TP/TN/FP/FN、accuracy/precision/recall、`annotatedPositiveNodes`、`translatedPositiveNodes` 与 `translationCoverage` 公式不变；policy skip 不产生 TP 或翻译完成信用，不从覆盖率分母删除。案例与 overall/development/holdout 均须报告新计数，并从证据重新计算。
 
@@ -64,7 +69,7 @@ python eng/browser-use-qa/capture.py `
 
 页面 `send()` 创建带 RPC ID 的可审计 outbound 队列。Python 转发生产 `pageAutoCandidate`，仅添加 tabId/browserWindowId/frameId/siteHost；不改 blocks、samples、识别规则或译文。host 的序列化 `packet` 原样交给生产 session.receive，传输接受响应只解开对应 Promise。候选终止必须由相同 host 请求 ID 的 `terminal` 证明；取消使用原候选的 host ID，保留生产取消帧。EOF、错误、额度/授权失败、缺失终止、超时、域外跳转都不能当成功。前端本地跳过时另调用生产提取器取得 samples/statistics，转发 `assess` 规则核对，不创建翻译请求、不将该结果当人类真值。
 
-`requestIds` 保留全部生产 native candidate 的主机身份，不表示云模型调用次数。负页也可能发送 candidate 并收到生产 assessment 帧；每个候选仍必须有相同身份的成功 terminal，且 requestCount 必须是明确的非负整数。只有实际 requestCount 为 0 才证明没有模型调用；缺字段、null、boolean、字符串、失败或缺失 terminal 都不能补成 0。独立 `assess` 仅由 assessment 事件结束，不能结束 candidate RPC，也不能单独满足 automatic-page 所需的成功零调用 terminal。live capabilities 与至少一个身份和全部计数有效的成功 terminal 是该口径的必要证明；文档不要求伪造事件或改写原始捕获，无此证据时不授予 policy skip。真实模型调用、failed 节点、未解决工作和撤回仍阻止完成。
+`requestIds` 保留全部生产 native candidate 的主机身份，不表示云模型调用次数。负页也可能发送 candidate 并收到生产 assessment 帧；每个候选仍必须有相同身份的成功 terminal，且 requestCount 必须是明确的非负整数。缺字段、null、boolean、字符串、失败或缺失 terminal 都不能补成 0。独立 `assess` 以实际 host assessment 事件结束，不能结束 candidate RPC。[公开契约](../website-qa/ASSESSMENT-PROOF-20261013.md) 记载 `3c3ec34` 的真实 GMW 开发捕获具有匹配的 live negative assessment 与空 requestIds/terminals：没有发起模型工作，所以没有翻译 terminal。这种事件可按上述完整条件证明 automatic-page 零调用；bare capabilities 或已发工作缺 terminal 仍拒绝，旧拒绝测试原样保留。GMW 的九个英文节点仍独立为 true、未翻译，旧 unknown 历史继续阻止完成。合成扩展回归须提供真实形状的 fixture assessment，不把旧无证明夹具改成成功。真实模型调用、failed 节点、未解决工作和撤回仍阻止完成。
 
 ### 帧批量传送与期限
 
@@ -95,15 +100,17 @@ python eng/browser-use-qa/capture.py `
 - 截图存路径、时间、viewport 与 SHA-256。必要时主控增加滚动范围/站点交互；默认一次滚动不能证明覆盖无限滚动站点的全部内容。本轮仅以离线夹具验证语义等待修复，没有重跑真实 People.com.cn 或宣称真实语料通过。
 - retractions：观察已显示的文本回到原文/空白，要求生产保留原文未变、显示处于译文视图。主动原文/双语切换与已知真源变化不计撤回。生产观察器修复后采样，因此只记录持续可观察撤回，不把同一回调内已修复的瞬态写入当已显示。不能证明从未出现帧级闪烁；截图/视频审核应补充此项。
 
-`visitSuccess` 与 `completed` 分离。外语页必须 live、真实 requestCount>0、每候选成功终止、逐节点完成、截图齐备与语义稳定；模拟、全缓存无实际模型调用、失败或缺终止均不满足。目标语言页要求实际 false 决策、明确成功终止的 native 候选与零模型请求。`evidenceReady=true` 是等待截图审核的完整证据，初始 `completed=false`。
+`visitSuccess` 与 `completed` 分离。外语页必须 live、真实 requestCount>0、每候选成功终止、逐节点完成、截图齐备与语义稳定；模拟、全缓存无实际模型调用、失败或缺终止均不满足。目标语言页要求实际 false 决策与有效零模型证据；已发 native 候选必须成功终止，没有候选的 assess-only 路径保留真实匹配的 live negative assessment。`evidenceReady=true` 是等待截图审核的完整证据，初始 `completed=false`。
 
 ## 原有历史观察上限与溢出失败
 
-覆盖契约保留 main `3c3ec34` 上新 Wiki 开发捕获的 `producer_observation_overflow` 失败。契约指出基线存在每源重复分片和全源版本保留的冗余；其传输/保留优化仍须遵守原 **2048 行、2,000,000 字符**上限。本指南不指定新的存储结构，也不宣称该失败已经修复。
+覆盖契约保留 main `3c3ec34` 上 Wiki 开发捕获的 `producer_observation_overflow` 失败。[assessment / 引用版本契约](../website-qa/ASSESSMENT-PROOF-20261013.md) 进一步记载 `8517302` 的 site-021：producer 值驻留避免了前一溢出，但 **98 次实际调用、四张图片**后仍因 `independent_source_observation_overflow` 失败；中断前 1844 个源行、零观察到的撤回不能证明完成。原失败和图片不修改，也不借用后来未取得的完成。
+
+引用版本导出（ref-only）只在满足原 **2048 行、2,000,000 字符**边界需要时精简冗余且未引用的导出版本。必须保留 retained producer views 所需的精确 source 及 represented-owner 版本、实际成员/归属/时间证据；不能从当前位置伪造见证或合并不同源版本。完整 `sourceNodes` 历史不变，小页和旧 fixtures 行为保留，原 fixture1901 版本数仍须通过。如果必要见证集合本身超过任一原边界，仍明确溢出失败。
 
 完整观察必须保留源版本、几何、成员归属、真实扫描 idle 与有界的时间戳证据，继续拒绝过期分片。真正溢出、丢失或不完整的历史保持 unknown 或明确失败：不能压掉 overflow、提高限额、把 dropped 当成功，也不能将后来隐藏或空集合解释为历史 eligible=false/completed=true。atomic 成员移动仍按当时实际身份与完整成员证据审核；当前完成或旧缓存不能补齐丢失历史。覆盖口径不会改变这些来源要求。
 
-离线验收要求使用 >1800 独立源的现实规模合成页，在原上限内核对传输，并同时检查移动/atomic 成员、真实溢出或丢失、伪造版本、损坏/过期证据与未完成工作。新增回归由对应实现任务在其归属内添加；本任务保留全部原测试。通过离线回归不代表重新运行了 Wiki、原始失败已消除或百站/质量门槛已达到。
+离线验收要求使用 >1800 独立源的现实规模合成页，在原上限内核对传输，并同时检查大页移动/ref-only、atomic 归属、必要见证真正溢出、伪造版本、损坏/过期证据与 unknown 丢失。不能重置 dropped、静默 overflow 或推断缺失的负 eligibility。新增回归由对应实现任务在其归属内添加；本任务保留全部原测试。通过离线回归不代表重新运行了 Wiki、原始失败已消除或百站/质量门槛已达到。
 
 ## 独立审核（离线）
 
@@ -130,13 +137,13 @@ python eng/browser-use-qa/review.py `
   --output C:/qa-evidence/public-sites-001/site-001/attempt-0001/reviewed-001.json
 ```
 
-审核核对 case 与截图哈希，生成全新结果，不覆盖 case、review 或历史结果。模拟和缺失 live/terminal 的证据即使所有票为 true 也无法变为 completed。未标注节点继续 unknown。完成捕获不是准确率通过；统计应纳入有独立真值的有效决策错误和未知/遗漏，不可只筛 completed 来美化指标。全体/holdout 指标与至少 100 不同域的验收由 `eng/website-qa/` 主控流程负责。
+审核核对 case 与截图哈希，生成全新结果，不覆盖 case、review 或历史结果。模拟、缺失 live 证明或已发工作缺 terminal 的证据即使所有票为 true 也无法变为 completed；无翻译请求的真实 assess-only 事件按上述条件核验。未标注节点继续 unknown。完成捕获不是准确率通过；统计应纳入有独立真值的有效决策错误和未知/遗漏，不可只筛 completed 来美化指标。全体/holdout 指标与至少 100 不同域的验收由 `eng/website-qa/` 主控流程负责。
 
 ## 离线验收
 
 ```powershell
-pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId coverage-docs
-pwsh -NoProfile -File .parallel/Validate-CoverageEvidenceTask.ps1 -TaskId coverage-docs
+pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId assessment-docs
+pwsh -NoProfile -File .parallel/Validate-AssessmentProofTask.ps1 -TaskId assessment-docs
 python -m unittest discover -s eng/browser-use-qa/tests -p 'test_*.py'
 python -m unittest discover -s eng/website-qa -p 'test_*.py'
 ```

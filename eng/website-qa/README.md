@@ -1,10 +1,10 @@
 # 真实网站 QA：固定清单与离线评分
 
-本目录实现 [公共契约](CONTRACT.md) 的清单与评分基础设施。主控留存的公开开发证据已包含真实站点访问中的重排与隐藏源观察；访问和诊断本身不等于实际完成翻译。本目录文档及合成 fixtures **不能认证百站测试或准确率目标已达到**。统一口径见 [网页 QA 证据指南](../../docs/WEBSITE-QA-EVIDENCE.md) 与 [本轮回归约束](REFLOW-REGRESSIONS-20261013.md)。
+本目录实现 [公共契约](CONTRACT.md) 的清单与评分基础设施。主控留存的公开开发证据已包含真实站点访问中的重排与隐藏源观察；访问和诊断本身不等于实际完成翻译。本目录文档及合成 fixtures **不能认证百站测试或准确率目标已达到**。统一口径见 [网页 QA 证据指南](../../docs/WEBSITE-QA-EVIDENCE.md)、[本轮回归约束](REFLOW-REGRESSIONS-20261013.md) 与 [真实零调用 assessment / 引用版本契约](ASSESSMENT-PROOF-20261013.md)。以下开发事实引用公开契约，不链接本机或私有运行材料。
 
 ## 覆盖口径接口 v1
 
-[覆盖与有界证据契约](COVERAGE-EVIDENCE-20261013.md) 发布两种明确口径。此节描述公共接口与集成验收要求；本任务只修改文档，固定基线尚无新增参数，不能据此宣称其他任务的实现已经通过验收。主控集成并验证实现后使用下列新参数。
+[覆盖与有界证据契约](COVERAGE-EVIDENCE-20261013.md) 发布两种明确口径，固定基线已有以下参数。此次仅按 [assessment 契约](ASSESSMENT-PROOF-20261013.md) 扩展 automatic-page 的证据识别；本任务只修改文档，扩展实现仍须主控集成后验收。
 
 - `normalize_case`、`evaluate`、`_score_case` 增加关键字 `coverage_scope="strict"`，保留现有位置参数调用。CLI 增加 `--coverage-scope strict|automatic-page`，非法模式必须拒绝。
 - 归一化案例与评分报告记录 `coverageScope={"schemaVersion":1,"mode":"strict"}` 或 `{"schemaVersion":1,"mode":"automatic-page"}`。覆盖口径版本与原有案例 envelope 的 `schemaVersion` 分别保留。
@@ -15,7 +15,14 @@
 | `strict`（默认） | 所有独立已知正标签缺少真实完整翻译均保留原遗漏含义 | 原捕获、审核、预测、请求、截图、未知、错误与撤回门禁 |
 | `automatic-page`（显式） | 仅在下述正确跳过负页中，经有效生产预测证明的正节点可以列为 policy skip；其他正节点仍须真实完整翻译 | 同样保留所有其他门禁，policy skip 不产生翻译完成或 TP 奖励 |
 
-正确跳过必须同时满足：固定清单 `expectedPageTranslation=false`、独立且已审核的 `pageAnnotation.needTranslation=false`、实际 boolean `pageDecision=false`、有效整数 `requestCount=0`，以及有效的主机事件/terminal 身份与计数证据。automatic-page 还必须有 `type=capabilities, live=true` 和至少一个成功的零模型调用本地/native assessment terminal：`type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`。每个事件的非空 `id` 与本案例 `caseId` 必须有效，terminal 身份唯一，全部请求与 terminal 一一对应；计数字段必须是明确的非负整数，不能是 null、boolean 或字符串。先核对全部请求与原始终止事件及计数总和，再判断覆盖义务。native assessment 身份不是模型调用数；空请求/terminal 列表、只有 capabilities 或独立 `assessment` 事件不能证明 automatic-page policy skip。非零调用、损坏计数/事件、标签分歧、正页误跳过均不能取得 policy skip。缺失、失败、矛盾或 unknown 的节点预测不能取得豁免；原始错误与未知仍阻止完成。初始清单标签或预测不能代替独立页面/节点标签。strict 的原零调用负例规则与全部原测试保持不变。
+正确跳过必须同时满足：固定清单 `expectedPageTranslation=false`、独立且已审核的 `pageAnnotation.needTranslation=false`、实际 boolean `pageDecision=false`、有效整数 `requestCount=0`，以及 `type=capabilities, live=true` 和有效主机证明。先核对全部请求、原始事件与计数，再判断覆盖义务。automatic-page 接受以下两种证明：
+
+- 原有成功零调用 terminal：至少一个 `type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`；全部 candidate 请求与 terminal 身份唯一、一一对应，terminal 计数总和等于顶层计数。
+- 实际无翻译请求的主机 assessment：原始 `localAssessment` 是 `type=assessment, schemaVersion=1, live=true, needsTranslation=false`，有非空 `id` 与匹配本案例的 `caseId`；`requestIds` 和 terminals 必须都为有效的空列表。归一化将该原始事件保留到 `hostEvents`，不替换或合成 terminal。主机 `assess` 动作本来就以 assessment 结束；没有模型工作时没有翻译 terminal。
+
+每个事件的身份必须有效，版本与计数必须是明确整数，不能是 null、boolean 或字符串。assessment 是单独验证的已有生产事件类型，其他未知事件类型仍无效。空列表本身、只有 capabilities、缺少能力证明，以及非 live、正向、unknown、版本/身份无效的 assessment 均不能证明 policy skip。任何已发请求仍须成功 terminal；assessment 不能弥补缺失/额外/重复/失败 terminal，非零或损坏计数也不能补成零。非零调用、标签分歧、正页误跳过均不能取得 policy skip。缺失、失败、矛盾或 unknown 的节点预测不能取得豁免；原始错误与未知仍阻止完成。初始清单标签或预测不能代替独立页面/节点标签。默认 strict 的原规则和所有旧测试保持不变；automatic-page 元数据仍是显式 v1，识别已有 assessment 事件无需改变版本。
+
+[公开 assessment 契约](ASSESSMENT-PROOF-20261013.md) 记载 `3c3ec34` 的真实 GMW 开发捕获：主机匹配的 live negative assessment，空 requestIds/terminals，零模型工作。此前 terminal-only 要求错误拒绝了这种证据。此修订只纠正证据类型，不解除 GMW 历史 unknown，也不宣称该页已完成。
 
 两种口径都保留所有 `needTranslation=true`、TP/TN/FP/FN、accuracy/precision/recall，以及原有 `annotatedPositiveNodes`、`translatedPositiveNodes`、`translationCoverage` 公式。案例及 `overall / development / holdout` 聚合须额外呈现：
 
@@ -53,7 +60,7 @@ python -m unittest discover -s eng/website-qa -p 'test_*.py'
 
 默认清单为同目录 `sites.json`，可用 `--sites` 指定明确版本。案例输入为 JSON 数组，或 `{"schemaVersion":1,"cases":[...]}`。退出码：0 表示 `achieved=true`；1 表示已成功评分但门槛未满足；2 表示输入/文件错误。报告始终明确 `achieved`，不会把空数据或基础设施验收成功当作真实目标完成。
 
-以下是覆盖契约集成后的离线 CLI 用法，同一原始捕获及冻结审核分别生成新文件；不覆盖原 case、review、截图或旧报告。两份 `cases.*.json` 由对应口径的归一化案例组成数组或上述 envelope，不能将单个案例对象当作数组，也不能混用口径。
+以下是现有版本化覆盖接口的离线 CLI 用法；本轮 assessment 扩展仍须集成验证。同一原始捕获及冻结审核分别生成新文件，不覆盖原 case、review、截图或旧报告。两份 `cases.*.json` 由对应口径的归一化案例组成数组或上述 envelope，不能将单个案例对象当作数组，也不能混用口径。
 
 ```powershell
 python eng/website-qa/normalize.py --case .parallel/website-qa/case.json --review .parallel/website-qa/review.json --evidence-root .parallel/website-qa --coverage-scope strict --output .parallel/website-qa/normalized.strict.json
@@ -79,15 +86,15 @@ python eng/website-qa/evaluate.py --cases .parallel/website-qa/cases.automatic-p
 | `screenshots` | `before/after/stable` 各为 `{path, reviewed:true}`；必须是证据目录内存在的 PNG/JPEG/WebP 文件。检查非空图片签名；内容真实性与可读性依赖人工审核 |
 | `screenshots.checks` | `firstViewport, mainContent, afterScroll, layout, dynamicReturn` 都为 true。分别审核首屏、主要正文、滚动后内容、折叠/重排与布局、动态加载并返回后的稳定性；静态页面也须确认适用检查 |
 | `hostEvents` | 保存原始契约 JSONL 事件数组。每项必须有非空 `id` 与本案例 `caseId`。正例必须存在 `type=capabilities, live=true`，以及真正完成的 `type=terminal, success=true, failedCount=0, cacheHits>=0, requestCount>=0`；拒绝重复 terminal id |
-| 模型与结束状态 | 正例 `liveTranslation=true`，顶层 `requestCount` 为正整数且等于全部 terminal 的 requestCount 之和。流关闭、accepted、部分 updates、缓存文字或 `completed=true` 本身都不能代替终止事件。strict 保留原负例本地规则跳过约定，允许 `hostEvents=[]` 与 `requestCount=0`，不要求云调用；automatic-page policy skip 必须有 live capabilities 和至少一个身份/计数有效的成功零模型调用 terminal，空事件不构成该证明 |
+| 模型与结束状态 | 正例 `liveTranslation=true`，顶层 `requestCount` 为正整数且等于全部 terminal 的 requestCount 之和。流关闭、accepted、部分 updates、缓存文字或 `completed=true` 本身都不能代替终止事件。strict 保留原负例本地规则跳过约定，允许 `hostEvents=[]` 与 `requestCount=0`，不要求云调用；automatic-page 必须有 live capabilities，加上述成功零调用 terminal 或真实匹配的 live negative assessment（仅有效空 requestIds/terminals）；空事件不构成证明 |
 | `retractions` | 必须有观察数组；无事件用 `[]`。事件 `{nodeId, reviewed:true, confirmed:boolean, sourceUnchanged:boolean}`；确认且源文未变时计撤回，译文后来恢复也不能消除失败。源文变化不算撤回；未审核事件不算完成 |
 | 完成与错误 | `completed=true`、`errors=[]`、`blockedReason` 缺省/null/空字符串；`synthetic=true`、`mock=true`、非 live capabilities 明确排除 |
 
 所有节点记录必须对应独立 sourceNodes；重复 id 或凭空出现的预测/标签不接受。页面仍需逐节点审核；只查标题、只查翻译结果截图、只使用模型选择的节点，都不能产生合格记录。负例仍需源节点、独立标签和稳定截图，且必须零不必要翻译请求。
 
-`normalize.py` 中的 `requestIds` 是原始 native candidate 身份，不是云模型调用次数。负例可以有 native assessment；所有请求必须与原始 terminal 身份一一对应且各自唯一，每个 terminal 都须成功、`failedCount=0`、`cacheHits` 和 `requestCount` 为明确的非负整数。主机允许并发请求，终态完成顺序可以不同于请求接纳顺序；保留原始顺序是保留原始事件序列和每个请求的 packet/terminal 身份，不要求全局终态顺序等于 candidate 顺序，也不重排终态或 provenance。模型调用次数只取原始 terminal 的 `requestCount` 总和；automatic-page 必须另有 live capabilities 与至少一个上述成功零调用 terminal，不能把空 terminal 列表的空和当作 policy skip 证明。缺失、额外、重复、身份不符、字段损坏或失败的 terminal 仍阻止完成，不补成成功或零调用。错误、未解决工作、未知节点、必须覆盖的遗漏与撤回继续阻止完成，原始捕获、审核、哈希和生产预测保留。正例仍必须有真实模型调用。
+`normalize.py` 中的 `requestIds` 是原始 native candidate 身份，不是云模型调用次数。所有已发请求必须与原始 terminal 身份一一对应且各自唯一，每个 terminal 都须成功、`failedCount=0`、`cacheHits` 和 `requestCount` 为明确的非负整数。主机允许并发请求，终态完成顺序可以不同于请求接纳顺序；保留原始顺序是保留原始事件序列和每个请求的 packet/terminal 身份，不要求全局终态顺序等于 candidate 顺序，也不重排终态或 provenance。模型调用次数只取原始 terminal 的 `requestCount` 总和；没有 candidate 的 assess-only 路径还须上述真实负向 assessment 才能证明零调用，不能只取空列表的空和。缺失或损坏的 requestIds 列表不等于空列表。缺失、额外、重复、身份不符、字段损坏或失败的 terminal 仍阻止完成，不补成成功或零调用。错误、未解决工作、未知节点、必须覆盖的遗漏与撤回继续阻止完成，原始捕获、审核、哈希和生产预测保留。正例仍必须有真实模型调用。
 
-native assessment 的归一化往返回归使用离线合成夹具，核对负例零调用、实际调用、缺失/无效/失败终止与失败证据保留，以及正负例并发 `r1/r2` 请求按 `r2/r1` 完成时的身份、计数和原始序列保留；通过不代表任何真实网站已完成或质量目标已达到。
+assessment 扩展的合成回归须包含真实形状的 fixture assessment 证据，并拒绝无效版本/身份、非 live/正向/unknown assessment、损坏或缺失请求列表、非空请求缺终止、失败或非零 terminal 及标签矛盾。旧的缺 capabilities、只有 capabilities、已发工作缺 terminal 的测试原样保留；并发 `r1/r2` 请求按 `r2/r1` 完成时的身份、计数和原始序列仍保留。离线通过不代表任何真实网站已完成或质量目标已达到。
 
 人类应先基于原文、角色、位置和源截图标注，再与预测匹配。`independent=true` 是审核声明，不是自动产生真值的开关。offline 程序无法验证声明是否诚实、截图是否真实采集或模型是否确实被调用，主控必须审查原始运行证据；本脚本不会把这种本地一致性检查声称为密码学认证。
 
@@ -101,7 +108,9 @@ native assessment 的归一化往返回归使用离线合成夹具，核对负�
 
 本轮公开诊断显示引用链接之间的独立横向分隔符变化及相同上下文刷新可伴随已完成内容恢复原文；另有短暂显示的机构名称只留下源历史而缺少当时生产观察。它们是需保留的缺陷/未知证据，不能仅凭“动态”或文档更新判定修复成功。细节与保护条件见 [回归约束](REFLOW-REGRESSIONS-20261013.md)。原始失败、所有刷新图、真实 offsets/hashes、日期/计数事实、请求身份、EOF/错误/终止与期限门禁均须保留。
 
-覆盖契约还记录 main `3c3ec34` 的新 Wiki 开发捕获因 `producer_observation_overflow` 失败。历史生产观察保留仍受原 **2048 行、2,000,000 字符**边界约束；优化传输/保留不能提高上限、隐藏溢出、删除源标签或把丢失历史补成 eligible=false/completed=true。源版本、几何、atomic 成员归属、真实扫描 idle、带时间戳观察与过期分片 unknown 保护均须保留。离线大页回归要求 >1800 个独立源在原边界内，且移动/atomic 成员、真实丢失、伪造/损坏/过期证据仍被正确阻止；通过这种回归不证明 Wiki 已重新采集成功。
+[公开契约](ASSESSMENT-PROOF-20261013.md) 保留两次 Wiki 开发失败：`3c3ec34` 的 `producer_observation_overflow`；`8517302` 的 site-021 已通过 producer 值驻留避免前一溢出，但在 **98 次实际调用、四张图片**后因 `independent_source_observation_overflow` 失败。中断前有 1844 个源行、零观察到的撤回；这些事实不能记作 completed，四张图片也不能代替全部截图审核。
+
+引用版本导出（ref-only）仍受原 **2048 行、2,000,000 字符**边界约束。只有为满足原边界而必要时，才精简冗余且未被引用的导出版本；必须保留 retained producer views 引用的全部精确 source 版本与 represented-owner 版本，以及真实成员归属、几何、时间和 scan idle。完整 `sourceNodes` 历史不变，小页/旧 fixtures 的导出行为不变，原 fixture1901 版本数仍须通过。必要见证集合本身超过任一原上限时仍明确溢出失败，不能丢掉所需版本、合并不同版本、由当前位置伪造历史、清零 dropped 或借用后来未取得的完成。伪造/损坏/过期分片和未知丢失保护保留；负 eligibility 不能由缺失证据推断。离线大页移动/ref-only、atomic 归属及真正必要见证溢出回归通过，也不证明 Wiki 已重新采集成功。
 
 ## 统计口径
 
@@ -136,8 +145,8 @@ holdout 覆盖和质量门禁是额外的保守约束，防止 100 个开发站�
 新增口径不调整上述 95/97、域数、holdout、未知/无效预测、错误、撤回及请求门禁；默认 strict 的全部原测试保持不变。文档任务的离线验收运行两个完整 QA 套件：
 
 ```powershell
-pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId coverage-docs
-pwsh -NoProfile -File .parallel/Validate-CoverageEvidenceTask.ps1 -TaskId coverage-docs
+pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId assessment-docs
+pwsh -NoProfile -File .parallel/Validate-AssessmentProofTask.ps1 -TaskId assessment-docs
 python -m unittest discover -s eng/browser-use-qa/tests -p 'test_*.py'
 python -m unittest discover -s eng/website-qa -p 'test_*.py'
 ```
@@ -146,7 +155,7 @@ python -m unittest discover -s eng/website-qa -p 'test_*.py'
 
 ### 离线文档链接与配对命令检查
 
-以下检查只读取三个文档及本 checkout 的链接目标；不执行示例中的归一化、评分或真实采集命令，不生成证据文件。它核对本地链接、版本化模式 JSON，以及四条配对命令的模式、输出唯一性和输入保护。新 CLI 的行为仍须由集成后的实现套件验证。
+以下检查只读取三个文档及本 checkout 的链接目标；不执行示例中的归一化、评分或真实采集命令，不生成证据文件。它核对本地链接、版本化模式 JSON，以及四条配对命令的模式、输出唯一性和输入保护。assessment 扩展的 CLI 行为仍须由集成后的实现套件验证。
 
 ```powershell
 @'
