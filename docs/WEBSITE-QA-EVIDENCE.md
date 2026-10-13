@@ -1,6 +1,6 @@
 # 网页 QA：覆盖口径、固定判断与历史证据边界
 
-本指南解释现有 [网页质量契约](../eng/website-qa/CONTRACT.md)、[覆盖与有界证据契约](../eng/website-qa/COVERAGE-EVIDENCE-20261013.md)、[Browser Use 采集](../eng/browser-use-qa/README.md) 与 [离线评分](../eng/website-qa/README.md) 的审核口径。[本轮回归约束](../eng/website-qa/REFLOW-REGRESSIONS-20261013.md) 是缺陷与保护条件的依据。新增字段和模式限于已发布的覆盖契约，原质量、未知、错误与来源门禁保留。
+本指南解释现有 [网页质量契约](../eng/website-qa/CONTRACT.md)、[覆盖与有界证据契约](../eng/website-qa/COVERAGE-EVIDENCE-20261013.md)、[Browser Use 采集](../eng/browser-use-qa/README.md) 与 [离线评分](../eng/website-qa/README.md) 的审核口径。[本轮回归约束](../eng/website-qa/REFLOW-REGRESSIONS-20261013.md) 与 [真实零调用 assessment / 引用版本契约](../eng/website-qa/ASSESSMENT-PROOF-20261013.md) 是缺陷、开发事实及保护条件的公开依据；不引用本机或私有日志/产物。原质量、未知、错误与来源门禁保留。
 
 主控留存的公开开发证据已经包含真实浏览器访问期间的引用重排、导航显示变化和短暂可见源观察。这些历史观察应保留，不能再笼统称“从未访问真实站点”。本指南、诊断摘要和离线合成 fixtures 都不能证明真实翻译已完成，也不能认证百站或质量目标已达成。本任务不运行真实浏览器、网络或模型。
 
@@ -12,11 +12,20 @@
 
 ## 显式覆盖口径 v1：strict 与 automatic-page
 
-公共接口为 `normalize_case`、`evaluate`、`_score_case` 增加关键字 `coverage_scope="strict"`，现有位置参数有效；归一化与评分 CLI 增加 `--coverage-scope strict|automatic-page`，非法模式拒绝。结果记录 `coverageScope={"schemaVersion":1,"mode":"strict"}` 或 `{"schemaVersion":1,"mode":"automatic-page"}`。固定基线尚无新增参数；此文记录集成要求，不代表独立实现任务已通过验收。
+固定基线已有 `normalize_case`、`evaluate`、`_score_case` 的关键字 `coverage_scope="strict"`，现有位置参数有效；归一化与评分 CLI 使用 `--coverage-scope strict|automatic-page`，非法模式拒绝。结果记录 `coverageScope={"schemaVersion":1,"mode":"strict"}` 或 `{"schemaVersion":1,"mode":"automatic-page"}`。此次识别已有生产 assessment 事件，显式 automatic-page 元数据仍为 v1；扩展实现须主控集成验收，文档不认证其他任务已通过。
 
 默认 strict 继续执行全部原覆盖义务与原测试；没有 coverageScope 的旧案例只允许 strict。automatic-page 评分必须取得版本和模式一致的案例元数据，不能静默重解释 strict/旧案例；strict 拒绝 automatic-page 案例。分别生成新归一化文件与新报告，使用同一冻结标签和原始证据，保留旧审核与全部失败。评分 CLI 新增可选 `--output <path>`，指定时独占创建新报告并拒绝已存在路径，省略时保留 stdout 输出；新配对报告使用 `--output`。完整 CLI 示例见 [评分 README](../eng/website-qa/README.md)；automatic-page 完成数不能记作 strict 完成数，文件写出也不表示质量达标。
 
-automatic-page 仅调整正确跳过负页中部分正节点的覆盖义务。先核对全部实际请求、计数及 host 事件/terminal，再验证固定 `expectedPageTranslation=false`、独立且 reviewed 的 `pageAnnotation.needTranslation=false`、实际 boolean `pageDecision=false` 与有效整数 `requestCount=0`。还必须有 `type=capabilities, live=true`，以及至少一个成功的零模型调用本地/native assessment terminal：`type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`。事件的非空 `id` 和本案例 `caseId` 须有效，terminal 身份唯一，全部候选请求与 terminal 一一对应；计数均为明确的非负整数，terminal 的 `requestCount` 总和与顶层 `requestCount` 一致。native candidate 身份不能当模型调用数；缺失/失败终止或 null、boolean、字符串计数不能补成零。空请求/terminal 列表、只有 capabilities 或独立 `assessment` 事件不能证明 automatic-page policy skip；strict 的原零调用负例约定保持不变。非零调用、页面标签分歧、正页误跳过或损坏事件不符合条件。节点缺失、失败、矛盾或 unknown 预测不能取得豁免；捕获、截图、settlement、provenance、错误与撤回仍阻止完成。
+automatic-page 仅调整正确跳过负页中部分正节点的覆盖义务。先核对全部实际请求、计数及 host 事件，再验证固定 `expectedPageTranslation=false`、独立且 reviewed 的 `pageAnnotation.needTranslation=false`、实际 boolean `pageDecision=false` 与有效整数 `requestCount=0`。还必须有 `type=capabilities, live=true`，以及以下一种有效证明：
+
+| 路径 | 必要主机证据 | 请求义务 |
+| --- | --- | --- |
+| 原有零调用 terminal | 至少一个 `type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`；非空 id 与匹配 caseId，terminal 身份唯一，计数为明确非负整数 | 全部 candidate 请求与成功 terminal 一一对应，调用计数总和等于顶层计数 |
+| 实际 assess-only | 原始 `localAssessment` 为 `type=assessment, schemaVersion=1, live=true, needsTranslation=false`，非空 id 与匹配 caseId；归一化保留到 hostEvents | requestIds 与 terminals 都是有效空列表；没有翻译请求，因此没有翻译 terminal |
+
+[公开契约](../eng/website-qa/ASSESSMENT-PROOF-20261013.md) 记载 `3c3ec34` 的真实 GMW 开发捕获确实有后一种匹配的 live negative assessment。主机 `assess` 动作本来就发出 assessment；此前文档的 terminal-only 要求错误排除了这条真实零模型工作路径。归一化不得替换、合成事件或补写成功 terminal；evaluator 单独验证 assessment，其他未知事件类型仍无效。
+
+空列表本身、bare capabilities、缺 capabilities、缺失/损坏 requestIds、无效/缺失 id、case 不匹配、非整数版本（含 boolean）、非 live/正向/unknown assessment 均不能取得 policy skip。native candidate 身份不能当模型调用数；任何已发工作仍必须取得成功 terminal。缺失/失败/非零/损坏 terminal 或 null、boolean、字符串计数不能补成零。非零调用、页面标签分歧、正页误跳过或损坏事件不符合条件。节点缺失、失败、矛盾或 unknown 预测不能取得豁免；捕获、所有截图、settlement、来源归属/provenance、错误与撤回仍阻止完成。默认 strict 的规则和所有旧测试原样保留，旧的缺 capabilities、只有 capabilities 或已发工作缺 terminal 拒绝测试继续通过；新的合成回归须提供真实形状的 fixture assessment。
 
 | 字段/指标 | 两种口径共同保留的含义 |
 | --- | --- |
@@ -28,7 +37,7 @@ automatic-page 仅调整正确跳过负页中部分正节点的覆盖义务。�
 
 案例和 overall/development/holdout 聚合均须呈现新计数，从证据重新计算，不信任输入摘要。accuracy/precision/recall 公式仍使用原混淆矩阵；识别正确不代表翻译完成，policy skip 不产生翻译信用。
 
-GMW 公开开发案例有 412 个独立审核节点；契约提及的九个英文正标签及 FOLLOW 原文须保持。中文主导页面的独立 false 标签和实际零调用跳过，符合条件时可解释自动页的覆盖豁免。英文仍为 true，保留实际 eligible 对应的识别项，显示为未翻译且符合条件时显示为 policy skip；不能把“保持原页”改写成“英文已翻译”。这些节点事实不是已达成质量指标，也不解除未知、错误、撤回或域数门禁。
+GMW 公开开发案例有 412 个独立审核节点；契约提及的九个英文正标签及 FOLLOW 原文须保持。中文主导页面的独立 false 标签和实际零调用跳过，符合条件时可解释自动页的覆盖豁免。英文仍为 true，保留实际 eligible 对应的识别项，显示为未翻译且符合条件时显示为 policy skip；不能把“保持原页”改写成“英文已翻译”。实际 assessment 不解决旧 unknown 历史，不能据此宣布 GMW completed。这些节点事实不是已达成质量指标，也不解除未知、错误、撤回或域数门禁。
 
 ## 先冻结独立源标签，再看逐节点预测
 
@@ -69,11 +78,13 @@ review 的 screenshots 投票须覆盖实际捕获的全部唯一 phase，逐张
 
 ## 2048 行 / 2,000,000 字符：原边界内的证据
 
-覆盖契约记录 main `3c3ec34` 上新 Wiki 开发捕获失败为 `producer_observation_overflow`，并指出基线重复保留每源分片及全源版本的冗余。历史生产观察仍受原 2048 行、2,000,000 字符上限约束；修复需优化传输/保留核算，保留源版本、几何、成员归属、真实扫描 idle、时间戳及过期分片 unknown 保护。本指南不规定尚未审查的新存储结构，不声称该真实捕获已重跑成功。
+覆盖契约记录 main `3c3ec34` 上 Wiki 开发捕获失败为 `producer_observation_overflow`。[引用版本契约](../eng/website-qa/ASSESSMENT-PROOF-20261013.md) 进一步记录 `8517302` 的 site-021 开发尝试：producer 值驻留避免了前一溢出，但 **98 次实际调用、四张图片**后仍因 `independent_source_observation_overflow` 失败。中断前 1844 个源行、零观察到的撤回不等于成功，四张图也不是完整截图审核；旧尝试保持 failed，不借用后来未取得的完成。
 
-丢失历史不能获得完成信用：提高限额、隐藏 overflow、删除源/标签、把 dropped 或隐藏后的空集合补成正确拒绝/完成，都不符合契约。真正丢失或未观察的历史仍 unknown 或明确失败，旧 completed、恢复缓存、最终 idle 或新的覆盖口径不能替代当时的完整证据。
+适配器原导出保留每个最新 source 版本与 retained producer views 引用的版本，重排会使冗余导出超过原边界。引用版本导出（ref-only）仅在满足原 **2048 行、2,000,000 字符**上限需要时精简冗余且未引用的版本；必须保留全部所需的精确 source 版本、represented-owner 版本和真实成员/时间证据。源版本、几何、atomic 成员归属、真实 scan idle、带时间戳观察与过期分片 unknown 保护不变。完整 `sourceNodes` 历史不变，小页和旧 fixtures 导出行为不变，原 fixture1901 版本数仍须通过。
 
-实现验收应在原边界内使用 >1800 独立源的现实规模离线页，同时验证移动与 atomic 成员、真实溢出/丢失、伪造或损坏版本、过期分片及未完成工作。原始测试只读保留，新增回归限于实现任务归属。离线通过只证明回归条件，不消除原失败，也不代表真实 Wiki 或其他网站已完成。
+如果必要见证集合本身超过任一原上限，仍明确溢出失败；不能丢掉所需版本、从当前位置伪造历史见证、合并不同源版本或清零 dropped。丢失历史不能获得完成信用：提高限额、隐藏 overflow、删除源/标签、把 dropped 或隐藏后的空集合补成正确拒绝/完成，都不符合契约。真正丢失或未观察的历史仍 unknown 或明确失败，不能推断缺失的负 eligibility；旧 completed、恢复缓存、最终 idle 或新的覆盖口径不能替代当时的完整证据。
+
+实现验收应在原边界内使用 >1800 独立源的现实规模离线页，同时验证大页移动/ref-only、atomic 归属、必要见证真正溢出、unknown 丢失、伪造或损坏版本、过期分片及未完成工作。原始测试只读保留，新增回归限于实现任务归属。离线通过只证明回归条件，不消除原失败，也不代表真实 Wiki 或其他网站已完成。
 
 ## 保留显示失败与回归保护
 
