@@ -726,3 +726,116 @@ function movedProducerFixture(atomic) {
 const movementFixtures = { rejected: movedProducerFixture(false), atomic: movedProducerFixture(true) };
 if (process.argv.includes("--movement-fixture")) console.log("MOVEMENT_FIXTURE=" + JSON.stringify(movementFixtures));
 console.log("adapter independent Text reparent/geometry/admission reset/atomic owner movement checks passed");
+
+// Offline article-scale transport. 1,900 independently traversed Text sources,
+// inline atomic groups and four pieces per group reproduce the redundant rows
+// of a long reference article without importing real site labels or captures.
+function boundedProducerFixture(count = 1900, oversized = false) {
+  let selected;
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, childNodes: [body], body, visibilityState: "visible", title: "Offline long article",
+    createRange: () => ({ selectNodeContents(node) { selected = node; },
+      getClientRects: () => [{ x: selected.x, y: selected.y, width: 220, height: 24 }] }),
+    addEventListener() {}, removeEventListener() {} };
+  body.parentNode = document;
+  const nodes = [], records = [];
+  for (let i = 0; i < count; i++) {
+    const parent = { nodeType: 1, tagName: i % 10 ? "SPAN" : "P", childNodes: [], parentNode: body,
+      parentElement: body, hasAttribute: () => false, getAttribute: () => null, getRootNode: () => document };
+    const text = oversized === true ? "Long independently authored source. ".repeat(61000) :
+      `Article section ${i}: Independent history of scientific institutions and public reference material, ` +
+      "including dates, inline citations, navigation entries and explanatory prose.";
+    const node = { nodeType: 3, nodeValue: text, parentNode: parent, parentElement: parent,
+      isConnected: true, x: i % 10 * 12, y: Math.floor(i / 10) * 28 };
+    parent.childNodes.push(node); body.childNodes.push(parent); nodes.push(node);
+    records.push({ node, source: text, lastWritten: text });
+  }
+  const state = { records: new Map(), blocks: new Map(), jobs: 0, pending: 0, scanning: false,
+    assessed: null, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  const session = { inspect: () => state, configure: () => true, mutated() {}, receive: () => true,
+    control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const context = { document, location: { href: "https://offline.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console,
+    getComputedStyle: node => ({ display: node.display || "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "offline", createRenderedTextTester: () => () => true,
+      createPageAutoSession: () => session, createOpenRootObserver: () => ({ configure() {}, found() {}, replace() {}, dispose() {} }) },
+    MutationObserver: function () {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {} };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa;
+  qa.sample("independent-article");
+  state.assessed = true; state.jobs = 2; state.pending = 1; state.scanning = true;
+  for (let i = 0; i < count; i += 10) {
+    const members = records.slice(i, i + 10), record = members[0];
+    for (const member of members) {
+      state.records.set(member.node, member);
+      if (member !== record) member.node.parentElement.display = "none";
+    }
+    for (let j = 0; j < (oversized === "pieces" ? 240 : 4); j++) {
+      const id = `article-piece-${i}-${j}`;
+      state.blocks.set(id, { id, record, atomicRecords: members,
+        text: `Translated section ${i}, piece ${j}.`.repeat(oversized === "pieces" ? 500 : 1),
+        piece: { complete: false, failed: false } });
+    }
+  }
+  const partial = qa.sample("article-in-progress");
+  state.jobs = state.pending = 0; state.scanning = false;
+  for (const block of state.blocks.values()) block.piece.complete = true;
+  const complete = qa.sample("article-idle");
+  if (count === 1900 && !oversized) {
+    assert.equal(complete.producerObservations.length, count);
+    assert.equal(complete.producerObservationDropped, 0);
+    assert.equal(complete.independentSourceObservationDropped, 0);
+    assert.equal(complete.producerObservationTransport.schemaVersion, 1);
+    assert.equal(Object.keys(complete.producerObservationTransport.values).length, count / 10 * 4 + 1);
+    const wireCharacters = JSON.stringify(complete.producerObservations).length +
+      JSON.stringify(complete.producerObservationTransport).length;
+    assert.ok(wireCharacters <= 2000000);
+    assert.ok(JSON.stringify(complete.independentSourceObservations).length <= 2000000);
+    assert.ok(complete.independentSourceObservations.length <= 2048);
+    // Only one owner moves during admission reset; historic atomic ownership
+    // must keep its original locator, geometry, source version and timestamp.
+    state.assessed = null;
+    for (const node of nodes) node.parentElement.display = "none";
+    const node = nodes[0], old = node.parentElement, moved = { ...old, childNodes: [] };
+    body.childNodes.push(moved);
+    moved.display = "block";
+    old.childNodes.splice(old.childNodes.indexOf(node), 1); moved.childNodes.push(node);
+    node.parentElement = node.parentNode = moved; node.x = 77; node.y = 111;
+    qa.sample("article-unassessed-movement"); moved.display = "none";
+    const historical = qa.sample("article-hidden");
+    assert.equal(historical.producerObservationDropped, 0);
+    assert.equal(historical.independentSourceObservationDropped, 0);
+    assert.equal(historical.independentSourceObservations.length, count + 1);
+    // Caller mutation must not change retained interned definitions or sources.
+    const original = JSON.stringify(historical.producerObservationTransport);
+    complete.producerObservationTransport.values[Object.keys(complete.producerObservationTransport.values)[0]].text = "tamper";
+    assert.equal(JSON.stringify(qa.sample("article-hidden-again").producerObservationTransport), original);
+    qa.dispose();
+    return JSON.parse(JSON.stringify({ partial, historical, wireCharacters }));
+  }
+  assert.ok(complete.producerObservationDropped > 0 || complete.independentSourceObservationDropped > 0);
+  assert.ok(complete.producerObservations.length <= 2048);
+  assert.ok(complete.independentSourceObservations.length <= 2048);
+  qa.dispose(); return JSON.parse(JSON.stringify(complete));
+}
+const boundedFixtures = boundedProducerFixture();
+const rowOverflowFixture = boundedProducerFixture(2100);
+const characterOverflowFixture = boundedProducerFixture(1, true);
+const pieceOverflowFixture = boundedProducerFixture(1, "pieces");
+assert.equal(pieceOverflowFixture.independentSourceObservationDropped, 0);
+assert.ok(pieceOverflowFixture.producerObservationDropped > 0);
+if (process.argv.includes("--bounded-fixture")) console.log("BOUNDED_FIXTURE=" + JSON.stringify({
+  ...boundedFixtures, rowOverflow: rowOverflowFixture,
+  pieceOverflow: { at: pieceOverflowFixture.at, producerObservations: pieceOverflowFixture.producerObservations,
+    producerObservationDropped: pieceOverflowFixture.producerObservationDropped,
+    independentSourceObservations: pieceOverflowFixture.independentSourceObservations,
+    independentSourceObservationDropped: pieceOverflowFixture.independentSourceObservationDropped,
+    sourceNodes: pieceOverflowFixture.sourceNodes },
+  characterOverflow: { at: characterOverflowFixture.at, producerObservations: characterOverflowFixture.producerObservations,
+    producerObservationDropped: characterOverflowFixture.producerObservationDropped,
+    independentSourceObservations: characterOverflowFixture.independentSourceObservations,
+    independentSourceObservationDropped: characterOverflowFixture.independentSourceObservationDropped } }));
+console.log("adapter 1900-source interned historical/atomic transport and true row/character overflow checks passed");

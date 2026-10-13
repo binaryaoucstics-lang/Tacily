@@ -756,6 +756,60 @@ def _source_version_matches(source, reference, indexed, independent, observed_at
     return indexed.get((source["id"], at, reference["sequence"])) == _source_snapshot(source)
 
 
+def _expand_producer_transport(value, indexed):
+    """Decode internal adapter references; the public v1 case stays unchanged.
+
+    The two original budgets apply to actual retained wire data, including all
+    work/piece definitions. Source definitions are charged to the independent
+    version budget. Every reference must resolve before any evidence is imported.
+    """
+    transport = value.get("producerObservationTransport")
+    if (not isinstance(transport, dict) or set(transport) != {"schemaVersion", "values"}
+            or type(transport["schemaVersion"]) is not int or transport["schemaVersion"] != 1
+            or not isinstance(transport["values"], dict) or indexed is None):
+        raise CaptureError("invalid_producer_observation_transport")
+    definitions = transport["values"]
+    if any(not isinstance(key, str) or not re.fullmatch(r"[1-9]\d*", key)
+           or not isinstance(item, dict) for key, item in definitions.items()):
+        raise CaptureError("invalid_producer_observation_transport")
+    used, expanded = set(), []
+
+    def definition(reference):
+        if type(reference) is not int or reference <= 0 or str(reference) not in definitions:
+            raise CaptureError("invalid_producer_observation_transport_reference")
+        used.add(str(reference))
+        return definitions[str(reference)]
+
+    def source(source_id, reference):
+        if (not isinstance(source_id, str) or not isinstance(reference, dict)
+                or set(reference) != {"at", "sequence"}
+                or type(reference["sequence"]) is not int or reference["sequence"] <= 0):
+            raise CaptureError("invalid_producer_observation_transport_reference")
+        snapshot = indexed.get((source_id, _observation_time(reference["at"]), reference["sequence"]))
+        if snapshot is None:
+            raise CaptureError("invalid_producer_observation_transport_reference")
+        return snapshot
+
+    fields = {"sourceId", "phase", "at", "sequence", "sourceObservation",
+              "representedSourceObservation", "rendered", "representedBy", "pageDecision",
+              "work", "eligible", "pieces"}
+    for row in value["producerObservations"]:
+        if not isinstance(row, dict) or set(row) != fields or not isinstance(row["pieces"], list):
+            raise CaptureError("invalid_producer_observation_transport")
+        snapshot = source(row["sourceId"], row["sourceObservation"])
+        owner = None
+        if row["representedBy"] is not None:
+            owner = source(row["representedBy"], row["representedSourceObservation"])
+        elif row["representedSourceObservation"] is not None:
+            raise CaptureError("invalid_producer_observation_transport_reference")
+        expanded.append({**row, "source": snapshot, "sourceText": snapshot["sourceText"],
+                         "representedSource": owner, "work": definition(row["work"]),
+                         "pieces": [definition(reference) for reference in row["pieces"]]})
+    if used != definitions.keys():
+        raise CaptureError("invalid_producer_observation_transport")
+    return expanded
+
+
 def record_producer_observations(observations, value, source_history, prediction_history):
     """Validate and import actual intervening producer views into the v1 interface.
 
@@ -766,14 +820,24 @@ def record_producer_observations(observations, value, source_history, prediction
     """
     rows = value.get("producerObservations")
     dropped = value.get("producerObservationDropped")
+    retained_characters = len(encode(rows))
+    if "producerObservationTransport" in value:
+        retained_characters += len(encode(value["producerObservationTransport"]))
     if (not isinstance(rows, list) or len(rows) > 2048
-            or len(encode(rows)) > 2000000 + 4096
+            or retained_characters > 2000000 + 4096
             or type(dropped) is not int or dropped < 0):
         raise CaptureError("invalid_producer_observations")
     if dropped:
         raise CaptureError("producer_observation_overflow")
     sample_at = _observation_time(value.get("at"))
     indexed = _independent_source_versions(value, source_history, sample_at)
+    if "producerObservationTransport" in value:
+        rows = _expand_producer_transport(value, indexed)
+    first_versions = {}
+    for member, at, sequence in indexed or ():
+        order = (at, sequence)
+        if member not in first_versions or order < first_versions[member]:
+            first_versions[member] = order
     prepared, seen = [], set()
     for row in rows:
         if not isinstance(row, dict):
@@ -838,8 +902,8 @@ def record_producer_observations(observations, value, source_history, prediction
             matched = matched and all(member in source_history
                 and _observation_time(source_history[member].get("firstSeen")) <= at for member in members)
             if indexed is not None:
-                matched = matched and all(any(key[0] == member and (key[1], key[2]) <= (at, row["sequence"])
-                                             for key in indexed) for member in members)
+                matched = matched and all(member in first_versions
+                    and first_versions[member] <= (at, row["sequence"]) for member in members)
             matched = matched and piece["sourceEvidence"] == "matched" and not piece.get("auditIssue")
         if row["eligible"] is not (True if pieces else False if idle else None):
             raise CaptureError("invalid_producer_observation_eligibility")
