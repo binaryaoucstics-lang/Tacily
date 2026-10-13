@@ -4,6 +4,16 @@
 
 正式页面判断固定使用 **fixed50（中文正文占比阈值 50%）**：采集端的 session 配置与 QA 主机规则判断均使用该基线。产品可配置比例是用户偏好，不能据此调整正式评分的判断口径或更改用户设置。正文识别、站点规则、手动控制、模型/请求预算与期限仍按原接口执行。
 
+## 捕获与覆盖口径分开记录
+
+[覆盖与有界证据契约](../website-qa/COVERAGE-EVIDENCE-20261013.md) 发布 `coverageScope={"schemaVersion":1,"mode":"strict"}` / `{"schemaVersion":1,"mode":"automatic-page"}`，由离线归一化与评分明确选择。`normalize_case`、`evaluate`、`_score_case` 的新增关键字为 `coverage_scope="strict"`；两项离线 CLI 使用 `--coverage-scope strict|automatic-page`。这些是公共集成要求，本固定基线尚无新增参数，文档任务不认证其他任务已实现。capture 不新增覆盖开关，不更改生产识别、独立标签或原始捕获。
+
+strict 是默认原覆盖义务，旧的无口径元数据案例只允许 strict。automatic-page 必须有匹配的版本/模式元数据，不能静默使用旧或 strict 案例；strict 也拒绝 automatic-page 案例。只有固定 `expectedPageTranslation=false`、独立已审核的页面 false 标签、实际 `pageDecision=false`，且全部请求核算后证明有效零模型调用及合法 host terminal/事件的负页，才允许调整部分正节点的覆盖义务。automatic-page 必须有 `type=capabilities, live=true`，以及至少一个成功的零模型调用本地/native assessment terminal（`type=terminal, success=true, requestCount=0, failedCount=0, cacheHits>=0`）。事件须有非空 `id` 和本案例 `caseId`；terminal 身份唯一，全部候选请求与 terminal 一一对应，计数是明确的非负整数且总和与顶层 `requestCount=0` 一致。空 terminal 列表、只有 capabilities 或独立 `assessment` 事件均不能证明 policy skip；strict 的原规则与测试不变。正页误跳过、标签分歧、非零调用、损坏计数/事件、节点预测缺失/失败/矛盾/unknown 均不能取得 policy skip。截图、真实最终 idle、来源、错误、未知与撤回门禁仍适用。
+
+正确跳过不会把英文改标为中文或已翻译。GMW 公开开发案例有 412 个独立审核节点，契约提及的九个英文正标签及 FOLLOW 原文仍须保留。实际生产 eligible 决定原混淆矩阵项；未翻译英文列入 `unTranslatedPositiveNodes`，满足全部 automatic-page 条件的子集另列 `policySkippedPositiveNodes`。`confirmedOmissions` 只在该显式口径下调整必须覆盖的遗漏，strict 保留原含义。TP/TN/FP/FN、accuracy/precision/recall、`annotatedPositiveNodes`、`translatedPositiveNodes` 与 `translationCoverage` 公式不变；policy skip 不产生 TP 或翻译完成信用，不从覆盖率分母删除。案例与 overall/development/holdout 均须报告新计数，并从证据重新计算。
+
+保留同一原始 case、冻结 review 和全部历史尝试，分别生成新的 strict 与 automatic-page 归一化文件、案例数组及报告；CLI 示例和兼容性规则见 [离线评分 README](../website-qa/README.md)。评分 CLI 的可选 `--output <path>` 以独占创建方式写入报告，拒绝已存在路径；省略时仍输出 stdout。新配对报告使用 `--output`，不以重定向覆盖旧文件。`review.py` 的截图审核结果不自动选择新覆盖口径。两种报告不能互相冒充；95/97 质量、100 完成域、30 完成 holdout、两类页面、未知/错误/撤回与请求门禁均按原要求执行。正确零调用跳过可以验证负页决策，不表示翻译了英文节点。
+
 当前 `predictions` 表示最后采样时仍在生产 session 中的块；全部观察历史保存在
 `predictionHistory` 和原始 JSONL。重排后已被新块替代的旧 pending ID 不再冒充当前漏译，
 历史中没有独立源证据的选择仍会阻止完成。sourceNodes 保留完整历史，新增
@@ -54,7 +64,7 @@ python eng/browser-use-qa/capture.py `
 
 页面 `send()` 创建带 RPC ID 的可审计 outbound 队列。Python 转发生产 `pageAutoCandidate`，仅添加 tabId/browserWindowId/frameId/siteHost；不改 blocks、samples、识别规则或译文。host 的序列化 `packet` 原样交给生产 session.receive，传输接受响应只解开对应 Promise。候选终止必须由相同 host 请求 ID 的 `terminal` 证明；取消使用原候选的 host ID，保留生产取消帧。EOF、错误、额度/授权失败、缺失终止、超时、域外跳转都不能当成功。前端本地跳过时另调用生产提取器取得 samples/statistics，转发 `assess` 规则核对，不创建翻译请求、不将该结果当人类真值。
 
-`requestIds` 保留全部生产 native candidate 的主机身份，不表示云模型调用次数。负页也可能发送 candidate 并收到生产 assessment 帧；每个候选仍必须有相同身份的成功 terminal，且 requestCount 必须是明确的非负整数。只有实际 requestCount 为 0 才证明没有模型调用；缺字段、null、boolean、字符串、失败或缺失 terminal 都不能补成 0。独立 `assess` 仅由 assessment 事件结束，不能结束 candidate RPC。真实模型调用、failed 节点、未解决工作和撤回仍阻止完成。
+`requestIds` 保留全部生产 native candidate 的主机身份，不表示云模型调用次数。负页也可能发送 candidate 并收到生产 assessment 帧；每个候选仍必须有相同身份的成功 terminal，且 requestCount 必须是明确的非负整数。只有实际 requestCount 为 0 才证明没有模型调用；缺字段、null、boolean、字符串、失败或缺失 terminal 都不能补成 0。独立 `assess` 仅由 assessment 事件结束，不能结束 candidate RPC，也不能单独满足 automatic-page 所需的成功零调用 terminal。live capabilities 与至少一个身份和全部计数有效的成功 terminal 是该口径的必要证明；文档不要求伪造事件或改写原始捕获，无此证据时不授予 policy skip。真实模型调用、failed 节点、未解决工作和撤回仍阻止完成。
 
 ### 帧批量传送与期限
 
@@ -87,6 +97,14 @@ python eng/browser-use-qa/capture.py `
 
 `visitSuccess` 与 `completed` 分离。外语页必须 live、真实 requestCount>0、每候选成功终止、逐节点完成、截图齐备与语义稳定；模拟、全缓存无实际模型调用、失败或缺终止均不满足。目标语言页要求实际 false 决策、明确成功终止的 native 候选与零模型请求。`evidenceReady=true` 是等待截图审核的完整证据，初始 `completed=false`。
 
+## 原有历史观察上限与溢出失败
+
+覆盖契约保留 main `3c3ec34` 上新 Wiki 开发捕获的 `producer_observation_overflow` 失败。契约指出基线存在每源重复分片和全源版本保留的冗余；其传输/保留优化仍须遵守原 **2048 行、2,000,000 字符**上限。本指南不指定新的存储结构，也不宣称该失败已经修复。
+
+完整观察必须保留源版本、几何、成员归属、真实扫描 idle 与有界的时间戳证据，继续拒绝过期分片。真正溢出、丢失或不完整的历史保持 unknown 或明确失败：不能压掉 overflow、提高限额、把 dropped 当成功，也不能将后来隐藏或空集合解释为历史 eligible=false/completed=true。atomic 成员移动仍按当时实际身份与完整成员证据审核；当前完成或旧缓存不能补齐丢失历史。覆盖口径不会改变这些来源要求。
+
+离线验收要求使用 >1800 独立源的现实规模合成页，在原上限内核对传输，并同时检查移动/atomic 成员、真实溢出或丢失、伪造版本、损坏/过期证据与未完成工作。新增回归由对应实现任务在其归属内添加；本任务保留全部原测试。通过离线回归不代表重新运行了 Wiki、原始失败已消除或百站/质量门槛已达到。
+
 ## 独立审核（离线）
 
 人类先依据独立原文、角色、位置和源截图标注，并在逐节点查看 predictions 前冻结页面与全部历史源标签及其证据版本；新源或源版本也须独立标注。无法判断的保持 unknown，不根据 eligible/completed、缓存或审核票生成真值，也不使用 holdout 调参。准备外部 review JSON：
@@ -117,8 +135,10 @@ python eng/browser-use-qa/review.py `
 ## 离线验收
 
 ```powershell
-pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId evidence-guide
+pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId coverage-docs
+pwsh -NoProfile -File .parallel/Validate-CoverageEvidenceTask.ps1 -TaskId coverage-docs
 python -m unittest discover -s eng/browser-use-qa/tests -p 'test_*.py'
+python -m unittest discover -s eng/website-qa -p 'test_*.py'
 ```
 
 测试包括 mock CLI JSON/失败/分块注入（转义、非 BMP、中文与 UTF-16 边界），批量交付的原始帧/交错 RPC/单次确认/顺序、完整包装预算边界、大包安全数据分块、错误与逐事件日志、case 期限与子进程超时，Promise 空对象及任务 completed/failed/timeout 回归，负例只有完整 probe 才能转发 assess，合成 DOM 可见候选（脚本/样式/隐藏节点不生成证据、后来显示/隐藏/脱离保留完整历史、预测 unmatched）/稳定 ID/撤回/RPC/监听器，独立 JSONL 严格 mock 进程（拒绝空身份/重复请求、核验响应关联、同一主机连续两个站点），实际 Windows 句柄占用与模拟替换冲突/耗尽/旧证据保留/失败堆栈，持续 rect/locator/顺序/身份运动的语义稳定、所有替换源身份/unknown 历史保留、13 个 eligible 未翻译候选的 skipped 负例零翻译请求且捕获全部截图、负例文本变化/failed/未解决任务仍阻止稳定、文本/数量变化和未解决任务阻止稳定、完整页独立截图/哈希/审核门槛，逐站截图阶段、失败恢复、冻结/历史保护、完成门槛与独立审核。测试临时目录在 owned tests 内并自动清理。实际验收日志和修复前 trace 留在忽略目录，原主控审查失败报告保持不动；本任务的这些离线测试不执行真实 Browser Use、网络或模型，不改变已有真实访问的历史记录。
