@@ -44,7 +44,12 @@ the retained provenance hash (evaluator). Every and only every original sourceId
 has one unique typed outcome row with exact text hash. Both implementations check
 the full shape, schema/int/bool types, identities, hashes, phases and nonempty
 notes. Evidence phases must exist among actually reviewed original screenshots;
-positive visible outcomes need an output phase, never only before/before-full.
+Every visible outcome, including unchanged, needs an output phase. The accepted
+output phases are after, after-full, stable, stable-full, scroll-after,
+return-after, reflow-after, disclosure-open and disclosure-restored, plus
+stable-refresh-N or stable-full-refresh-N where N is a nonzero decimal integer
+without a leading zero. before, before-full and scroll-before alone do not
+establish output review. A custom non-before phase is not output proof.
 No inferred votes, missing rows or forged/current-source substitution.
 
 Outcomes: `correct_translation`, `partial_translation`, `incorrect_translation`,
