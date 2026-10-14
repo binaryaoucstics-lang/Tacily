@@ -957,3 +957,296 @@ if (process.argv.includes("--version-export-fixture")) {
     characterPressure, membership }));
   console.log("adapter reference-only reflow and necessary witness overflow checks passed");
 }
+
+// Append-only source lifetime fixtures. No production or original fixture state
+// is changed. These model the exact nested childList witnesses, including the
+// completed old Text being detached while its groupElement remains an ancestor.
+function sourceEpochFixture(mode, source = "Browse", replacement = "Search news", translated = "浏览") {
+  let callback, observerFactory, onMutation = () => {};
+  const observedOptions = [];
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, body, childNodes: [body], title: "Offline source epochs", visibilityState: "visible",
+    createRange: () => ({ selectNodeContents() {}, getClientRects: () => [{ x: 0, y: 10, width: 200, height: 24 }] }),
+    addEventListener() {}, removeEventListener() {} };
+  body.parentNode = document;
+  function element(tag, parent) {
+    const node = { nodeType: 1, tagName: tag, childNodes: [], parentNode: parent, parentElement: parent,
+      hasAttribute: () => false, getAttribute: () => null };
+    parent.childNodes.push(node); return node;
+  }
+  function text(value, parent) {
+    const node = { nodeType: 3, nodeValue: value, parentNode: parent, parentElement: parent, isConnected: true };
+    parent.childNodes.push(node); return node;
+  }
+  const group = element("A", body), span = element("SPAN", group), node = text(source, span);
+  const fact = ["date", "blank-fact", "partial-remove"].includes(mode)
+    ? text("2026-10-13", element("TIME", group)) : null;
+  const peer = mode === "atomic-move" ? text("Associated fact.", element("SPAN", group)) : null;
+  const state = { records: new Map(), blocks: new Map(), jobs: 0, pending: 0, scanning: false,
+    assessed: true, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  const session = { inspect: () => state, configure: () => true, mutated: changes => onMutation(changes),
+    receive: () => true, control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const context = { document, location: { href: "https://offline.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console,
+    getComputedStyle: node => ({ display: node.display || "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "offline", createRenderedTextTester: () => () => true,
+      createPageAutoSession: () => session, createOpenRootObserver: value => { callback = value.onMutations;
+        observerFactory = value.createObserver;
+        return { configure() {}, found() {}, replace() {}, dispose() {} }; } },
+    MutationObserver: function () { this.observe = (_tree, options) => observedOptions.push(options); this.disconnect = () => {}; },
+    addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {} };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa;
+  const originalOptions = { subtree: true, childList: true, characterData: true, attributes: true };
+  const evidenceObserver = observerFactory(() => {}); evidenceObserver.observe(document, originalOptions); evidenceObserver.disconnect();
+  assert.equal(observedOptions[0].characterDataOldValue, true);
+  assert.equal(Object.hasOwn(originalOptions, "characterDataOldValue"), false);
+  for (const key of Object.keys(originalOptions)) assert.equal(observedOptions[0][key], originalOptions[key]);
+  const baseline = qa.sample("independent-source");
+  const id = baseline.nodes.find(row => row.sourceText === source).id;
+  const record = { node, source, lastWritten: translated, groupElement: group, groupHash: "same-hash",
+    groupText: source + (fact?.nodeValue || "") + (peer?.nodeValue || ""), pieces: [{ complete: true, failed: false }] };
+  node.nodeValue = translated; state.records.set(node, record);
+  const block = { id: "old-piece", record, text: source, piece: record.pieces[0] };
+  if (peer) {
+    const member = { node: peer, source: peer.nodeValue, lastWritten: peer.nodeValue, groupElement: group };
+    state.records.set(peer, member); block.atomicRecords = [record, member];
+  }
+  state.blocks.set(block.id, block);
+  const completed = qa.sample("old-completed"), snapshots = [completed];
+  const oldCompleted = JSON.stringify(completed);
+  function replace(parent, old, value) {
+    const next = { nodeType: 3, nodeValue: value, parentNode: parent, parentElement: parent, isConnected: true };
+    const index = parent.childNodes.indexOf(old);
+    const previousSibling = parent.childNodes[index - 1] || null, nextSibling = parent.childNodes[index + 1] || null;
+    parent.childNodes.splice(index, 1, next); old.isConnected = false; old.parentNode = old.parentElement = null;
+    return { next, mutation: { type: "childList", target: parent, addedNodes: [next], removedNodes: [old],
+      previousSibling, nextSibling } };
+  }
+  let current = node;
+  if (["nested", "batch", "short", "character-batch"].includes(mode)) {
+    onMutation = () => { state.blocks.clear(); state.records.clear(); state.jobs = 1; state.assessed = null; };
+    if (mode === "character-batch") {
+      node.nodeValue = source;
+      callback([{ type: "characterData", target: node, oldValue: translated },
+        { type: "characterData", target: node, oldValue: source },
+        { type: "characterData", target: node, oldValue: replacement }]);
+    } else {
+      const rollback = replace(span, node, source), changed = replace(span, rollback.next, replacement);
+      if (mode === "nested") {
+        callback([rollback.mutation, changed.mutation]); snapshots.push(qa.sample("new-source-visible"));
+        const returned = replace(span, changed.next, source);
+        callback([returned.mutation]); current = returned.next;
+      } else {
+        const returned = replace(span, changed.next, source);
+        callback([rollback.mutation, changed.mutation, returned.mutation]); current = returned.next;
+      }
+    }
+    snapshots.push(qa.sample("new-lifetime-unassessed"));
+    const fresh = { node: current, source, lastWritten: source, groupElement: group, groupHash: "same-hash",
+      groupText: source, pieces: [{ complete: false, failed: false }] };
+    state.records.set(current, fresh); state.assessed = true;
+    state.blocks.set("new-piece", { id: "new-piece", record: fresh, text: source, piece: fresh.pieces[0] });
+    snapshots.push(qa.sample("new-lifetime-incomplete"));
+    current.nodeValue = fresh.lastWritten = translated; fresh.pieces[0].complete = true; state.jobs = 0;
+    snapshots.push(qa.sample("new-lifetime-completed"));
+    current.nodeValue = fresh.lastWritten = source;
+    snapshots.push(qa.sample("new-lifetime-withdrawal"));
+  } else if (mode === "date") {
+    fact.nodeValue = "2026-10-14";
+    onMutation = () => { node.nodeValue = source; state.records.clear(); state.blocks.clear(); state.assessed = null; };
+    callback([{ type: "characterData", target: fact, oldValue: "2026-10-13" }]);
+    snapshots.push(qa.sample("changed-inline-date"));
+  } else if (mode === "remove") {
+    span.childNodes = []; node.isConnected = false; node.parentNode = node.parentElement = null;
+    onMutation = () => { state.records.clear(); state.blocks.clear(); state.assessed = null; };
+    callback([{ type: "childList", target: span, removedNodes: [node], addedNodes: [], previousSibling: null, nextSibling: null }]);
+    snapshots.push(qa.sample("missing-source"));
+  } else if (mode === "blank-fact" || mode === "partial-remove") {
+    if (mode === "blank-fact") {
+      fact.nodeValue = "";
+      callback([{ type: "characterData", target: fact, oldValue: "2026-10-13" }]);
+    } else {
+      const parent = fact.parentElement; parent.childNodes = []; fact.isConnected = false;
+      fact.parentNode = fact.parentElement = null;
+      callback([{ type: "childList", target: parent, removedNodes: [fact], addedNodes: [], previousSibling: null, nextSibling: null }]);
+    }
+    snapshots.push(qa.sample("missing-fact"));
+  } else if (mode === "regroup" || mode === "atomic-move") {
+    const next = element("P", body), oldChildren = Array.from(group.childNodes);
+    group.childNodes = []; next.childNodes = oldChildren;
+    for (const child of oldChildren) child.parentNode = child.parentElement = next;
+    onMutation = () => { for (const member of state.records.values()) member.groupElement = next; };
+    callback([{ type: "childList", target: group, removedNodes: oldChildren, addedNodes: [], previousSibling: null, nextSibling: null },
+      { type: "childList", target: next, removedNodes: [], addedNodes: oldChildren, previousSibling: null, nextSibling: null }]);
+    snapshots.push(qa.sample("unchanged-regroup"));
+    current.nodeValue = record.lastWritten = source;
+    snapshots.push(qa.sample("regroup-withdrawal"));
+  } else {
+    let copy;
+    if (mode === "whole-copy") {
+      const nextGroup = element("A", body), nextSpan = element("SPAN", nextGroup);
+      current = text(source, nextSpan);
+      body.childNodes = [nextGroup]; group.parentNode = group.parentElement = null; node.isConnected = false;
+      copy = { mutation: { type: "childList", target: body, removedNodes: [group], addedNodes: [nextGroup],
+        previousSibling: null, nextSibling: null }, next: current };
+      record.nextGroup = nextGroup;
+    } else copy = replace(span, node, mode === "translated-copy" ? translated : source);
+    current = copy.next;
+    onMutation = () => { state.records.delete(record.node); record.node = current; record.lastWritten = current.nodeValue;
+      if (record.nextGroup) record.groupElement = record.nextGroup;
+      state.records.set(current, record); };
+    callback([copy.mutation]); snapshots.push(qa.sample("unchanged-replacement"));
+    if (mode === "translated-copy") {
+      current.nodeValue = record.lastWritten = source;
+      snapshots.push(qa.sample("copy-withdrawal"));
+    }
+  }
+  assert.equal(JSON.stringify(completed), oldCompleted, "earlier capture was rewritten");
+  const final = snapshots.at(-1), changes = final.events.filter(event => event.type === "source-change");
+  const withdrawals = final.events.filter(event => event.type === "retraction");
+  if (["nested", "batch", "short", "character-batch", "date"].includes(mode)) {
+    assert.ok(changes.some(event => event.sourceId === id && event.schemaVersion === 1));
+    assert.ok(changes.flatMap(event => event.witnesses).some(witness => witness.afterSourceText.includes(
+      mode === "date" ? "2026-10-14" : replacement)));
+    const later = final.nodes.find(row => row.sourceText === source);
+    assert.notEqual(later.id, id);
+    assert.equal(final.sourceNodes.find(row => row.id === id).displayedText, translated);
+    assert.equal(final.producerObservations.find(row => row.sourceId === id).pieces[0].completed, true);
+    if (mode !== "date") {
+      assert.equal(withdrawals.length, 1);
+      assert.equal(withdrawals[0].sourceId, later.id);
+      const incomplete = snapshots.find(value => value.nodes.some(row => row.id === later.id)
+        && value.predictions.some(piece => piece.id === "new-piece" && !piece.completed));
+      assert.ok(incomplete, "new epoch borrowed old completion");
+    } else assert.equal(withdrawals.length, 0);
+  } else {
+    assert.equal(changes.length, 0);
+    const missing = ["remove", "blank-fact", "partial-remove"].includes(mode);
+    assert.equal(withdrawals.length, missing ? 0 : 1);
+    if (!missing) assert.equal(withdrawals[0].sourceId, id);
+  }
+  qa.dispose(); return JSON.parse(JSON.stringify({ sourceId: id, snapshots }));
+}
+const sourceEpochFixtures = {};
+for (const mode of ["nested", "batch", "short", "character-batch", "date", "remove", "blank-fact", "partial-remove", "regroup", "atomic-move",
+    "unchanged-copy", "translated-copy", "whole-copy"]) sourceEpochFixtures[mode] = sourceEpochFixture(mode, "Browse",
+      mode === "short" ? "X" : "Search news");
+// Varied independent text proves this is a DOM/source rule, with no site phrase
+// or hostname branch, minimum length heuristic or source digest authority.
+sourceEpochFixtures.varied = sourceEpochFixture("batch", "Open catalogue", "7", "打开目录");
+if (process.argv.includes("--source-epochs-fixture")) console.log("SOURCE_EPOCHS_FIXTURE=" + JSON.stringify(sourceEpochFixtures));
+console.log("adapter nested replacements/source epochs/unchanged rollback/factual neighbour checks passed");
+
+// Product writes and authored edits can share an observer delivery. Capture the
+// actual writer commits, not inbound text or a guessed language/hostname.
+function sourceWriteFixture(mode) {
+  let callback, traversalAtMutation = 0, reads = 0;
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, body, childNodes: [body], title: "Offline write provenance", visibilityState: "visible",
+    createRange: () => ({ selectNodeContents() {}, getClientRects: () => [{ x: 0, y: 10, width: 200, height: 24 }] }),
+    addEventListener() {}, removeEventListener() {} };
+  body.parentNode = document;
+  function text(source) {
+    const children = [], group = { nodeType: 1, tagName: "P", parentNode: body, parentElement: body,
+      get childNodes() { reads++; return children; }, hasAttribute: () => false, getAttribute: () => null };
+    const node = { nodeType: 3, nodeValue: source, parentNode: group, parentElement: group, isConnected: true };
+    children.push(node); body.childNodes.push(group); return node;
+  }
+  const source = ["identity", "authored-prefix"].includes(mode) ? "FOIA" : mode === "literal" ? "C++" : "Foreign heading";
+  const node = text(source), authored = text("Independent authored heading");
+  // Unrelated groups must not be traversed for an own-write-only batch.
+  for (let i = 0; i < 60; i++) text("Unrelated independent source " + i);
+  const state = { records: new Map(), blocks: new Map(), jobs: 0, pending: 0, scanning: false,
+    assessed: true, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  let environment;
+  const session = { inspect: () => state, configure: () => true, mutated: () => { traversalAtMutation = reads; },
+    receive: () => true, control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const writer = { write: (_node, value, options) => options.commit(value), cancel() {}, clear() {} };
+  const context = { document, location: { href: "https://offline.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console,
+    getComputedStyle: node => ({ display: "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorMotion: { writer, dispose() {} }, ScreenTranslatorMotionFactory: {},
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "offline", createRenderedTextTester: () => () => true,
+      createPageAutoSession: value => { environment = value; return session; },
+      createOpenRootObserver: value => { callback = value.onMutations;
+        return { configure() {}, found() {}, replace() {}, dispose() {} }; } },
+    MutationObserver: function () {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {} };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa, baseline = qa.sample("source-before-writes");
+  const sourceId = baseline.nodes.find(row => row.sourceText === source).id;
+  const authoredId = baseline.nodes.find(row => row.sourceText === authored.nodeValue).id;
+  const record = { node, source, lastWritten: source, groupElement: node.parentElement,
+    pieces: [{ complete: false, failed: false }] };
+  state.records.set(node, record);
+  state.records.set(authored, { node: authored, source: authored.nodeValue, lastWritten: authored.nodeValue,
+    groupElement: authored.parentElement, pieces: [{ complete: true, failed: false }] });
+  state.blocks.set("stream-piece", { id: "stream-piece", record, text: source, piece: record.pieces[0] });
+  const snapshots = [], batch = [];
+  function write(value, tracked = true) {
+    const before = node.nodeValue;
+    const commit = value => { node.nodeValue = record.lastWritten = value; return true; };
+    if (tracked) environment.motion.writer.write(node, value, { commit }); else commit(value);
+    if (before !== value) batch.push({ type: "characterData", target: node, oldValue: before });
+  }
+  function flush(phase) {
+    reads = 0; callback(batch.splice(0));
+    const traversed = traversalAtMutation;
+    snapshots.push(qa.sample(phase)); return traversed;
+  }
+  write(mode === "identity" ? "FO" : mode === "literal" ? "C+" : mode === "authored-prefix" ? source : "最初译文");
+  flush("first-product-write");
+  if (mode === "authored-prefix") {
+    // Source prefixes alone do not prove a literal/identity product write.
+    batch.push({ type: "characterData", target: node, oldValue: source },
+      { type: "characterData", target: node, oldValue: "F" });
+  } else if (mode === "untracked-growth") {
+    write("完整", false); write("完整译文", false);
+  } else if (mode === "identity") { write("FOI"); write("FOIA"); }
+  else if (mode === "literal") { write("C++"); write("C++"); }
+  else { write("完整"); write("完整译文"); write("最终修正"); write("最终修正"); }
+  if (mode === "proof-overflow") for (let i = 0; i < 2050; i++) write("独立修正 " + i);
+  record.pieces[0].complete = true;
+  if (mode === "mixed" || mode === "same-node-edit") {
+    const target = mode === "mixed" ? authored : node;
+    batch.push({ type: "characterData", target, oldValue: target.nodeValue });
+    target.nodeValue = "Genuinely changed authored source";
+  }
+  const traversal = flush("batched-product-writes");
+  const publication = snapshots.at(-1), changes = publication.events.filter(event => event.type === "source-change");
+  const changed = ["mixed", "same-node-edit", "authored-prefix"].includes(mode);
+  assert.equal(changes.length, changed ? 1 : 0, mode);
+  if (changed) {
+    assert.equal(changes[0].sourceId, mode === "mixed" ? authoredId : sourceId);
+    assert.ok(changes[0].witnesses.some(row => row.afterSourceText === (mode === "authored-prefix"
+      ? "F" : "Genuinely changed authored source")));
+  } else if (mode === "proof-overflow") assert.ok(publication.producerObservationDropped > 0,
+    "missing commit provenance was not counted by the existing evidence gate");
+  else assert.equal(traversal, 0, "own writes traversed group leaves before production mutation handling");
+  if (!["same-node-edit", "authored-prefix"].includes(mode)) {
+    assert.equal(publication.nodes.find(row => row.sourceText === source).id, sourceId);
+    assert.equal(publication.predictions[0].sourceId, sourceId);
+    assert.equal(publication.predictions[0].completed, true);
+  }
+  const immutable = JSON.stringify(publication);
+  if (!["identity", "literal", "same-node-edit", "authored-prefix"].includes(mode)) {
+    // An actual unchanged-source withdrawal remains reportable after streaming.
+    batch.push({ type: "characterData", target: node, oldValue: node.nodeValue });
+    node.nodeValue = record.lastWritten = source;
+    flush("unchanged-source-withdrawal");
+    assert.equal(snapshots.at(-1).events.filter(event => event.type === "retraction" && event.sourceId === sourceId).length, 1);
+  } else assert.equal(publication.events.filter(event => event.type === "retraction").length, 0);
+  assert.equal(JSON.stringify(publication), immutable, "product write history was rewritten");
+  assert.equal(context.ScreenTranslatorMotion.writer, writer, "shared production writer was replaced");
+  qa.dispose(); return JSON.parse(JSON.stringify({ sourceId, authoredId, snapshots }));
+}
+const sourceWriteFixtures = {};
+for (const mode of ["untracked-growth", "correction", "identity", "literal", "mixed", "same-node-edit", "proof-overflow", "authored-prefix"])
+  sourceWriteFixtures[mode] = sourceWriteFixture(mode);
+if (process.argv.includes("--source-write-fixture")) console.log("SOURCE_WRITE_FIXTURE=" + JSON.stringify(sourceWriteFixtures));
+console.log("adapter batched streaming/correction/literal/identity/mixed authored write checks passed");
