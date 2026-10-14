@@ -57,8 +57,10 @@ translations remain blocking and do not count as translatedPositiveNodes.
 Unchanged true nodes are omissions in strict scope, and can be policy-skipped
 only under the existing fully proven automatic-page negative zero-call policy.
 Correct untranslated Chinese/metadata remain unchanged under their false labels.
-Unnecessary_translation must correspond to a false label and remains blocking;
-it does not rewrite recognition predictions. not_visible/unknown outcomes remain
+Unnecessary_translation must correspond to a false label and is counted as an
+observed false-positive outcome; it does not rewrite recognition predictions.
+The user's 95% recognition accuracy/precision thresholds apply to these errors,
+without adding a zero-false-positive completion requirement. not_visible/unknown outcomes remain
 unresolved and blocking, never hidden completion or a relabelled true/false node.
 Contradictory label/outcome combinations are invalid; unknown source labels stay
 unknown and blocking regardless of a visual vote. Actual wrong translation on
@@ -70,8 +72,9 @@ Recognition confusion counts and accuracy/precision formulas stay unchanged.
 Existing translated/untranslated/omission/policy-skip counts incorporate visual
 confirmation only in required mode; retain original producer flags in provenance.
 New counts `unknownVisualNodes`, `incorrectVisualTranslations` and
-`unnecessaryVisualTranslations` and corresponding zero-count gates make failures
-explicit. Keep normalizer and evaluator independently consistent, including
+`unnecessaryVisualTranslations` make failures explicit. Zero-count gates for
+unknown/incorrect required output and the existing 95% recognition gates apply;
+do not add a zero-unnecessaryVisualTranslations gate. Keep normalizer and evaluator independently consistent, including
 automatic zero-call policy and direct normalized-case scoring. A complete report
 requires known correct visual outcomes, full original evidence and all old gates.
 
