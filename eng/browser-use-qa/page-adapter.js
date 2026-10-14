@@ -5,6 +5,18 @@
   if (!api || root.__websiteQa) throw new Error("qa_adapter_installation_invalid");
   const outbound = [], pending = new Map(), events = [], sources = new Map();
   const identities = new WeakMap(), locators = new Map(), previous = new Map();
+  const sourceGroups = new WeakSet();
+  // Pending exact commits from the session's motion writer. The existing
+  // evidence bounds prevent an unobserved/offline writer from
+  // accumulating unbounded history. Exhausted proof is never guessed.
+  const productWrites = new Map();
+  const uncertainProductWrites = new WeakSet();
+  let productWriteCharacters = 0, productWriteCount = 0;
+  function releaseProductWrites(node) {
+    const entry = productWrites.get(node);
+    if (entry) { productWriteCharacters -= entry.characters; productWriteCount -= entry.steps.length; }
+    productWrites.delete(node); return entry;
+  }
   // Latest actual producer view per independent source, including views between
   // controller polls. Bounds limit additional evidence, never production work.
   const producerObservations = new Map();
@@ -68,13 +80,219 @@
   }
   function identity(node, source) {
     const old = identities.get(node);
-    if (old && old.source === source) return old.id;
+    // Detached records still refer to their original evidence. A connected
+    // return after an observed authored change starts a new lifetime.
+    if (old && old.source === source && (!old.retired || node.isConnected === false)) return old.id;
     const path = locator(node), key = JSON.stringify([path, source]);
-    const id = locators.get(key) || `source-${++serial}`;
+    if (old && old.source !== source && locators.get(old.key) === old.id) locators.delete(old.key);
+    const id = old && old.source !== source ? `source-${++serial}` : locators.get(key) || `source-${++serial}`;
     // Identity allocation is independent of evidence. Hidden nodes and production
     // predictions may have identities without ever becoming visible source rows.
-    locators.set(key, id); identities.set(node, { id, source });
+    locators.set(key, id); identities.set(node, { id, source, key });
     return id;
+  }
+  function sourceTransitions(mutations, records) {
+    if (!mutations.some(mutation => ["characterData", "childList"].includes(mutation.type))) return;
+    const characterValues = new Map(), characterSteps = new Map(), chains = new Map(), displays = new Map();
+    const unknownDisplays = new Map();
+    for (let index = mutations.length - 1; index >= 0; index--) {
+      const mutation = mutations[index];
+      if (mutation.type !== "characterData") continue;
+      const after = characterValues.has(mutation.target) ? characterValues.get(mutation.target)
+        : String(mutation.target.nodeValue || "");
+      const step = { before: mutation.oldValue, after };
+      characterSteps.set(mutation, step);
+      if (!chains.has(mutation.target)) chains.set(mutation.target, []);
+      chains.get(mutation.target).push(step);
+      if (typeof mutation.oldValue === "string") characterValues.set(mutation.target, mutation.oldValue);
+    }
+    for (const [node, reverseChain] of chains) {
+      const record = records.get(node), old = identities.get(node), prior = old && previous.get(old.id);
+      const writes = releaseProductWrites(node);
+      const uncertain = uncertainProductWrites.has(node); uncertainProductWrites.delete(node);
+      if (!record || !old || old.retired || old.source !== record.source) continue;
+      const known = new Set([record.source, record.lastWritten, prior?.value]);
+      const chain = reverseChain.reverse();
+      // A retained source and terminal lastWritten establish monotonic stream
+      // tails even when several animation commits arrived between samples.
+      // Arbitrary intermediate corrections need actual writer commit proof.
+      const terminal = chain.at(-1).after;
+      if (terminal === record.lastWritten && terminal !== record.source && known.has(chain[0].before)
+          && chain.every((step, index) => typeof step.before === "string" && step.after.length > 0
+            && terminal.startsWith(step.after) && (!index || step.after.startsWith(chain[index - 1].after))))
+        for (const step of chain) known.add(step.after);
+      if (writes?.source === record.source && writes.sourceId === old.id) {
+        let cursor = 0;
+        for (const step of chain) {
+          const write = writes.steps[cursor];
+          if (write && write.before === step.before && write.after === step.after) {
+            known.add(write.before); known.add(write.after); cursor++;
+          }
+        }
+      }
+      displays.set(node, known);
+      // If commit provenance hit a bound, an unproved intermediate may be a
+      // product correction. It cannot certify authored text. The existing
+      // dropped-evidence gate also keeps this capture from claiming completion.
+      if (uncertain) unknownDisplays.set(node, new Set(chain.flatMap(step => [step.before, step.after])
+        .filter(value => !known.has(value))));
+    }
+    // All source/display aliases normalize to the same retained source. Let
+    // the usual sample still observe completion and unchanged withdrawals;
+    // reconstruction needs no DOM traversal for these own-write-only batches.
+    if (mutations.every(mutation => mutation.type !== "childList" && (mutation.type !== "characterData"
+        || displays.has(mutation.target) && displays.get(mutation.target).has(characterSteps.get(mutation).before)
+        && displays.get(mutation.target).has(characterSteps.get(mutation).after)))) return;
+    const children = new Map(), values = new Map(), aliases = new Map(), groups = new Set();
+    const visit = node => {
+      if (!node || children.has(node)) return;
+      if (sourceGroups.has(node)) groups.add(node);
+      children.set(node, Array.from(node.childNodes || []));
+      if (node.nodeType === 3) values.set(node, String(node.nodeValue || ""));
+      for (const child of children.get(node)) visit(child);
+    };
+    for (const record of records.values()) {
+      if (record.groupElement) sourceGroups.add(record.groupElement);
+      const old = identities.get(record.node), prior = old && previous.get(old.id);
+      aliases.set(record.node, { source: record.source,
+        unknown: unknownDisplays.get(record.node),
+        displays: displays.get(record.node)
+          || new Set([record.source, record.lastWritten, ...(prior?.translated ? [prior.value] : [])]) });
+    }
+    for (const mutation of mutations) {
+      visit(mutation.target);
+      for (let ancestor = composedParent(mutation.target); ancestor; ancestor = composedParent(ancestor))
+        if (sourceGroups.has(ancestor)) { groups.add(ancestor); visit(ancestor); }
+      for (const node of [...mutation.addedNodes || [], ...mutation.removedNodes || []]) visit(node);
+    }
+    const leafCache = new Map();
+    const leaves = node => {
+      if (!node || node.nodeType === 1 && (node.hasAttribute?.("data-screen-translator")
+          || ["SCRIPT", "STYLE"].includes(node.tagName))) return [];
+      if (node.nodeType === 3) return [node];
+      if (!leafCache.has(node)) leafCache.set(node, (children.get(node) || []).flatMap(leaves));
+      return leafCache.get(node);
+    };
+    const text = nodes => {
+      const parts = [];
+      for (const node of nodes) {
+        const value = values.get(node), alias = aliases.get(node);
+        if (alias?.unknown?.has(value)) return null;
+        parts.push(alias?.displays.has(value) ? alias.source : value);
+      }
+      return parts.join("");
+    };
+    // Undo the actual MutationRecords, then replay them in order. Live DOM
+    // alone loses a short intermediate replacement, including one removed
+    // before this observer callback. Missing anchors/old values stay unknown.
+    const steps = [];
+    for (let index = mutations.length - 1; index >= 0; index--) {
+      const mutation = mutations[index];
+      if (mutation.type === "characterData") {
+        if (typeof mutation.oldValue !== "string") continue;
+        steps.push({ mutation, index, after: values.get(mutation.target) });
+        values.set(mutation.target, mutation.oldValue);
+      } else if (mutation.type === "childList") {
+        const list = children.get(mutation.target), added = Array.from(mutation.addedNodes || []);
+        const removed = Array.from(mutation.removedNodes || []);
+        if (!list || !added.length && !removed.length) continue;
+        let position = added.length ? list.indexOf(added[0]) : -1;
+        if (added.length && (position < 0 || !added.every((node, offset) => list[position + offset] === node))) continue;
+        if (!added.length) {
+          if (mutation.nextSibling && list.includes(mutation.nextSibling)) position = list.indexOf(mutation.nextSibling);
+          else if (mutation.previousSibling && list.includes(mutation.previousSibling)) position = list.indexOf(mutation.previousSibling) + 1;
+          else if (mutation.nextSibling === null && mutation.previousSibling === null && !list.length) position = 0;
+          else continue;
+        }
+        list.splice(position, added.length, ...removed);
+        steps.push({ mutation, index, position, added, removed });
+      }
+    }
+    const changes = new Map(), members = new Map(Array.from(groups, group => [group, new Set(leaves(group))]));
+    for (const step of steps.reverse()) {
+      const before = new Map(Array.from(groups, group => [group, text(leaves(group))]));
+      for (const group of groups) for (const node of leaves(group)) members.get(group).add(node);
+      let replacement = true;
+      if (step.added) {
+        const oldNodes = step.removed.flatMap(leaves), newNodes = step.added.flatMap(leaves);
+        replacement = oldNodes.some(node => String(values.get(node)).trim())
+          && newNodes.some(node => String(values.get(node)).trim())
+          && !oldNodes.every(node => newNodes.includes(node))
+          && !(oldNodes.every(node => node.isConnected !== false) && newNodes.every(node => identities.has(node)));
+        // Exact source/display copies transfer their identity, even if a whole
+        // paragraph is replaced or regrouped at a different locator.
+        if (oldNodes.length === newNodes.length) for (let i = 0; i < oldNodes.length; i++) {
+          const old = oldNodes[i], next = newNodes[i], alias = aliases.get(old);
+          const expected = alias?.source ?? values.get(old), value = values.get(next);
+          if (value === expected || alias?.displays.has(value)) {
+            aliases.set(next, alias || { source: expected, displays: new Set([expected]) });
+            const id = identities.get(old);
+            if (id) identities.set(next, { ...id });
+          }
+        }
+        children.get(step.mutation.target).splice(step.position, step.removed.length, ...step.added);
+        leafCache.clear();
+        // A replacement of the ancestor itself leaves the detached old subtree
+        // intact. Compare its exact members to the replacement at this same
+        // mutation position, rather than mistaking that intact subtree for the
+        // final displayed group. Pure movement still has the same members.
+        if (replacement) for (const group of groups) {
+          const priorMembers = leaves(group);
+          if (!step.removed.includes(group) || priorMembers.length !== oldNodes.length
+              || !priorMembers.every((node, index) => node === oldNodes[index])) continue;
+          const prior = text(oldNodes), after = text(newNodes);
+          if (prior?.trim() && after?.trim() && prior !== after) {
+            if (!changes.has(group)) changes.set(group, []);
+            changes.get(group).push({ mutationIndex: step.index, mutationType: "childList",
+              beforeSourceText: prior, afterSourceText: after });
+            for (const node of newNodes) members.get(group).add(node);
+          }
+          if (step.added.length === 1 && step.added[0].nodeType === 1) sourceGroups.add(step.added[0]);
+        }
+      } else {
+        replacement = String(values.get(step.mutation.target)).trim().length > 0
+          && String(step.after).trim().length > 0;
+        values.set(step.mutation.target, step.after);
+      }
+      for (const group of groups) {
+        for (const node of leaves(group)) members.get(group).add(node);
+        const after = text(leaves(group)), prior = before.get(group);
+        // A removed group/member or empty display is not proof of a new source.
+        // Require explicit, nonempty source text on both sides of the change.
+        if (replacement && prior?.trim() && after?.trim() && prior !== after) {
+          if (!changes.has(group)) changes.set(group, []);
+          changes.get(group).push({ mutationIndex: step.index, mutationType: step.mutation.type,
+            beforeSourceText: prior, afterSourceText: after });
+        }
+      }
+    }
+    // Missing oldValue can still have an exact retained record and a changed
+    // final DOM value. Do not infer anything from detach/layout alone.
+    for (const mutation of mutations) if (mutation.type === "characterData" && mutation.oldValue == null) {
+      const record = records.get(mutation.target), value = String(mutation.target.nodeValue || "");
+      if (record?.groupElement && value.trim() && value !== record.source && value !== record.lastWritten) {
+        if (!members.has(record.groupElement)) members.set(record.groupElement, new Set([record.node]));
+        if (!changes.has(record.groupElement)) changes.set(record.groupElement, []);
+        changes.get(record.groupElement).push({ mutationIndex: mutations.indexOf(mutation), mutationType: "characterData",
+          beforeSourceText: record.source, afterSourceText: value });
+      }
+    }
+    for (const [group, witnesses] of changes) {
+      const affected = new Set([...members.get(group), ...Array.from(records.values())
+        .filter(record => record.groupElement === group).map(record => record.node)]);
+      const retired = new Set();
+      for (const node of affected) {
+        const old = identities.get(node);
+        if (!old || old.retired) continue;
+        // Preserve history and withdrawal candidates. Retire only the mapping
+        // that could otherwise resurrect this lifetime on a later same-text return.
+        if (locators.get(old.key) === old.id) locators.delete(old.key);
+        identities.set(node, { ...old, retired: true });
+        if (!retired.has(old.id)) events.push({ type: "source-change", schemaVersion: 1, sourceId: old.id,
+          at: timestamp(), witnesses });
+        retired.add(old.id);
+      }
+    }
   }
   // Independent traversal deliberately includes CODE/PRE/BUTTON/TIME and numeric text.
   function* textNodes(start) {
@@ -226,6 +444,7 @@
   function sample(phase) {
     const at = timestamp(), sequence = ++sampleSequence;
     const state = session?.inspect(), records = state?.records || new Map(), nodes = [];
+    for (const record of records.values()) if (record.groupElement) sourceGroups.add(record.groupElement);
     for (const node of textNodes(document.body)) {
       const record = records.get(node);
       const source = record && (node.nodeValue === record.source || node.nodeValue === record.lastWritten)
@@ -422,6 +641,38 @@
   function observation() { if (observer && session) observer.configure(session.inspect().observing); }
   function recordStatus(value) { status = value; events.push({ type: "status", value, at: timestamp() }); observation(); }
   const motion = root.ScreenTranslatorMotion || root.ScreenTranslatorMotionFactory.createTranslationMotion({ document, window: root });
+  // Pass through the real writer and its real commit result, including delayed
+  // animation frames. Record only successful DOM writes under the exact source
+  // identity; inbound provider strings alone are not write provenance. The
+  // shared production motion object/writer and scheduling remain untouched.
+  const evidenceMotion = Object.create(motion);
+  if (motion.writer?.write) {
+    evidenceMotion.writer = Object.create(motion.writer);
+    evidenceMotion.writer.write = (node, value, options) => motion.writer.write(node, value, { ...options,
+      commit: next => {
+        const record = session?.inspect().records.get(node), source = record?.source;
+        const sourceId = identities.get(node)?.id, before = node.nodeValue;
+        const result = options.commit(next);
+        if (result && record && record.source === source && record.lastWritten === next
+            && node.nodeValue === next && before !== next) {
+          let entry = productWrites.get(node);
+          if (!entry || entry.source !== source || entry.sourceId !== sourceId) {
+            releaseProductWrites(node);
+            entry = { source, sourceId, steps: [], characters: 0 };
+          }
+          const size = String(before).length + String(next).length;
+          if (productWriteCount < observationLimit && productWriteCharacters + size <= observationCharacterLimit) {
+            entry.steps.push({ before, after: next }); entry.characters += size;
+            productWriteCount++; productWriteCharacters += size;
+            productWrites.set(node, entry);
+          } else {
+            uncertainProductWrites.add(node); observationDropped++;
+          }
+        }
+        return result;
+      }
+    });
+  }
   session = api.createPageAutoSession({ document, token: api.randomIdentifier(),
     // Match the session's default zero-delay scheduler exactly. Track real
     // scheduled work and sample after its Promise settles, without adding polls,
@@ -437,7 +688,7 @@
       scheduledScans.add(id); return id;
     },
     clearSchedule: id => { scheduledScans.delete(id); root.clearTimeout(id); },
-    getLocation: () => root.location.href, motion,
+    getLocation: () => root.location.href, motion: evidenceMotion,
     getStyle: element => root.getComputedStyle(element), makeId: () => api.randomIdentifier(), viewportHeight: root.innerHeight,
     getSelection: () => root.getSelection(), isRenderedText: api.createRenderedTextTester(document), yieldWork: api.yieldToBrowser,
     send: message => new Promise(resolve => {
@@ -446,24 +697,15 @@
     }), onStatus: recordStatus, onView: value => events.push({ type: "view", value, at: timestamp() }),
     onDecision: value => events.push({ type: "decision", value, at: timestamp() }),
     onRootFound: tree => observer?.found(tree), onOpenRoots: trees => observer?.replace(trees) });
-  observer = api.createOpenRootObserver({ document, createObserver: callback => new root.MutationObserver(callback),
+  observer = api.createOpenRootObserver({ document, createObserver: callback => {
+    const native = new root.MutationObserver(callback);
+    // QA evidence needs exact characterData history; production scheduling and
+    // mutation delivery are unchanged. No additional browser poll is introduced.
+    return { observe: (tree, options) => native.observe(tree, { ...options, characterDataOldValue: true }),
+      disconnect: () => native.disconnect() };
+  },
     onMutations: mutations => {
-      const records = session.inspect().records, changed = new Set();
-      for (const mutation of mutations) {
-        const record = records.get(mutation.target);
-        if (mutation.type === "characterData" && record && mutation.target.nodeValue !== record.lastWritten
-            && mutation.target.nodeValue !== record.source) changed.add(record.groupElement);
-        if (mutation.type === "childList") {
-          for (const peer of records.values()) if (peer.groupElement === mutation.target
-              && !Array.from(records.values()).filter(r => r.groupElement === peer.groupElement)
-                .every(r => r.node.isConnected && (r.node.nodeValue === r.source || r.node.nodeValue === r.lastWritten)))
-            changed.add(peer.groupElement);
-        }
-      }
-      for (const record of records.values()) if (changed.has(record.groupElement)) {
-        previous.delete(identity(record.node, record.source));
-        events.push({ type: "source-change", sourceId: identity(record.node, record.source), at: timestamp() });
-      }
+      sourceTransitions(mutations, session.inspect().records);
       session.mutated(mutations); sample("mutation");
     } });
   const listeners = [];
@@ -523,6 +765,7 @@
     dispose: () => {
       probeJob = null;
       root.clearInterval(probeTimer); session.dispose(); observer.dispose(); motion.dispose();
+      productWrites.clear(); productWriteCount = productWriteCharacters = 0;
       for (const [target, type, fn, options] of listeners) target?.removeEventListener(type, fn, options);
       for (const resolve of pending.values()) resolve({ accepted: false, reason: "qa_disposed" }); pending.clear();
     }

@@ -705,7 +705,33 @@ def _validate_source_geometry(source):
         raise CaptureError("invalid_producer_observation_visibility")
 
 
-def _independent_source_versions(value, source_history, sample_at):
+class _ObservationValidation:
+    """Shared checks of immutable objects during one atomic import only."""
+    def __init__(self):
+        self.times, self.geometries = {}, {}
+
+    def time(self, value):
+        if not isinstance(value, str):
+            return _observation_time(value)
+        if value not in self.times:
+            self.times[value] = _observation_time(value)
+        return self.times[value]
+
+    def geometry(self, source):
+        if id(source) not in self.geometries:
+            _validate_source_geometry(source)
+            # Hold the object as well: identity cannot be reused in this call.
+            self.geometries[id(source)] = source
+
+    def snapshot(self, source):
+        self.geometry(source)
+        snapshot = _source_snapshot(source)
+        self.geometries[id(snapshot)] = snapshot
+        return snapshot
+
+
+def _independent_source_versions(value, source_history, sample_at, validation=None):
+    validation = validation or _ObservationValidation()
     export = value.get("independentSourceObservationExport")
     references_only = "independentSourceObservationExport" in value
     if references_only and (not isinstance(export, dict)
@@ -736,16 +762,16 @@ def _independent_source_versions(value, source_history, sample_at):
                 or not isinstance(source.get("sourceText"), str) or not source["sourceText"].strip()
                 or not isinstance(source.get("phase"), str) or not source["phase"]):
             raise CaptureError("invalid_independent_source_observation")
-        at = _observation_time(version.get("at"))
-        if not _observation_time(source.get("firstSeen")) <= at <= sample_at:
+        at = validation.time(version.get("at"))
+        if not validation.time(source.get("firstSeen")) <= at <= sample_at:
             raise CaptureError("invalid_producer_observation_timestamp")
-        _validate_source_geometry(source)
+        validation.geometry(source)
         key = (source_id, at, sequence)
         if key in indexed:
             raise CaptureError("invalid_independent_source_observation")
-        indexed[key] = _source_snapshot(source)
+        indexed[key] = validation.snapshot(source)
         if source_id not in latest or latest[source_id][0] < (at, sequence):
-            latest[source_id] = ((at, sequence), source)
+            latest[source_id] = ((at, sequence), indexed[key])
     necessary = set()
     if references_only:
         # Validate historical exports against actual references, never silently
@@ -768,7 +794,7 @@ def _independent_source_versions(value, source_history, sample_at):
                         or set(reference) != {"at", "sequence"}
                         or type(reference["sequence"]) is not int or reference["sequence"] <= 0):
                     raise CaptureError("invalid_producer_observation_source")
-                necessary.add((member, _observation_time(reference["at"]), reference["sequence"]))
+                necessary.add((member, validation.time(reference["at"]), reference["sequence"]))
         earliest, witnessed = {}, {}
         for key in indexed:
             if key[0] not in earliest or key[1:] < earliest[key[0]][1:]:
@@ -779,7 +805,7 @@ def _independent_source_versions(value, source_history, sample_at):
         for row in value["producerObservations"]:
             # Some member rows were refreshed after an older atomic view. Keep
             # the earliest retained traversal proving membership at that time.
-            order = (_observation_time(row.get("at")), row.get("sequence"))
+            order = (validation.time(row.get("at")), row.get("sequence"))
             if type(order[1]) is not int or order[1] <= 0:
                 raise CaptureError("invalid_producer_observation")
             for reference in row["pieces"]:
@@ -796,26 +822,28 @@ def _independent_source_versions(value, source_history, sample_at):
         if not necessary.issubset(indexed):
             raise CaptureError("invalid_producer_observation_source")
     for source_id, (order, source) in latest.items():
-        if _source_snapshot(source) != _source_snapshot(source_history[source_id]):
+        if source != _source_snapshot(source_history[source_id]):
             if not references_only or (source_id, *order) not in necessary:
                 raise CaptureError("independent_source_observation_not_current")
     return indexed
 
 
-def _source_version_matches(source, reference, indexed, independent, observed_at, observed_sequence):
+def _source_version_matches(source, reference, indexed, independent, observed_at, observed_sequence,
+                            validation=None):
     if indexed is None:
         # Legacy samples have no trajectory proof: require the actual current row.
         return _source_snapshot(source) == _source_snapshot(independent)
     if (not isinstance(reference, dict) or type(reference.get("sequence")) is not int
             or reference["sequence"] <= 0):
         return False
-    at = _observation_time(reference.get("at"))
+    at = (validation.time if validation else _observation_time)(reference.get("at"))
     if (at, reference["sequence"]) > (observed_at, observed_sequence):
         return False
-    return indexed.get((source["id"], at, reference["sequence"])) == _source_snapshot(source)
+    snapshot = indexed.get((source["id"], at, reference["sequence"]))
+    return snapshot is source or snapshot == _source_snapshot(source)
 
 
-def _expand_producer_transport(value, indexed):
+def _expand_producer_transport(value, indexed, validation=None):
     """Decode internal adapter references; the public v1 case stays unchanged.
 
     The two original budgets apply to actual retained wire data, including all
@@ -844,7 +872,8 @@ def _expand_producer_transport(value, indexed):
                 or set(reference) != {"at", "sequence"}
                 or type(reference["sequence"]) is not int or reference["sequence"] <= 0):
             raise CaptureError("invalid_producer_observation_transport_reference")
-        snapshot = indexed.get((source_id, _observation_time(reference["at"]), reference["sequence"]))
+        at = (validation.time if validation else _observation_time)(reference["at"])
+        snapshot = indexed.get((source_id, at, reference["sequence"]))
         if snapshot is None:
             raise CaptureError("invalid_producer_observation_transport_reference")
         return snapshot
@@ -888,16 +917,23 @@ def record_producer_observations(observations, value, source_history, prediction
         raise CaptureError("invalid_producer_observations")
     if dropped:
         raise CaptureError("producer_observation_overflow")
-    sample_at = _observation_time(value.get("at"))
-    indexed = _independent_source_versions(value, source_history, sample_at)
+    validation = _ObservationValidation()
+    sample_at = validation.time(value.get("at"))
+    indexed = _independent_source_versions(value, source_history, sample_at, validation)
     if "producerObservationTransport" in value:
-        rows = _expand_producer_transport(value, indexed)
+        rows = _expand_producer_transport(value, indexed, validation)
     first_versions = {}
     for member, at, sequence in indexed or ():
         order = (at, sequence)
         if member not in first_versions or order < first_versions[member]:
             first_versions[member] = order
     prepared, seen = [], set()
+    # Transport definitions are interned within this sample. Validate their
+    # invariant facts once by actual object identity, never by content or across
+    # samples. Row ownership, time, duplicate IDs and visibility still need
+    # independent checks for every occurrence (including older observations).
+    checked_work, checked_pieces, encoded_pieces = {}, {}, {}
+    source_ids, version_ids = set(source_history), set(first_versions)
     for row in rows:
         if not isinstance(row, dict):
             raise CaptureError("invalid_producer_observation")
@@ -915,12 +951,12 @@ def record_producer_observations(observations, value, source_history, prediction
                 or not isinstance(row.get("pieces"), list)):
             raise CaptureError("invalid_producer_observation_source")
         seen.add(source_id)
-        at = _observation_time(row.get("at"))
-        if not _observation_time(source.get("firstSeen")) <= at <= sample_at:
+        at = validation.time(row.get("at"))
+        if not validation.time(source.get("firstSeen")) <= at <= sample_at:
             raise CaptureError("invalid_producer_observation_timestamp")
-        _validate_source_geometry(source)
+        validation.geometry(source)
         if not _source_version_matches(source, row.get("sourceObservation"), indexed,
-                                       independent, at, row["sequence"]):
+                                       independent, at, row["sequence"], validation):
             raise CaptureError("invalid_producer_observation_source")
         if row["rendered"] and (source["rendered"] is not True or source.get("phase") != row["phase"]):
             raise CaptureError("invalid_producer_observation_visibility")
@@ -928,42 +964,58 @@ def record_producer_observations(observations, value, source_history, prediction
                 "at": row["at"], "sequence": row["sequence"]}:
             raise CaptureError("invalid_producer_observation_visibility")
         work = row.get("work")
-        if (not isinstance(work, dict)
-                or any(type(work.get(key)) is not bool for key in
-                       ("scanning", "active", "paused", "originalView", "automatic", "documentVisible"))
-                or any(type(work.get(key)) is not int or work[key] < 0
-                       for key in ("jobs", "pending", "rpcPending", "scheduledScans"))):
-            raise CaptureError("invalid_producer_observation_work")
-        idle = (work["scanning"] is False
-                and all(work[key] == 0 for key in ("jobs", "pending", "rpcPending", "scheduledScans"))
-                and work["active"] and not work["paused"] and not work["originalView"]
-                and work["automatic"] and work["documentVisible"])
+        if id(work) not in checked_work:
+            if (not isinstance(work, dict)
+                    or any(type(work.get(key)) is not bool for key in
+                           ("scanning", "active", "paused", "originalView", "automatic", "documentVisible"))
+                    or any(type(work.get(key)) is not int or work[key] < 0
+                           for key in ("jobs", "pending", "rpcPending", "scheduledScans"))):
+                raise CaptureError("invalid_producer_observation_work")
+            checked_work[id(work)] = (work["scanning"] is False
+                    and all(work[key] == 0 for key in ("jobs", "pending", "rpcPending", "scheduledScans"))
+                    and work["active"] and not work["paused"] and not work["originalView"]
+                    and work["automatic"] and work["documentVisible"])
+        idle = checked_work[id(work)]
         pieces, piece_ids = row["pieces"], set()
-        matched = True
+        matched, stale = True, False
         for piece in pieces:
             if not isinstance(piece, dict):
                 raise CaptureError("invalid_producer_observation_piece")
             piece_id, owner = piece.get("id"), piece.get("sourceId")
             members = piece.get("sourceIds")
-            if (not isinstance(piece_id, str) or not piece_id or piece_id in piece_ids
-                    or not isinstance(owner, str) or not isinstance(members, list) or not members
-                    or any(not isinstance(member, str) or not member for member in members)
-                    or len(set(members)) != len(members) or owner not in members or source_id not in members
-                    or any(type(piece.get(key)) is not bool for key in ("eligible", "completed", "failed"))
-                    or any(key in piece and type(piece[key]) is not bool for key in ("local", "fromCache"))
-                    or piece["eligible"] is not True or piece["completed"] and piece["failed"]
-                    or piece.get("sourceEvidence") not in ("matched", "unmatched")):
+            if id(piece) not in checked_pieces:
+                if (not isinstance(piece_id, str) or not piece_id
+                        or not isinstance(owner, str) or not isinstance(members, list) or not members
+                        or any(not isinstance(member, str) or not member for member in members)
+                        or len(set(members)) != len(members) or owner not in members
+                        or any(type(piece.get(key)) is not bool for key in ("eligible", "completed", "failed"))
+                        or any(key in piece and type(piece[key]) is not bool for key in ("local", "fromCache"))
+                        or piece["eligible"] is not True or piece["completed"] and piece["failed"]
+                        or piece.get("sourceEvidence") not in ("matched", "unmatched")):
+                    raise CaptureError("invalid_producer_observation_piece")
+                if owner in source_history and piece.get("sourceText") != source_history[owner]["sourceText"]:
+                    raise CaptureError("invalid_producer_observation_piece_source")
+                member_set = set(members)
+                present = member_set.issubset(source_ids)
+                latest_seen = max(validation.time(source_history[member].get("firstSeen"))
+                                  for member in members) if present else None
+                versions_present = indexed is None or member_set.issubset(version_ids)
+                latest_version = max(first_versions[member] for member in members) if (
+                    indexed is not None and versions_present) else None
+                checked_pieces[id(piece)] = (member_set, present, latest_seen,
+                    versions_present, latest_version,
+                    piece["sourceEvidence"] == "matched" and not piece.get("auditIssue"),
+                    piece_id in prediction_history and prediction_history[piece_id] != piece)
+            (member_set, present, latest_seen, versions_present, latest_version,
+             evidence_matched, piece_stale) = checked_pieces[id(piece)]
+            if piece_id in piece_ids or source_id not in member_set:
                 raise CaptureError("invalid_producer_observation_piece")
             piece_ids.add(piece_id)
-            if owner in source_history and piece.get("sourceText") != source_history[owner]["sourceText"]:
-                raise CaptureError("invalid_producer_observation_piece_source")
-            matched = matched and all(member in source_history for member in members)
-            matched = matched and all(member in source_history
-                and _observation_time(source_history[member].get("firstSeen")) <= at for member in members)
+            matched = matched and present and latest_seen <= at
             if indexed is not None:
-                matched = matched and all(member in first_versions
-                    and first_versions[member] <= (at, row["sequence"]) for member in members)
-            matched = matched and piece["sourceEvidence"] == "matched" and not piece.get("auditIssue")
+                matched = matched and versions_present and latest_version <= (at, row["sequence"])
+            matched = matched and evidence_matched
+            stale = stale or piece_stale
         if row["eligible"] is not (True if pieces else False if idle else None):
             raise CaptureError("invalid_producer_observation_eligibility")
         represented = row.get("representedBy")
@@ -978,26 +1030,34 @@ def record_producer_observations(observations, value, source_history, prediction
                     or any(owner.get(key) != source_history[represented].get(key)
                            for key in ("id", "sourceText", "firstSeen"))):
                 raise CaptureError("invalid_producer_observation_representation")
-            _validate_source_geometry(owner)
+            validation.geometry(owner)
             if (not _source_version_matches(owner, row.get("representedSourceObservation"), indexed,
-                                            source_history[represented], at, row["sequence"])
+                                            source_history[represented], at, row["sequence"], validation)
                     or indexed is not None and row.get("representedSourceObservation") != {
                         "at": row["at"], "sequence": row["sequence"]}):
                 raise CaptureError("invalid_producer_observation_representation")
         observed = row["rendered"] or represented is not None
-        stale = any(piece["id"] in prediction_history and prediction_history[piece["id"]] != piece for piece in pieces)
         record = {key: row.get(key) for key in ("sourceId", "sourceText", "phase", "at", "sequence",
                                                "rendered", "representedBy", "pageDecision", "eligible")}
         record.update(idle=idle, pieces=pieces)
         if not observed or not matched or stale:
             record.update(eligible=None, pieces=[])
         old = observations.get(source_id)
-        if old and (_observation_time(old["at"]), old.get("sequence", 0)) >= (at, row["sequence"]):
+        if old and (validation.time(old["at"]), old.get("sequence", 0)) >= (at, row["sequence"]):
             continue
-        prepared.append(json.loads(encode(record)))
+        # All record fields except pieces are validated JSON scalars in a fresh
+        # dict. Encode each retained definition once, but decode a separate list
+        # for every observation so input/history/sibling rows cannot mutate it.
+        serialized = []
+        for piece in record["pieces"]:
+            if id(piece) not in encoded_pieces:
+                encoded_pieces[id(piece)] = encode(piece)
+            serialized.append(encoded_pieces[id(piece)])
+        record["pieces"] = json.loads("[" + ",".join(serialized) + "]")
+        prepared.append(record)
     imported = {}
     for record in prepared:
-        order = (_observation_time(record["at"]), record["sequence"])
+        order = (validation.time(record["at"]), record["sequence"])
         for piece in record["pieces"]:
             prior = imported.get(piece["id"])
             if prior is None or prior[0] < order:
@@ -1005,7 +1065,8 @@ def record_producer_observations(observations, value, source_history, prediction
             elif prior[0] == order and prior[1] != piece:
                 raise CaptureError("conflicting_producer_observation_piece")
     for piece_id, (_, piece) in imported.items():
-        prediction_history.setdefault(piece_id, json.loads(encode(piece)))
+        if piece_id not in prediction_history:
+            prediction_history[piece_id] = json.loads(encode(piece))
     for record in prepared:
         observations[record["sourceId"]] = record
     # Current raw pieces can advance while a source is hidden. The normalizer's
