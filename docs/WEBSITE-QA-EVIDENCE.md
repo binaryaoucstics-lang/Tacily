@@ -10,9 +10,49 @@
 
 规则仍须遵守正文识别、语言证据、站点规则与手动模式等现有保护，不能把整页文字简单按字符数投票。独立标签来自源页面的可读性与翻译需要，不能根据 fixed50 的预测反推真值。保留用户设置、服务商与凭据、固定语料与 holdout、请求预算、超时及原始失败；不能通过改阈值、增加预算或放宽审批/沙盒使测试通过。
 
+## 完整目标必须显式要求独立视觉结果
+
+[独立截图结果契约](../eng/website-qa/VISUAL-PROOF-20261014.md) 规定 `require_visual_review=False` 与 normalizer/evaluator CLI 的 `--require-visual-review`。有效 false 节点的不必要视觉翻译只计数，受原 95% 识别门槛约束；每个可见结果（包括 unchanged）须有明确输出 phase。默认 False 保留 legacy 调用、原测试及报告行为。legacy 的生产 completed、成功 terminal、截图 boolean 通过票可说明机器工作及审核声明，却没有逐源的正确可见结果；legacy `achieved=true` 不能独立证明包含实际截图确认的完整目标。本轮在已审查采集性能与源 epoch 的固定基线上保留两项先前独立实现与 fixtures，并验证组合 roundtrip；主控仍须在实际 integration HEAD 完成全仓验收和最终真实验证。
+
+完整目标验收须在归一化和评分两步均使用 **`--require-visual-review`**，每个案例携带明确的独立结果，报告记录 `visualCoverage={"schemaVersion":1,"required":true}`。这与 `--coverage-scope strict|automatic-page` 是两项独立选择；启用 automatic-page 不能补足视觉证据，strict 本身也不等于已经启用视觉审核。新文件生成流程与配对命令见 [评分 README](../eng/website-qa/README.md)。
+
+### 冻结源审核与三种哈希
+
+1. 在查看逐节点预测和结果之前，冻结独立页面标签、全部历史 sourceId/精确原文及 needTranslation，包括 true、false 和 unknown。中文/繁中、metadata、英文正节点与短暂可见源全部保留；不根据 visualReview 改标签、删除源、调参或解除历史 unknown。
+2. 新审核文件的 `visualReview` 是对象，包含整数 `schemaVersion=1`、`caseSha256`、`sourceReviewSha256`、明确 boolean `reviewed=true`/`independent=true` 及 nodes 列表。每个且仅每个原始 sourceId 有一行：sourceId、sourceTextSha256、枚举 outcome、两个 boolean true、非空 evidence 列表；每条 evidence 有实际审核原图的 phase 和非空 note。完整 schema 示例见 README；boolean 不能代替整数版本，字符串或数字不能代替 boolean。
+3. `caseSha256` 绑定未修改的原始捕获字节，normalizer 校验实际文件，evaluator 校验保留的 provenance。`sourceReviewSha256` 绑定冻结源审核，须为非空字符串，恰含 64 个十六进制字符（`0-9a-fA-F`）且与外层冻结原值精确一致；大写或混合大小写的合法冻结值两端都须接受，不 trim、转换大小写或重算替换，大小写不同的改写不能代替原值。不能用补充视觉文件的哈希取代冻结审核身份。`sourceTextSha256` 绑定每源精确原文的 UTF-8 字节，不折叠空白、改日期/计数或用当前源/译文替换历史源。两端均检查全部哈希、身份、类型与 phase，直接归一化案例评分也不豁免；原 capture、labels 和 rawReview 全部保留。
+4. 在实际图片中逐源核对文字、译文可读性、事实和几何，记录 explicit outcome 与实际观察说明。不能把 producer completed、标签、初始清单或其他节点的票复制成视觉票；independent=true 仍是审核声明，离线一致性检查不能认证审核诚实或浏览器/模型来源。
+
+### 原图投票与可读裁剪分别保留
+
+先实际打开全部原图，包括所有长页区域、details 和每次 refresh，再利用可读裁剪查看细节。原 `review.screenshots` 仍是全部且仅全部实际捕获 phase 的 boolean 映射；裁剪票不进入该映射、不创造 phase、不代替未审/失败原图。visualReview.evidence.phase 只引用已实际审核的原始截图 phase，每个可见结果（correct/partial/incorrect/unnecessary_translation 及 unchanged）都必须有输出 phase，包括负页未变内容的 policy skip。note 要写实际看到的文字、事实/位置等，不从机器摘要推断结果。
+
+接受的输出 phase 精确为 `after`、`after-full`、`stable`、`stable-full`、`scroll-after`、`return-after`、`reflow-after`、`disclosure-open`、`disclosure-restored`，以及 `stable-refresh-N` / `stable-full-refresh-N`，其中 N 匹配 `[1-9][0-9]*`（无前导零的非零十进制整数）。`before`、`before-full`、`scroll-before` 单独或组合均不足；自定义非 before phase 或错误刷新格式（0、前导零、额外后缀、after-refresh）也不能取得输出信用。unknown/not_visible 可用输入图记录无法确定结果，但仍未解决、不能取得完成或 policy skip。
+
+原始捕获、review（包含 notes 与 crop votes）、所有截图及旧公开失败均不可变。只有经过实际图片检查，才可另存新的补充视觉审核文件，并保留冻结标签、原 phase 票和哈希身份。裁剪票由主控单独打包并关联原图；worker 不放宽现有截图 schema。最终 stable-full 或某裁剪通过不能抹去先前刷新图失败、撤回或未解决源，合成 1px 图片通过只验证离线结构。
+
+### 视觉结果与完成信用
+
+| 冻结源标签 | 视觉 outcome | 完成要求 / 失败 |
+| --- | --- | --- |
+| true | `correct_translation` | 同时保留实际 live 成功 terminal、有效预测与原有源完成证据，才取得 translatedPositiveNodes 信用；视觉票不能创造模型工作 |
+| true | `partial_translation` / `incorrect_translation` | 部分英文残留或错误译文（包括日期、数字等事实错误）阻止完成，不算完整翻译 |
+| true | `unchanged` | strict 仍为遗漏；automatic-page 仅在原有已证明负页零调用及有效预测全部成立时允许 policy skip，仍计未翻译正节点 |
+| false | `unchanged` | 已可读中文、名称或 metadata 正确保留原文；负页验证仍需零不必要请求 |
+| false | `unnecessary_translation` | 有效独立观察递增 unnecessaryVisualTranslations，不单独使案例 incomplete；冻结标签和 eligible 不变，识别错误按原 95% accuracy/precision 衡量 |
+| 任意 | `not_visible` / `unknown` | 结果未解决，阻止完成；隐藏、unknown 不赋予成功或跳过信用 |
+
+矛盾标签/outcome 组合无效（例如 true / unnecessary_translation 或 false / correct_translation）。未知源标签无论投票如何仍未知并阻止完成。缺 visualReview、缺/重复/额外结果行、损坏类型/哈希/phase 不能形成完整证明，不推断或补填成功；机器成功却仍显示必须翻译的原文也不能完成。
+
+识别 TP/TN/FP/FN 与节点 accuracy/precision/recall、页面 accuracy 原公式不变。视觉错误不能修改 eligible、needTranslation 或 fixed50。required 模式才将视觉确认加入原翻译/未翻译/遗漏/policy skip 的覆盖计数，annotatedPositiveNodes 和 translationCoverage 分母仍保留全部正节点，policy skip 不计已翻译。案例与 overall/development/holdout 聚合均须从证据呈现 `unknownVisualNodes`、`incorrectVisualTranslations`（必须翻译的部分或错误输出）和 `unnecessaryVisualTranslations`。前两项须为零；第三项保留测得错误，不设 `noUnnecessaryVisualTranslations` 或其他零假阳性门禁。有效 false 节点的不必要输出不能单独使案例 incomplete，也不能取消其他 true 节点的正确翻译信用；95% accuracy/precision 允许门槛以内的测得假阳性。
+
+完整报告仍要求必须翻译的节点有正确视觉结果、unchanged/policy skip 合法、原始证据完整与全部旧门禁通过。矛盾标签/outcome、实际无效 native/source 证据、unknown 标签/预测、源历史缺失、错误、请求/终止不全、负页不必要请求和已确认撤回仍分别阻止完成。原 `unnecessaryRequests` / `noUnnecessaryRequests` 继续按负页实际调用判断，不能与节点 `unnecessaryVisualTranslations` 混为一项。
+
+实现任务须新增独立合成回归，覆盖多种真正 false 标签的不必要输出、正确的 true 节点和合法原生工作，并保留原评分。例如 19 TP + 1 FP、无 TN/FN 时 accuracy/precision 恰为 95%，有效不必要输出只递增视觉计数；18 TP + 2 FP 为 90%，原门槛仍拒绝。还须验证合法大写冻结哈希可跨 normalizer/evaluator、矛盾 outcome 与无效 native/source 仍失败。旧测试原样保留；该合成算术不代表域数、页面、holdout 或真实质量已经通过，详见 README 的回归要求。
+
 ## 显式覆盖口径 v1：strict 与 automatic-page
 
-固定基线已有 `normalize_case`、`evaluate`、`_score_case` 的关键字 `coverage_scope="strict"`，现有位置参数有效；归一化与评分 CLI 使用 `--coverage-scope strict|automatic-page`，非法模式拒绝。结果记录 `coverageScope={"schemaVersion":1,"mode":"strict"}` 或 `{"schemaVersion":1,"mode":"automatic-page"}`。此次识别已有生产 assessment 事件，显式 automatic-page 元数据仍为 v1；扩展实现须主控集成验收，文档不认证其他任务已通过。
+固定基线已有 `normalize_case`、`evaluate`、`_score_case` 的关键字 `coverage_scope="strict"`，现有位置参数有效；归一化与评分 CLI 使用 `--coverage-scope strict|automatic-page`，非法模式拒绝。结果记录 `coverageScope={"schemaVersion":1,"mode":"strict"}` 或 `{"schemaVersion":1,"mode":"automatic-page"}`。基线已识别已有生产 assessment 事件，显式 automatic-page 元数据仍为 v1；本轮新增视觉要求保留这些规则，新视觉实现须主控集成验收，文档不认证其他任务已通过。
 
 默认 strict 继续执行全部原覆盖义务与原测试；没有 coverageScope 的旧案例只允许 strict。automatic-page 评分必须取得版本和模式一致的案例元数据，不能静默重解释 strict/旧案例；strict 拒绝 automatic-page 案例。分别生成新归一化文件与新报告，使用同一冻结标签和原始证据，保留旧审核与全部失败。评分 CLI 新增可选 `--output <path>`，指定时独占创建新报告并拒绝已存在路径，省略时保留 stdout 输出；新配对报告使用 `--output`。完整 CLI 示例见 [评分 README](../eng/website-qa/README.md)；automatic-page 完成数不能记作 strict 完成数，文件写出也不表示质量达标。
 
@@ -98,6 +138,6 @@ review 的 screenshots 投票须覆盖实际捕获的全部唯一 phase，逐张
 
 visitSuccess 仅证明访问；evidenceReady 是完整证据待审核；completed 要求实际执行、独立节点证据、所有截图审核、终止、覆盖与错误门禁。正例必须有真实 live 模型请求、逐节点完成且成功终止；模拟、自测、纯缓存或离线套件不算实际完成翻译。负例保持可读原页与实际零不必要请求可以完成该负例验证，但不能记作翻译了页面。
 
-质量验收仍需固定清单至少 120 个不同注册域、35 个负例、30 个 holdout；至少 100 个不同注册域完成，holdout 至少 30 个域完成。strict 保持原严格完成含义，automatic-page 在单独声明的口径下统计。整体与 holdout 均须完成正、负两类页面，节点 accuracy/precision 至少 95%、页面 accuracy 至少 97%，无确认遗漏/撤回、不必要请求、未知标签或无效预测。召回率、原翻译覆盖率及所有未翻译/policy skip 数仍呈现；新增模式不放宽质量、未知、域数或 holdout 门槛。文档、访问数量、诊断记录和合成测试通过都不能替代这些实际证据；未达到条件就保持未达成，不填入推测成绩。
+质量验收仍需固定清单至少 120 个不同注册域、35 个负例、30 个 holdout；至少 100 个不同注册域完成，holdout 至少 30 个域完成。strict 保持原严格完成含义，automatic-page 在单独声明的口径下统计；完整目标还必须显式启用 require_visual_review 并满足独立视觉门禁。整体与 holdout 均须完成正、负两类页面，节点 accuracy/precision 至少 95%、页面 accuracy 至少 97%，无确认遗漏/撤回、不必要请求、未知标签或无效预测。召回率、原翻译覆盖率及所有未翻译/policy skip 数仍呈现；新增模式不放宽质量、未知、域数或 holdout 门槛。文档、访问数量、诊断记录和合成测试通过都不能替代这些实际证据；未达到条件就保持未达成，不填入推测成绩。本轮文档不宣称 100 域完成或 95%/97% 达成。
 
 离线验证分别运行 Browser Use 的全部 unittest 与 website evaluator/normalizer 的全部 unittest，命令见两份 README。通过仅证明当前实现的离线契约与回归保护；生产修复需主控审查真实差异，再以新采集和独立审核确认。各开发任务只读固定基线，依赖任务的验收不共享其代码；本指南不宣称其他任务计划中的观察已实现。

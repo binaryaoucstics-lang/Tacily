@@ -6,8 +6,9 @@ import argparse
 from collections import Counter
 from datetime import datetime
 from fractions import Fraction
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import sys
 from urllib.parse import urlsplit
@@ -18,6 +19,355 @@ COVERAGE_SCOPES = ("strict", "automatic-page")
 THRESHOLDS = {"independentDomains": 100, "nodeAccuracy": .95,
               "nodePrecision": .95, "pageAccuracy": .97,
               "completedHoldoutDomains": 30}
+VISUAL_COUNTS = ("unknownVisualNodes", "incorrectVisualTranslations",
+                 "unnecessaryVisualTranslations")
+VISUAL_OUTCOMES = frozenset(("correct_translation", "partial_translation",
+                            "incorrect_translation", "unchanged",
+                            "unnecessary_translation", "not_visible", "unknown"))
+ORIGINAL_PHASES = frozenset(("before", "after", "stable", "scroll-before",
+                             "scroll-after", "return-after", "reflow-after"))
+VISUAL_OUTPUT_PHASES = frozenset(("after", "after-full", "stable", "stable-full",
+                                  "scroll-after", "return-after",
+                                  "reflow-after", "disclosure-open", "disclosure-restored"))
+
+
+def _hash(value, *, allow_uppercase=False):
+    pattern = r"[0-9a-fA-F]{64}" if allow_uppercase else r"[0-9a-f]{64}"
+    return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+def _visual_option(value):
+    if type(value) is not bool:
+        raise ValueError("require_visual_review must be boolean")
+
+
+def _same(left, right):
+    """JSON equality including types (True must not stand in for 1)."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same(left[k], right[k]) for k in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _frozen_label(row):
+    # These defaults are the public source-review interface, not visual votes.
+    row = row if isinstance(row, dict) else {}
+    value = row.get("needTranslation", "unknown")
+    return {"needTranslation": value,
+            "reviewed": row.get("reviewed", type(value) is bool),
+            "independent": row.get("independent", type(value) is bool)}
+
+
+def _visual_evidence(case, nodes, labels, evidence_root):
+    """Check retained originals independently; never consume submitted totals.
+
+    Raw capture byte authentication belongs to the normalizer. Here the visual
+    review must bind to that retained hash, the frozen source review and exact
+    original texts. Only original screenshot paths inside evidence_root are read.
+    """
+    reasons = []
+    provenance = case.get("provenance")
+    if not isinstance(provenance, dict):
+        return {}, set(), ["missing_visual_provenance"]
+    raw, review = provenance.get("rawCapture"), provenance.get("rawReview")
+    visual = case.get("visualReview")
+    if not isinstance(raw, dict) or not isinstance(review, dict):
+        return {}, set(), ["missing_visual_originals"]
+    if (not isinstance(visual, dict) or type(visual.get("schemaVersion")) is not int
+            or visual["schemaVersion"] != 1 or visual.get("reviewed") is not True
+            or visual.get("independent") is not True):
+        return {}, set(), ["invalid_visual_review"]
+    if not _same(visual, review.get("visualReview")):
+        reasons.append("visual_review_original_mismatch")
+    if (not _hash(provenance.get("caseSha256"))
+            or visual.get("caseSha256") != provenance.get("caseSha256")
+            or review.get("caseSha256") != provenance.get("caseSha256")):
+        reasons.append("visual_case_hash_mismatch")
+    if (not _hash(review.get("sourceReviewSha256"), allow_uppercase=True)
+            or visual.get("sourceReviewSha256") != review.get("sourceReviewSha256")):
+        reasons.append("visual_source_review_hash_mismatch")
+    for key in ("id", "registeredDomain", "url", "category", "language", "split",
+                "expectedPageTranslation", "finalUrl", "sourceHead", "capturedAt",
+                "title", "viewport", "pageDecision", "visitSuccess", "liveTranslation",
+                "errors", "requestIds", "terminals", "sourceHashes", "manifestHash"):
+        if not _same(case.get(key), raw.get(key)):
+            reasons.append("visual_original_metadata_mismatch:" + key)
+    if (any(raw.get(k) is not True for k in
+            ("captureFinished", "evidenceReady", "settled", "domainVerified"))
+            or raw.get("simulation") is True or raw.get("synthetic") is True
+            or raw.get("mock") is True or raw.get("errors") != []):
+        reasons.append("visual_original_capture_incomplete")
+    blocked = raw.get("blockedReason")
+    pending = (isinstance(blocked, str) and all(
+        r in ("", "screenshot_review_pending") for r in blocked.split(";")))
+    if (not pending or not (raw.get("completed") is True or
+            raw.get("completed") is False and "screenshot_review_pending" in blocked)):
+        reasons.append("visual_original_capture_blocked")
+    originals = raw.get("sourceNodes")
+    source_map = {}
+    if isinstance(originals, list):
+        for source in originals:
+            if (not isinstance(source, dict) or not isinstance(source.get("id"), str)
+                    or not source["id"].strip() or source["id"] in source_map
+                    or not isinstance(source.get("sourceText"), str)
+                    or not source["sourceText"].strip()):
+                reasons.append("invalid_visual_original_source")
+                continue
+            source_map[source["id"]] = source
+    if set(source_map) != {n["id"] for n in nodes}:
+        reasons.append("visual_original_source_identity_mismatch")
+    for node in nodes:
+        if node["text"] != source_map.get(node["id"], {}).get("sourceText"):
+            reasons.append("visual_original_source_text_mismatch:" + node["id"])
+    source_labels = review.get("annotations")
+    frozen = {}
+    if isinstance(source_labels, list):
+        for row in source_labels:
+            if (not isinstance(row, dict) or not isinstance(row.get("sourceId"), str)
+                    or row["sourceId"] not in source_map or row["sourceId"] in frozen):
+                reasons.append("invalid_visual_frozen_annotation")
+                continue
+            frozen[row["sourceId"]] = row
+    else:
+        reasons.append("invalid_visual_frozen_annotations")
+    for node in nodes:
+        label = labels.get(node["id"], {})
+        if not _same(_frozen_label(frozen.get(node["id"])),
+                     {k: label.get(k) for k in ("needTranslation", "reviewed", "independent")}):
+            reasons.append("visual_frozen_label_mismatch:" + node["id"])
+    page = case.get("pageAnnotation", {})
+    if not _same(_frozen_label(review.get("pageAnnotation")),
+                 {k: page.get(k) for k in ("needTranslation", "reviewed", "independent")}):
+        reasons.append("visual_frozen_page_label_mismatch")
+    reasons.extend(_original_retraction_checks(raw, review, case, source_map))
+
+    phases = set()
+    shots, votes = raw.get("screenshots"), review.get("screenshots")
+    normalized = case.get("screenshots", {})
+    if (not isinstance(shots, list) or not isinstance(votes, dict)
+            or not isinstance(provenance.get("casePath"), str)
+            or not provenance["casePath"]):
+        reasons.append("invalid_visual_original_screenshots")
+    else:
+        for shot in shots:
+            if (not isinstance(shot, dict) or not isinstance(shot.get("phase"), str)
+                    or not shot["phase"].strip() or shot["phase"] == "checks"
+                    or shot["phase"] in phases):
+                reasons.append("invalid_visual_original_phase")
+                continue
+            phase, name = shot["phase"], shot.get("path")
+            phases.add(phase)
+            item = normalized.get(phase)
+            if (not isinstance(name, str) or not name or "\\" in name or ":" in name
+                    or "\0" in name or PureWindowsPath(name).root
+                    or ".." in Path(name).parts or not _hash(shot.get("sha256"))
+                    or votes.get(phase) is not True or not isinstance(item, dict)
+                    or item.get("phase") != phase or item.get("sha256") != shot["sha256"]
+                    or not _screenshot_ok(item, evidence_root)):
+                reasons.append("invalid_visual_original_screenshot:" + phase)
+                continue
+            try:
+                original_path = (Path(provenance["casePath"]).parent / name).resolve()
+                relative = original_path.relative_to(evidence_root).as_posix()
+                if (item["path"] != relative
+                        or hashlib.sha256(original_path.read_bytes()).hexdigest() != shot["sha256"]):
+                    reasons.append("visual_original_screenshot_mismatch:" + phase)
+            except (OSError, ValueError, RuntimeError):
+                reasons.append("visual_original_screenshot_mismatch:" + phase)
+        if (set(votes) != phases or not ORIGINAL_PHASES.issubset(phases)
+                or any(v is not True for v in votes.values())
+                or set(normalized) != phases | {"checks"}):
+            reasons.append("visual_original_phase_votes_mismatch")
+
+    rows = visual.get("nodes")
+    outcomes = {}
+    if not isinstance(rows, list):
+        reasons.append("invalid_visual_nodes")
+    else:
+        for row in rows:
+            if (not isinstance(row, dict) or not isinstance(row.get("sourceId"), str)
+                    or row["sourceId"] not in source_map or row["sourceId"] in outcomes):
+                reasons.append("duplicate_or_unmatched_visual_node")
+                continue
+            identity = row["sourceId"]
+            evidence = row.get("evidence")
+            outcome = row.get("outcome")
+            valid = (row.get("reviewed") is True and row.get("independent") is True
+                     and isinstance(outcome, str) and outcome in VISUAL_OUTCOMES
+                     and row.get("sourceTextSha256") == hashlib.sha256(
+                         source_map[identity]["sourceText"].encode("utf-8")).hexdigest()
+                     and isinstance(evidence, list) and bool(evidence))
+            evidence = evidence if isinstance(evidence, list) else []
+            valid = valid and all(isinstance(e, dict) and isinstance(e.get("phase"), str)
+                and e["phase"] in phases and isinstance(e.get("note"), str)
+                and bool(e["note"].strip()) for e in evidence)
+            if outcome in ("correct_translation", "partial_translation", "incorrect_translation",
+                           "unchanged", "unnecessary_translation"):
+                # Unchanged also asserts inspected output. Only capture output
+                # phases and its preserved stable refreshes establish that.
+                valid = valid and any(isinstance(e, dict) and e.get("phase") in phases
+                    and (e["phase"] in VISUAL_OUTPUT_PHASES or re.fullmatch(
+                        r"stable(?:-full)?-refresh-[1-9][0-9]*", e["phase"])) for e in evidence)
+            outcomes[identity] = outcome if valid else None
+            if not valid:
+                reasons.append("invalid_visual_node:" + identity)
+        if set(outcomes) != set(source_map):
+            reasons.append("missing_visual_nodes")
+    # A malformed proof cannot lend credit to any row. Recognition still scores.
+    if reasons:
+        return {}, set(), list(dict.fromkeys(reasons))
+    native, native_reasons = _original_native_completion(raw, case, source_map)
+    return outcomes, native, native_reasons
+
+
+def _original_native_completion(raw, case, sources):
+    """Establish source completion from original native pieces, including history."""
+    reasons = []
+    events = ([raw["capabilities"]] if isinstance(raw.get("capabilities"), dict) else [])
+    terminals = raw.get("terminals")
+    requests = raw.get("requestIds")
+    if not isinstance(terminals, list) or not all(isinstance(e, dict) for e in terminals):
+        return set(), ["invalid_visual_original_terminals"]
+    events += terminals
+    if "localAssessment" in raw and case.get("coverageScope", {}).get("mode") == "automatic-page":
+        events.append(raw["localAssessment"])
+    if not _same(events, case.get("hostEvents")):
+        reasons.append("visual_original_host_events_mismatch")
+    if (not isinstance(requests, list) or any(not isinstance(r, str) or not r for r in requests)
+            or len(set(requests)) != len(requests)
+            or set(requests) != {e.get("id") for e in terminals if isinstance(e.get("id"), str)}
+            or len(requests) != len(terminals)):
+        reasons.append("visual_original_request_identity_mismatch")
+    pieces = raw.get("predictions")
+    if not isinstance(pieces, list) or not all(isinstance(p, dict) for p in pieces):
+        return set(), reasons + ["invalid_visual_original_predictions"]
+    selected = {}
+    for p in pieces:
+        if not isinstance(p.get("id"), str) or not p["id"] or p["id"] in selected:
+            reasons.append("invalid_visual_original_piece_id")
+        else:
+            selected[p["id"]] = (p, None)
+    records, history = raw.get("sourceObservations", []), raw.get("predictionHistory", [])
+    if not isinstance(records, list) or not isinstance(history, list):
+        return set(), reasons + ["invalid_visual_original_history"]
+    seen_records, retired_eligibility = set(), {}
+    for record in records:
+        if (not isinstance(record, dict) or not isinstance(record.get("sourceId"), str)
+                or record["sourceId"] not in sources or record["sourceId"] in seen_records
+                or record.get("eligible") is not None and type(record.get("eligible")) is not bool
+                or not isinstance(record.get("pieces"), list)):
+            reasons.append("invalid_visual_original_source_observation")
+            continue
+        seen_records.add(record["sourceId"])
+        if sources[record["sourceId"]].get("currentlyRendered") is not False:
+            continue
+        identity = record["sourceId"]
+        if (record.get("sourceText") != sources[identity]["sourceText"]
+                or type(record.get("eligible")) is not bool
+                or not isinstance(record.get("pieces"), list)):
+            reasons.append("invalid_visual_original_source_observation")
+            continue
+        retired_eligibility[identity] = record["eligible"]
+        represented = record.get("representedBy")
+        atomic_peer = any(isinstance(p, dict) and p.get("sourceId") == represented
+            and represented != identity and isinstance(p.get("sourceIds"), list)
+            and identity in p["sourceIds"] and len(p["sourceIds"]) > 1
+            for p in record["pieces"])
+        if record.get("rendered") is not True and not atomic_peer:
+            reasons.append("unobserved_visual_original_retired_source:" + identity)
+        for p in record["pieces"]:
+            if (not isinstance(p, dict) or not isinstance(p.get("id"), str)
+                    or not any(_same(p, h) for h in history)):
+                reasons.append("visual_original_piece_history_mismatch")
+                continue
+            existing = selected.get(p["id"])
+            if existing and not _same(existing[0], p):
+                reasons.append("visual_original_piece_history_mismatch")
+            elif not existing:
+                selected[p["id"]] = (p, {identity})
+            elif existing[1] is not None:
+                existing[1].add(identity)
+    if any(source.get("currentlyRendered") is False and identity not in seen_records
+           for identity, source in sources.items()):
+        reasons.append("missing_visual_original_retired_observation")
+    grouped = {identity: [] for identity in sources}
+    for piece, retained in selected.values():
+        members = piece.get("sourceIds", [piece.get("sourceId")])
+        if (not isinstance(members, list) or not members
+                or any(not isinstance(m, str) or m not in sources for m in members)
+                or len(set(members)) != len(members) or piece.get("sourceId") not in members
+                or piece.get("sourceEvidence") == "unmatched" or piece.get("auditIssue")):
+            reasons.append("invalid_visual_original_piece_source")
+            continue
+        if (any(type(piece.get(k)) is not bool for k in ("eligible", "completed", "failed"))
+                or piece["completed"] and (not piece["eligible"] or piece["failed"])):
+            reasons.append("invalid_visual_original_piece_flags")
+        for member in members if retained is None else retained:
+            if member not in members:
+                reasons.append("invalid_visual_original_piece_source")
+            else:
+                grouped[member].append(piece)
+    observations = raw.get("productionEligibility", [])
+    observed = {}
+    if not isinstance(observations, list):
+        reasons.append("invalid_visual_original_eligibility")
+        observations = []
+    for observation in observations:
+        if (isinstance(observation, dict) and isinstance(observation.get("sourceId"), str)
+                and sources.get(observation["sourceId"], {}).get("currentlyRendered") is False):
+            continue  # The retained original observation is authoritative here.
+        if (not isinstance(observation, dict) or not isinstance(observation.get("sourceId"), str)
+                or observation["sourceId"] not in sources or observation["sourceId"] in observed
+                or type(observation.get("eligible")) is not bool):
+            reasons.append("invalid_visual_original_eligibility")
+        else:
+            observed[observation["sourceId"]] = observation["eligible"]
+    observed.update(retired_eligibility)
+    for identity, rows in grouped.items():
+        if observed.get(identity) is False and any(p.get("eligible") is True for p in rows):
+            reasons.append("contradictory_visual_original_eligibility:" + identity)
+    native = {identity for identity, rows in grouped.items() if rows
+              and all(type(p.get(k)) is bool for p in rows for k in ("eligible", "completed", "failed"))
+              and any(p["eligible"] for p in rows) and not any(p["failed"] for p in rows)
+              and all(p["completed"] for p in rows if p["eligible"])
+              and not any(p["completed"] and not p["eligible"] for p in rows)}
+    return (set() if reasons else native), list(dict.fromkeys(reasons))
+
+
+def _original_retraction_checks(raw, review, case, sources):
+    """Original observed events cannot disappear from normalized evidence."""
+    events, votes, retained = raw.get("retractions"), review.get("retractions", []), case.get("retractions")
+    if (not isinstance(events, list) or not all(isinstance(e, dict) for e in events)
+            or not isinstance(votes, list) or not isinstance(retained, list)
+            or len(events) != len(retained)):
+        return ["visual_original_retractions_mismatch"]
+    by_index = {}
+    for row in votes:
+        if not isinstance(row, dict):
+            return ["invalid_visual_original_retraction_vote"]
+        index = row.get("eventIndex", row.get("index"))
+        if index is None:
+            matches = [i for i, e in enumerate(events) if e.get("sourceId") == row.get("sourceId")]
+            index = matches[0] if len(matches) == 1 else None
+        if (type(index) is not int or not 0 <= index < len(events) or index in by_index
+                or not isinstance(events[index].get("sourceId"), str)
+                or events[index]["sourceId"] not in sources
+                or "sourceId" in row and row["sourceId"] != events[index].get("sourceId")
+                or any(type(row.get(k)) is not bool for k in ("confirmed", "sourceUnchanged"))
+                or "reviewed" in row and type(row["reviewed"]) is not bool):
+            return ["invalid_visual_original_retraction_vote"]
+        by_index[index] = row
+    for index, (event, item) in enumerate(zip(events, retained)):
+        vote = by_index.get(index, {})
+        expected = {**event, "nodeId": event.get("sourceId"), "eventIndex": index,
+                    "reviewed": bool(vote) and vote.get("reviewed", True),
+                    "confirmed": vote.get("confirmed"), "sourceUnchanged": vote.get("sourceUnchanged")}
+        if not _same(expected, item):
+            return ["visual_original_retractions_mismatch"]
+    return []
 
 
 def _domain(value):
@@ -129,8 +479,8 @@ def _at_least(numerator, denominator, threshold):
     return denominator > 0 and Fraction(numerator, denominator) >= Fraction(threshold)
 
 
-def _empty():
-    return {"plannedDomains": 0, "submittedCases": 0, "evidenceDomains": 0,
+def _empty(require_visual_review=False):
+    stats = {"plannedDomains": 0, "submittedCases": 0, "evidenceDomains": 0,
             "completedDomains": 0, "completedPositiveDomains": 0,
             "completedNegativeDomains": 0, "TP": 0, "TN": 0, "FP": 0, "FN": 0,
             "unknownNodes": 0, "unknownPredictions": 0, "unknownPages": 0, "pageCorrect": 0,
@@ -138,6 +488,9 @@ def _empty():
             "translatedPositiveNodes": 0, "unTranslatedPositiveNodes": 0,
             "policySkippedPositiveNodes": 0, "confirmedOmissions": 0,
             "confirmedRetractions": 0, "unnecessaryRequests": 0}
+    if require_visual_review:
+        stats.update(dict.fromkeys(VISUAL_COUNTS, 0))
+    return stats
 
 
 def _finish(stats):
@@ -154,7 +507,7 @@ def _finish(stats):
 
 
 def _quality_gates(stats):
-    return {
+    gates = {
         "nodeAccuracy": _at_least(stats["TP"] + stats["TN"], stats["nodeTotal"], "0.95"),
         "nodePrecision": _at_least(stats["TP"], stats["TP"] + stats["FP"], "0.95"),
         "pageAccuracy": _at_least(stats["pageCorrect"], stats["pageTotal"], "0.97"),
@@ -166,12 +519,17 @@ def _quality_gates(stats):
         "bothPageClassesCompleted": stats["completedPositiveDomains"] > 0
         and stats["completedNegativeDomains"] > 0,
     }
+    if "unknownVisualNodes" in stats:
+        gates.update(noUnknownVisualNodes=stats["unknownVisualNodes"] == 0,
+                     noIncorrectVisualTranslations=stats["incorrectVisualTranslations"] == 0)
+    return gates
 
 
-def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
+def _score_case(case, site, evidence_root, *, coverage_scope="strict", require_visual_review=False):
     """Admissible evidence may expose errors even when a run is incomplete."""
     _coverage_metadata(coverage_scope)
-    stats = _empty()
+    _visual_option(require_visual_review)
+    stats = _empty(require_visual_review)
     reasons = []
     if not _case_scope_matches(case, coverage_scope):
         reasons.append("coverage_scope_metadata_mismatch")
@@ -354,6 +712,10 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
             result[item["nodeId"]] = item
         maps.append(result)
     labels, predicted = maps
+    visual, native = {}, set()
+    if require_visual_review:
+        visual, native, visual_reasons = _visual_evidence(case, nodes, labels, evidence_root)
+        reasons.extend(visual_reasons)
     stats["evidenceDomains"] = 1
     if not page_known:
         stats["unknownPages"] = 1
@@ -376,6 +738,13 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
                    and zero_call_proof and case.get("completed") is True
                    and isinstance(case.get("errors"), list) and not case["errors"]
                    and case.get("blockedReason") in (None, ""))
+    if require_visual_review:
+        policy_skip = policy_skip and all(
+            visual.get(identity) == "unchanged"
+            and labels.get(identity, {}).get("reviewed") is True
+            and labels.get(identity, {}).get("independent") is True
+            and type(labels.get(identity, {}).get("needTranslation")) is bool
+            for identity in node_ids)
     for node_id in node_ids:
         label = labels.get(node_id, {})
         prediction = predicted.get(node_id, {})
@@ -396,6 +765,39 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
             reasons.append("contradictory_node_completion:" + node_id)
         if not prediction_ok or contradictory:
             stats["unknownPredictions"] += 1
+        outcome = visual.get(node_id)
+        visual_valid = True
+        if require_visual_review:
+            visual_valid = outcome is not None and known
+            # A false source selected on a translating page still represents
+            # admitted native work. Its visual vote cannot hide an unfinished
+            # original piece, even though it earns no positive coverage credit.
+            if eligible and case.get("pageDecision") is True and node_id not in native:
+                reasons.append("visual_eligible_source_without_native_completion:" + node_id)
+            if outcome in (None, "unknown", "not_visible") or not known:
+                stats["unknownVisualNodes"] += 1
+                reasons.append("unresolved_visual_node:" + node_id)
+                visual_valid = False
+            elif ((outcome in ("correct_translation", "partial_translation", "incorrect_translation")
+                   and label["needTranslation"] is False)
+                  or outcome == "unnecessary_translation" and label["needTranslation"] is True):
+                stats["unknownVisualNodes"] += 1
+                reasons.append("contradictory_visual_label_outcome:" + node_id)
+                visual_valid = False
+            if outcome in ("partial_translation", "incorrect_translation"):
+                stats["incorrectVisualTranslations"] += 1
+                reasons.append("incorrect_visual_translation:" + node_id)
+            if outcome == "unnecessary_translation":
+                stats["unnecessaryVisualTranslations"] += 1
+                # False positives remain measured by the original 95% accuracy
+                # and precision gates; this observed output adds no zero gate.
+            # Visible votes cannot establish machine work. Keep the original
+            # translated flag above for recognition contradiction checks.
+            if outcome == "correct_translation" and (not translated or node_id not in native):
+                if visual_valid:
+                    stats["unknownVisualNodes"] += 1
+                reasons.append("visual_translation_without_native_completion:" + node_id)
+                visual_valid = False
         if not known:
             stats["unknownNodes"] += 1
             reasons.append("unknown_node_label:" + node_id)
@@ -405,12 +807,16 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
             stats[("TP" if eligible else "FN") if need else ("FP" if eligible else "TN")] += 1
         elif need:
             stats["FN"] += 1  # Missing prediction is a confirmed omission, never a TP.
+        if require_visual_review:
+            translated = (translated and visual_valid and outcome == "correct_translation"
+                          and node_id in native)
         if need:
             stats["annotatedPositiveNodes"] += 1
             stats["translatedPositiveNodes"] += int(translated)
             if not translated:
                 stats["unTranslatedPositiveNodes"] += 1
-                if policy_skip and prediction_ok and not prediction["failed"] and not contradictory:
+                if (policy_skip and prediction_ok and not prediction["failed"] and not contradictory
+                        and (not require_visual_review or visual_valid and outcome == "unchanged")):
                     stats["policySkippedPositiveNodes"] += 1
                 else:
                     stats["confirmedOmissions"] += 1
@@ -441,9 +847,10 @@ def _score_case(case, site, evidence_root, *, coverage_scope="strict"):
     return stats, completed, list(dict.fromkeys(reasons))
 
 
-def evaluate(manifest, cases, evidence_root, *, coverage_scope="strict"):
+def evaluate(manifest, cases, evidence_root, *, coverage_scope="strict", require_visual_review=False):
     """Return an auditable report; no files are changed and no network is used."""
     coverage_metadata = _coverage_metadata(coverage_scope)
+    _visual_option(require_visual_review)
     sites, corpus = validate_sites(manifest)
     if not isinstance(cases, list) or not all(isinstance(c, dict) for c in cases):
         raise ValueError("cases must be an array of objects")
@@ -452,7 +859,7 @@ def evaluate(manifest, cases, evidence_root, *, coverage_scope="strict"):
     evidence_root = Path(evidence_root).resolve()
     by_id = {s["id"]: s for s in sites}
     domain_counts = Counter(by_id[c["id"]]["registeredDomain"] for c in cases if c.get("id") in by_id)
-    groups = {name: _empty() for name in ("overall",) + SPLITS}
+    groups = {name: _empty(require_visual_review) for name in ("overall",) + SPLITS}
     records = []
     for site in sites:
         for name in ("overall", site["split"]):
@@ -468,10 +875,11 @@ def evaluate(manifest, cases, evidence_root, *, coverage_scope="strict"):
         for name in ("overall", site["split"]):
             groups[name]["submittedCases"] += 1
         if domain_counts[site["registeredDomain"]] > 1:
-            stats, completed, reasons = _empty(), False, ["duplicate_registered_domain_attempts"]
+            stats, completed, reasons = _empty(require_visual_review), False, ["duplicate_registered_domain_attempts"]
         else:
             stats, completed, reasons = _score_case(case, site, evidence_root,
-                                                     coverage_scope=coverage_scope)
+                                                     coverage_scope=coverage_scope,
+                                                     require_visual_review=require_visual_review)
         for name in ("overall", site["split"]):
             for key, value in stats.items():
                 groups[name][key] += value
@@ -483,6 +891,8 @@ def evaluate(manifest, cases, evidence_root, *, coverage_scope="strict"):
                                   "unknownPredictions", "annotatedPositiveNodes", "translatedPositiveNodes",
                                   "unTranslatedPositiveNodes", "policySkippedPositiveNodes",
                                   "confirmedOmissions", "confirmedRetractions", "unnecessaryRequests")}})
+        if require_visual_review:
+            records[-1]["counts"].update({k: stats[k] for k in VISUAL_COUNTS})
     submitted = {c.get("id") for c in cases if c.get("id") in by_id}
     missing = [s["id"] for s in sites if s["id"] not in submitted]
     for stats in groups.values():
@@ -495,12 +905,15 @@ def evaluate(manifest, cases, evidence_root, *, coverage_scope="strict"):
     achieved = (gates["corpusRequirements"] and gates["independentDomains"]
                 and gates["completedHoldoutDomains"]
                 and all(gates["overall"].values()) and all(gates["holdout"].values()))
-    return {"schemaVersion": 1, "coverageScope": coverage_metadata,
+    report = {"schemaVersion": 1, "coverageScope": coverage_metadata,
             "achieved": achieved, "thresholds": THRESHOLDS,
             "corpus": corpus, "groups": groups, "gates": gates,
             "missingCases": missing, "cases": records,
             "evidenceTrust": "Local files and independent reviewer/live-host declarations; "
             "offline scoring cannot authenticate browser capture or model provenance."}
+    if require_visual_review:
+        report["visualCoverage"] = {"schemaVersion": 1, "required": True}
+    return report
 
 
 def main(argv=None):
@@ -509,6 +922,8 @@ def main(argv=None):
     parser.add_argument("--cases", type=Path, required=True, help="JSON array or schemaVersion=1/cases envelope")
     parser.add_argument("--evidence-root", type=Path, required=True, help="Only screenshots inside this directory are read")
     parser.add_argument("--coverage-scope", choices=COVERAGE_SCOPES, default="strict")
+    parser.add_argument("--require-visual-review", action="store_true",
+                        help="Require independent outcomes bound to original rendered evidence")
     parser.add_argument("--output", type=Path, help="Exclusively create a new report file; use distinct files for each scope")
     args = parser.parse_args(argv)
     try:
@@ -520,15 +935,19 @@ def main(argv=None):
             if "coverageScope" in cases and not _case_scope_matches(cases, args.coverage_scope):
                 raise ValueError("case envelope coverage_scope_metadata_mismatch")
             cases = cases.get("cases")
-        report = evaluate(manifest, cases, args.evidence_root, coverage_scope=args.coverage_scope)
+        report = evaluate(manifest, cases, args.evidence_root, coverage_scope=args.coverage_scope,
+                          require_visual_review=args.require_visual_review)
         serialized = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
         if args.output is not None:
             with args.output.open("x", encoding="utf-8", newline="\n") as stream:
                 stream.write(serialized + "\n")
     except (OSError, ValueError, TypeError, KeyError) as error:
-        print(json.dumps({"schemaVersion": 1, "achieved": False,
+        failure = {"schemaVersion": 1, "achieved": False,
                           "coverageScope": _coverage_metadata(args.coverage_scope),
-                          "error": str(error)}, ensure_ascii=False))
+                          "error": str(error)}
+        if args.require_visual_review:
+            failure["visualCoverage"] = {"schemaVersion": 1, "required": True}
+        print(json.dumps(failure, ensure_ascii=False))
         return 2
     print(serialized)
     return 0 if report["achieved"] else 1
