@@ -1362,3 +1362,110 @@ if (process.argv.includes("--registry-pressure-fixture")) {
   console.log("REGISTRY_PRESSURE_FIXTURE=" + JSON.stringify(registryFixtures));
   console.log("adapter shared latest facts/exact historical witnesses/actual needed overflow checks passed");
 }
+
+// Append-only scheduler/lifecycle fixture; no changes to preceding fixtures.
+async function schedulerLifecycleChecks() {
+  const timers = new Map(), requestedDelays = [];
+  let timerSerial = 0, clock = 0, environment, mutation, geometryReads = 0;
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, body, childNodes: [body], visibilityState: "visible", title: "Offline lifecycle",
+    addEventListener() {}, removeEventListener() {}, createRange: () => {
+      geometryReads++;
+      return { selectNodeContents() {}, getClientRects: () => [{ x: 0, y: 0, width: 200, height: 24 }] };
+    } };
+  body.parentNode = document;
+  const parent = { nodeType: 1, tagName: "P", childNodes: [], parentNode: body, parentElement: body,
+    hasAttribute: () => false, getAttribute: () => null, getRootNode: () => document };
+  const node = { nodeType: 3, nodeValue: "Independent authored paragraph.", parentNode: parent,
+    parentElement: parent, isConnected: true };
+  body.childNodes.push(parent); parent.childNodes.push(node);
+  const record = { node, source: node.nodeValue, lastWritten: node.nodeValue, groupElement: parent,
+    pieces: [{ source: node.nodeValue, complete: true, failed: false }] };
+  const state = { records: new Map([[node, record]]), blocks: new Map(), jobs: 0, pending: 0, scanning: false,
+    assessed: false, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  const session = { inspect: () => state, configure: () => true, mutated() {}, receive: () => true,
+    control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const context = { document, location: { href: "https://offline.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console, ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "offline", createRenderedTextTester: () => () => true,
+      createPageAutoSession: value => { environment = value; return session; },
+      createOpenRootObserver: value => { mutation = value.onMutations;
+        return { configure() {}, found() {}, replace() {}, dispose() {} }; } },
+    MutationObserver: function () {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {},
+    setTimeout: (callback, delay) => { const id = ++timerSerial;
+      requestedDelays.push(delay); timers.set(id, { callback, due: clock + delay }); return id; },
+    clearTimeout: id => timers.delete(id) };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa, snapshots = {};
+  const observe = phase => snapshots[phase] = qa.sample(phase);
+  const idle = value => value.producerObservations[0].eligible === false;
+  const advance = milliseconds => {
+    clock += milliseconds;
+    for (const [id, timer] of [...timers]) if (timer.due <= clock) {
+      timers.delete(id); timer.callback();
+    }
+  };
+  observe("initial"); assert.equal(idle(snapshots.initial), true);
+  let callbacks = 0;
+  const cancelled = environment.schedule(() => { callbacks++; }, 80);
+  observe("delayed"); assert.equal(snapshots.delayed.scheduledScans, 1);
+  assert.equal(idle(snapshots.delayed), false);
+  advance(79); assert.equal(callbacks, 0);
+  observe("beforeDeadline"); assert.equal(idle(snapshots.beforeDeadline), false);
+  environment.clearSchedule(cancelled); environment.clearSchedule(cancelled);
+  advance(1); observe("cancelled"); assert.equal(callbacks, 0);
+  assert.equal(snapshots.cancelled.scheduledScans, 0); assert.equal(idle(snapshots.cancelled), true);
+  let finish;
+  environment.schedule(() => { callbacks++; state.scanning = true;
+    return new Promise(resolve => { finish = () => { state.scanning = false;
+      environment.schedule(() => { callbacks++; }, 240); resolve(); }; }); }, 120);
+  advance(119); assert.equal(callbacks, 0);
+  advance(1); observe("running"); assert.equal(callbacks, 1);
+  assert.equal(snapshots.running.scheduledScans, 0); assert.equal(idle(snapshots.running), false);
+  finish(); await Promise.resolve();
+  observe("followup"); assert.equal(idle(snapshots.followup), false);
+  assert.equal(snapshots.followup.scheduledScans, 1);
+  advance(239); assert.equal(callbacks, 1);
+  advance(1); observe("finished"); assert.equal(callbacks, 2); assert.equal(idle(snapshots.finished), true);
+  environment.schedule(() => { callbacks++; }); advance(0);
+  assert.equal(callbacks, 3); assert.deepEqual(requestedDelays, [80, 120, 240, 0]);
+  // No DOM traversal or producer view is created by either boundary.
+  node.nodeValue = record.lastWritten = "独立段落译文";
+  const before = observe("after-full");
+  const savedBefore = JSON.stringify(before);
+  const reads = geometryReads, start = qa.screenshotBoundary(before.events.length);
+  assert.equal(geometryReads, reads); assert.equal(start.events.length, 0);
+  assert.throws(() => qa.screenshotBoundary(-1), /qa_screenshot_event_offset_invalid/);
+  // A withdrawal and restoration can both precede the screenshot command end.
+  node.nodeValue = record.lastWritten = record.source; mutation([]);
+  node.nodeValue = record.lastWritten = "独立段落译文"; mutation([]);
+  const endReads = geometryReads, end = qa.screenshotBoundary(start.eventCount);
+  assert.equal(geometryReads, endReads);
+  assert.equal(end.sampleSequence, start.sampleSequence + 2);
+  assert.equal(end.events.filter(event => event.type === "retraction").length, 1);
+  assert.equal(end.events[0].phase, "mutation");
+  const raw = JSON.stringify(end.events);
+  end.events[0].displayedText = "tampered";
+  const preserved = observe("later-scroll");
+  assert.equal(JSON.stringify(preserved.events.slice(start.eventCount)), raw);
+  assert.equal(JSON.stringify(before), savedBefore);
+  // Disposal cancels actual outstanding work and cannot create phantom samples,
+  // even if a session's active flag has not changed yet.
+  let lateFinish;
+  environment.schedule(() => new Promise(resolve => { lateFinish = resolve; }), 0); advance(0);
+  environment.schedule(() => { callbacks++; }, 500);
+  const finalStart = qa.screenshotBoundary(preserved.events.length);
+  qa.dispose(); assert.equal(timers.size, 0);
+  lateFinish(); await Promise.resolve(); advance(500);
+  const disposed = qa.screenshotBoundary(finalStart.eventCount);
+  assert.equal(disposed.sampleSequence, finalStart.sampleSequence);
+  assert.equal(disposed.scheduledScans, 0); assert.equal(callbacks, 3);
+  if (process.argv.includes("--scheduler-lifecycle-fixture"))
+    console.log("SCHEDULER_LIFECYCLE_FIXTURE=" + JSON.stringify({ snapshots, requestedDelays, callbacks, start, end: {
+      ...end, events: JSON.parse(raw) }, disposed }));
+  console.log("adapter requested delays/idle/cancellation/screenshot boundary chronology checks passed");
+}
+schedulerLifecycleChecks().catch(error => { console.error(error); process.exitCode = 1; });

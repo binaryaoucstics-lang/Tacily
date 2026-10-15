@@ -35,7 +35,7 @@
   const scheduledScans = new Set();
   const observationLimit = 2048, observationCharacterLimit = 2000000;
   let observationCharacters = 64, observationDropped = 0, sampleSequence = 0;
-  let serial = 0, session, observer, probeTimer, status = null, probeJob = null;
+  let serial = 0, session, observer, probeTimer, status = null, probeJob = null, disposed = false;
   const document = root.document;
   const timestamp = () => new Date().toISOString();
   function sourceVersion(id) {
@@ -648,7 +648,18 @@
       independentSourceObservationDropped: sourceVersionDropped + versionOverflow,
       pageDecision: typeof state?.assessed === "boolean" ? state.assessed : null,
       jobs: work.jobs, pending: work.pending, scanning: work.scanning,
-      rpcPending: pending.size, events: events.slice() };
+      rpcPending: pending.size, scheduledScans: scheduledScans.size, events: events.slice() };
+  }
+  // Two lightweight boundaries per screenshot, never a DOM walk or a poll.
+  // Event offsets refer to the immutable, append-only raw history; exporting a
+  // delta does not consume it. A boundary is an observation, not paint proof.
+  function screenshotBoundary(eventOffset) {
+    if (!Number.isInteger(eventOffset) || eventOffset < 0 || eventOffset > events.length)
+      throw new Error("qa_screenshot_event_offset_invalid");
+    return { at: timestamp(), sampleSequence, eventOffset, eventCount: events.length,
+      scheduledScans: scheduledScans.size,
+      viewport: { width: root.innerWidth, height: root.innerHeight, scrollX: root.scrollX, scrollY: root.scrollY },
+      events: JSON.parse(JSON.stringify(events.slice(eventOffset))) };
   }
   function observation() { if (observer && session) observer.configure(session.inspect().observing); }
   function recordStatus(value) { status = value; events.push({ type: "status", value, at: timestamp() }); observation(); }
@@ -686,17 +697,17 @@
     });
   }
   session = api.createPageAutoSession({ document, token: api.randomIdentifier(),
-    // Match the session's default zero-delay scheduler exactly. Track real
+    // Pass through the production session's requested delay. Track real
     // scheduled work and sample after its Promise settles, without adding polls,
     // changing delays, or declaring idle from a status callback during scanning.
-    schedule: callback => {
+    schedule: (callback, delay = 0) => {
       const id = root.setTimeout(() => {
         scheduledScans.delete(id);
         const result = callback();
         if (result && typeof result.then === "function") result.then(() => {
-          if (session.inspect().active) sample("producer-idle");
+          if (!disposed && session.inspect().active) sample("producer-idle");
         });
-      }, 0);
+      }, delay);
       scheduledScans.add(id); return id;
     },
     clearSchedule: id => { scheduledScans.delete(id); root.clearTimeout(id); },
@@ -760,7 +771,7 @@
     return { id: job.id, stage: job.stage };
   }
   root.__websiteQa = {
-    sample, startProbe, probeStatus: id => probeJob?.id === id ? { ...probeJob } : null,
+    sample, screenshotBoundary, startProbe, probeStatus: id => probeJob?.id === id ? { ...probeJob } : null,
     drain: () => outbound.splice(0),
     configure: config => { const ok = session.configure(config); observation(); return ok; },
     // Raw production frames go through receive. Accepted frames resolve transport RPCs.
@@ -775,8 +786,10 @@
     acknowledge: (rpcId, response) => { const resolve = pending.get(rpcId); pending.delete(rpcId); resolve?.(response); return !!resolve; },
     control: action => session.control(action),
     dispose: () => {
-      probeJob = null;
+      disposed = true; probeJob = null;
       root.clearInterval(probeTimer); session.dispose(); observer.dispose(); motion.dispose();
+      for (const id of scheduledScans) root.clearTimeout(id);
+      scheduledScans.clear();
       productWrites.clear(); productWriteCount = productWriteCharacters = 0;
       for (const [target, type, fn, options] of listeners) target?.removeEventListener(type, fn, options);
       for (const resolve of pending.values()) resolve({ accepted: false, reason: "qa_disposed" }); pending.clear();
