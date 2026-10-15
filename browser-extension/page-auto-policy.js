@@ -88,11 +88,54 @@
     "API", "GPU", "USB", "SSD", "RAM", "DNS", "SQL", "HTML", "CSS",
     "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI", "IPC"
   ]);
+  // Common English imperative/UI verbs are lexical content, not name evidence.
+  // TitleCase and Chinese neighbours (even 的) cannot disambiguate these as
+  // proper names. Check whole words, including numbered actions: domains
+  // and products with an independent suffix still have literal/name evidence.
+  // Mirror this general command vocabulary in Core PageTextEligibility.
+  const commandWords = new Set([
+    "Accept", "Add", "Allow", "Apply", "Approve", "Browse", "Build", "Buy",
+    "Cancel", "Change", "Check", "Choose", "Clear", "Click", "Close", "Confirm",
+    "Connect", "Continue", "Copy", "Create", "Cut", "Delete", "Disable", "Download",
+    "Edit", "Enable", "Enter", "Execute", "Exit", "Export", "Find", "Finish",
+    "Follow", "Go", "Help", "Import", "Install", "Join", "Learn", "Listen", "Load",
+    "Move", "Open", "Pause", "Play", "Press", "Print", "Quit", "Read", "Refresh",
+    "Register", "Reject", "Reload", "Remove", "Rename", "Reply", "Reset", "Restart",
+    "Restore", "Resume", "Retry", "Return", "Run", "Save", "Search", "Select", "Send",
+    "Share", "Show", "Sign", "Skip", "Start", "Stop", "Submit", "Switch", "Try",
+    "Uninstall", "Update", "Upload", "Use", "Verify", "View", "Wait", "Watch", "Write"
+  ].map(word => word.toLowerCase()));
+  // General document/learning headings, not a site or product vocabulary.
+  // A number cannot distinguish "Chapter2" from a device ID. Prefer translating
+  // ambiguous content words in any casing, including plural numbered headings.
+  // Keep this vocabulary and the whole-token syntax mirrored in Core.
+  const headingWords = new Set([
+    "Activity", "Answer", "Appendix", "Appendices", "Article", "Assignment", "Book",
+    "Chapter", "Conclusion", "Content", "Definition", "Diagram", "Episode", "Example",
+    "Exercise", "Experiment", "Figure", "Hint", "Instruction", "Introduction", "Issue", "Lesson", "Module",
+    "Note", "Objective", "Overview", "Page", "Paragraph", "Part", "Practice", "Problem", "Question", "Quiz",
+    "Reference", "Result", "Review", "Scene", "Section", "Solution", "Stage", "Step", "Summary", "Table",
+    "Task", "Topic", "Tutorial", "Unit", "Volume", "Warning", "Worksheet"
+  ].map(word => word.toLowerCase()));
+  function isContentWord(value) {
+    const match = /^([A-Za-z]+)(?:[-_]?[0-9]{1,12}(?:\+{1,2}|#)?)?$/u.exec(value);
+    if (!match) return false;
+    const word = match[1].toLowerCase();
+    return commandWords.has(word) || headingWords.has(word)
+      || word.endsWith("s") && headingWords.has(word.slice(0, -1));
+  }
   // Compact uppercase-number labels, not bare acronyms, names or English words.
   // Only automatic metadata gates use this without surrounding Chinese evidence.
   const structuredIdentifier = /^[A-Z]{1,4}[-_]?[0-9]{1,12}$/u;
+  // Mirror Core's literal syntax; leave bare words and interleaved capitals
+  // eligible. Automatic metadata only, so selection still translates IDs.
+  const literalIdentifier = /^(?:[A-Z]{1,4}|[A-Z][a-z]+(?:[A-Z][a-z]+)*)[-_]?[0-9]{1,12}(?:[A-Z][a-z]+)?(?:\+{1,2}|#)?$/u;
   function alreadyTargetText(text, targetLanguage = "简体中文") {
     if (!/中文|Chinese|zh(?:-|$)/i.test(targetLanguage)) return false;
+    const source = trimEligibilityText(text).normalize("NFKC");
+    return readableChineseAbbreviations(source) || readableChineseTerms(source);
+  }
+  function readableChineseAbbreviations(source) {
     // Match Core PageTextEligibility's per-node rules after NFKC. Only ASCII
     // uppercase runs of 1..4 letters (optionally with digits, e.g. R7) are
     // candidates. Multi-letter runs must be known acronyms or compact
@@ -103,7 +146,6 @@
     // One abbreviation in a compact label needs >=3 Han (APEC中国年); spaced
     // labels/multiple abbreviations need >=6 Han and >=2 Han per Latin letter.
     // This retains "STOP 王曼昱!". Digits/punctuation/emoji do not inflate the share.
-    const source = trimEligibilityText(text).normalize("NFKC");
     // Same Unicode whitespace set as Rune.IsWhiteSpace (including NEL).
     const hasWhitespace = /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u.test(source);
     let hanCount = 0, latinCount = 0, abbreviations = 0, runLetters = 0, hasCombiningMark = false;
@@ -123,6 +165,7 @@
     if (latinCount === 0) return hanCount > 0;
     let previous = null;
     for (const run of source.matchAll(/[A-Z][A-Z0-9]*(?:[-_][0-9]+)?/gu)) {
+      if (isContentWord(run[0])) return false;
       const letters = run[0].replace(/[^A-Z]/gu, "");
       if (letters.length > 1 && !technicalAbbreviations.has(letters) && !structuredIdentifier.test(run[0])) return false;
       if (previous) {
@@ -133,6 +176,54 @@
       previous = run;
     }
     return !hasCombiningMark && (abbreviations === 1 && hanCount >= 3 && !hasWhitespace
+      || hanCount >= 6 && hanCount >= latinCount * 2);
+  }
+  // Names bind to Chinese on both sides (or possessive 的); internal capitals
+  // also identify product names at a Chinese edge. A clause boundary is not a
+  // binding: “，Alice介绍...” remains eligible. Lowercase prose, other scripts
+  // and combining marks never become terms merely because Han predominates.
+  function readableChineseTerms(source) {
+    let hanCount = 0, latinCount = 0;
+    for (const character of source) {
+      if (letter.test(character)) {
+        if (perNodeHan.test(character)) hanCount++;
+        else if (/^[A-Za-z]$/u.test(character)) latinCount++;
+        else return false;
+      }
+      if (/\p{M}/u.test(character)) return false;
+    }
+    if (hanCount === 0 || latinCount === 0) return false;
+    const runs = [...source.matchAll(/[A-Za-z][A-Za-z0-9]*(?:[._:/+?#=&%~@-][A-Za-z0-9]+)*(?:\+{1,2}|#)?/gu)];
+    let previous = null, novelTerm = false, literalOnly = true;
+    for (const run of runs) {
+      const value = run[0];
+      if (isContentWord(value)) return false;
+      // White_Space matches Rune/char.IsWhiteSpace; internal BOM is not a gap.
+      const before = source.slice(0, run.index).replace(/\p{White_Space}+$/u, "");
+      const after = source.slice(run.index + value.length).replace(/^\p{White_Space}+/u, "");
+      const beforeHan = !!before && perNodeHan.test([...before].at(-1));
+      const afterHan = !!after && perNodeHan.test([...after][0]);
+      const dottedLabel = /^[A-Z]{2,}$/u.test(value) && after.startsWith(".")
+        && after.length > 1 && perNodeHan.test([...after.slice(1)][0]);
+      const literal = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,63}(?:\/[A-Za-z0-9._~%+\-]*)?$/u.test(value)
+        || literalIdentifier.test(value) || dottedLabel;
+      if (literal) novelTerm = true;
+      else if (technicalAbbreviations.has(value) || /^[A-Z]$/u.test(value)) literalOnly = false;
+      else {
+        if (!/^(?:[A-Z][a-z][A-Za-z]*|[a-z]+[A-Z][A-Za-z]*)$/u.test(value)
+            || !(beforeHan && afterHan || after.startsWith("的") || /[a-z][A-Z]/u.test(value) && (beforeHan || afterHan))) return false;
+        novelTerm = true;
+        literalOnly = false;
+      }
+      if (previous) {
+        const gap = source.slice(previous.index + previous[0].length, run.index);
+        if (/^\p{White_Space}+$/u.test(gap)
+            && (!technicalAbbreviations.has(previous[0]) || !technicalAbbreviations.has(value))) return false;
+      }
+      previous = run;
+    }
+    return novelTerm && (literalOnly && runs.length === 1 && hanCount >= 2
+      || runs.length === 1 && hanCount >= 3 && !/\p{White_Space}/u.test(source)
       || hanCount >= 6 && hanCount >= latinCount * 2);
   }
   const monthName = "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
@@ -179,7 +270,7 @@
     if (/^(?:(?:©|\(c\))\s*\d{0,4}|copyright\s*(?:©\s*)?\d{4})(?:\s*[-–]\s*\d{4})?\s*[^!?\n]{0,130}$/iu.test(text)) return true;
     if (/^all rights reserved\.?$/iu.test(text)) return true;
     if (/^(?:isbn(?:-1[03])?|issn|doi)\s*:?\s*(?:\d[\d\s./():-]*[\dx]|10\.\d{4,9}\/\S+)$/iu.test(text)) return true;
-    if (structuredIdentifier.test(text)) return true;
+    if (!isContentWord(text) && (structuredIdentifier.test(text) || literalIdentifier.test(text))) return true;
     if (/^(?:[\u3400-\u9fff]{0,3}ICP\s*(?:备|備|证|證)\s*[0-9]{6,20}(?:号|號)?(?:-[0-9]{1,3})?|[\u3400-\u9fff]{1,3}公网安备\s*[0-9]{10,20}(?:号|號)?|(?:company\s+)?registration\s*(?:no\.?|number)\s*[:：]?\s*[A-Z]{0,4}-?[0-9]{4,20})$/iu.test(text)) return true;
     if (/^(?:(?:(?:estimated\s+)?reading|read)\s+time\s*:\s*[0-9]{1,3}\s*(?:min(?:ute)?s?|hours?)\.?|[0-9]{1,3}(?:\s+|-)(?:min(?:ute)?s?|hours?)(?:\s+|-)read\.?|(?:预计|預計)?(?:阅读|閱讀)(?:时间|時間)?\s*[:：]?\s*[0-9]{1,3}\s*(?:分钟|分鐘|小时|小時))$/iu.test(text)) return true;
     // Credit syntax plus an actual provider is required. A bare person/publication

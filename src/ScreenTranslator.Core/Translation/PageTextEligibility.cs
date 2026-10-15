@@ -21,7 +21,7 @@ public static partial class PageTextEligibility
         catch (ArgumentException) { source = TrimEligibilityText(text); }
         if (source.Length == 0) return false;
 
-        // Readable Chinese can contain short technical abbreviations. In a
+        // Readable Chinese can contain technical terms and literal identifiers. In a
         // foreign semantic group it can still be a name/caption to translate.
         if (!foreignHanContext && PageTranslationDecision.NormalizeLanguage(targetLanguage) == "zh")
         {
@@ -69,6 +69,51 @@ public static partial class PageTextEligibility
         "JSON", "XML", "HTTP", "TCP", "UDP", "PDF", "DNA", "RNA", "MRI", "IPC"
     };
 
+    // Common English imperative/UI verbs are lexical content, not name evidence.
+    // TitleCase and Chinese neighbours (even 的) cannot disambiguate these as
+    // proper names. Check whole words, including numbered actions: domains
+    // and products with an independent suffix still have literal/name evidence.
+    // Mirror this general command vocabulary in page-auto-policy.js.
+    private static readonly HashSet<string> CommandWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Accept", "Add", "Allow", "Apply", "Approve", "Browse", "Build", "Buy",
+        "Cancel", "Change", "Check", "Choose", "Clear", "Click", "Close", "Confirm",
+        "Connect", "Continue", "Copy", "Create", "Cut", "Delete", "Disable", "Download",
+        "Edit", "Enable", "Enter", "Execute", "Exit", "Export", "Find", "Finish",
+        "Follow", "Go", "Help", "Import", "Install", "Join", "Learn", "Listen", "Load",
+        "Move", "Open", "Pause", "Play", "Press", "Print", "Quit", "Read", "Refresh",
+        "Register", "Reject", "Reload", "Remove", "Rename", "Reply", "Reset", "Restart",
+        "Restore", "Resume", "Retry", "Return", "Run", "Save", "Search", "Select", "Send",
+        "Share", "Show", "Sign", "Skip", "Start", "Stop", "Submit", "Switch", "Try",
+        "Uninstall", "Update", "Upload", "Use", "Verify", "View", "Wait", "Watch", "Write"
+    };
+
+    // General document/learning headings, not a site or product vocabulary.
+    // A number cannot distinguish "Chapter2" from a device ID. Prefer translating
+    // ambiguous content words in any casing, including plural numbered headings.
+    // Keep this vocabulary and the whole-token syntax mirrored in JS.
+    private static readonly HashSet<string> HeadingWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Activity", "Answer", "Appendix", "Appendices", "Article", "Assignment", "Book",
+        "Chapter", "Conclusion", "Content", "Definition", "Diagram", "Episode", "Example",
+        "Exercise", "Experiment", "Figure", "Hint", "Instruction", "Introduction", "Issue", "Lesson", "Module",
+        "Note", "Objective", "Overview", "Page", "Paragraph", "Part", "Practice", "Problem", "Question", "Quiz",
+        "Reference", "Result", "Review", "Scene", "Section", "Solution", "Stage", "Step", "Summary", "Table",
+        "Task", "Topic", "Tutorial", "Unit", "Volume", "Warning", "Worksheet"
+    };
+
+    private static bool IsContentWord(string value)
+    {
+        var match = ContentWordToken().Match(value);
+        if (!match.Success) return false;
+        var word = match.Groups[1].Value;
+        return CommandWords.Contains(word) || HeadingWords.Contains(word)
+            || (word.EndsWith('s') || word.EndsWith('S')) && HeadingWords.Contains(word[..^1]);
+    }
+
+    [GeneratedRegex(@"^([A-Za-z]+)(?:[-_]?[0-9]{1,12}(?:\+{1,2}|#)?)?$", RegexOptions.CultureInvariant)]
+    private static partial Regex ContentWordToken();
+
     // Keep these per-node rules in sync with page-auto-policy.js. Count Unicode
     // letters after NFKC, not digits, punctuation or emoji. Only ASCII uppercase
     // runs of 1..4 letters (optionally with digits, e.g. R7) are candidates.
@@ -80,7 +125,10 @@ public static partial class PageTextEligibility
     // A compact label needs >=3 Han and one abbreviation (APEC中国年). Spaced
     // labels/multiple abbreviations need >=6 Han and >=2 Han per Latin letter,
     // preserving short foreign commands such as "STOP 王曼昱!". Han-only is unchanged.
-    private static bool IsReadableChinese(string source)
+    private static bool IsReadableChinese(string source) => IsReadableChineseAbbreviations(source)
+        || IsReadableChineseTerms(source);
+
+    private static bool IsReadableChineseAbbreviations(string source)
     {
         var hanCount = 0;
         var latinCount = 0;
@@ -118,6 +166,7 @@ public static partial class PageTextEligibility
         Match? previous = null;
         foreach (Match run in AbbreviationRuns().Matches(source))
         {
+            if (IsContentWord(run.Value)) return false;
             var letters = string.Concat(run.Value.Where(character => character is >= 'A' and <= 'Z'));
             if (letters.Length > 1 && !TechnicalAbbreviations.Contains(letters)
                 && !StructuredIdentifier().IsMatch(run.Value)) return false;
@@ -142,6 +191,87 @@ public static partial class PageTextEligibility
     [GeneratedRegex(@"^[A-Z]{1,4}[-_]?[0-9]{1,12}$", RegexOptions.CultureInvariant)]
     private static partial Regex StructuredIdentifier();
 
+    // A second, conservative lexical path for terms the acronym rule cannot
+    // describe. Names must bind to Chinese on both sides (or a possessive 的),
+    // while internal capitals also identify product names at a Chinese edge.
+    // A clause boundary is not a name binding: “，Alice介绍...” stays eligible.
+    // Never infer a term from a lowercase word, Han share alone or a site name.
+    private static bool IsReadableChineseTerms(string source)
+    {
+        var hanCount = 0;
+        var latinCount = 0;
+        var hasWhitespace = false;
+        foreach (var rune in source.EnumerateRunes())
+        {
+            if (Rune.IsLetter(rune))
+            {
+                if (IsHan(rune)) hanCount++;
+                else if (rune.Value is >= 'A' and <= 'Z' or >= 'a' and <= 'z') latinCount++;
+                else return false;
+            }
+            if (Rune.GetUnicodeCategory(rune) is System.Globalization.UnicodeCategory.NonSpacingMark
+                or System.Globalization.UnicodeCategory.SpacingCombiningMark
+                or System.Globalization.UnicodeCategory.EnclosingMark) return false;
+            if (Rune.IsWhiteSpace(rune)) hasWhitespace = true;
+        }
+        if (hanCount == 0 || latinCount == 0) return false;
+        var runs = ReadableTermRuns().Matches(source);
+        Match? previous = null;
+        var novelTerm = false;
+        var literalOnly = true;
+        foreach (Match run in runs)
+        {
+            var value = run.Value;
+            if (IsContentWord(value)) return false;
+            var before = source[..run.Index].TrimEnd();
+            var after = source[(run.Index + run.Length)..].TrimStart();
+            var beforeHan = before.Length > 0 && IsHan(before.EnumerateRunes().Last());
+            var afterHan = after.Length > 0 && IsHan(after.EnumerateRunes().First());
+            var dottedLabel = UppercaseLabel().IsMatch(value) && after.StartsWith('.')
+                && after.Length > 1 && IsHan(after[1..].EnumerateRunes().First());
+            var literal = EmbeddedDomain().IsMatch(value) || LiteralIdentifier().IsMatch(value) || dottedLabel;
+            if (literal) novelTerm = true;
+            else if (TechnicalAbbreviations.Contains(value) || value.Length == 1 && value[0] is >= 'A' and <= 'Z')
+                literalOnly = false;
+            else
+            {
+                if (!TermName().IsMatch(value)
+                    || !(beforeHan && afterHan || after.StartsWith('的')
+                        || InternalCapital().IsMatch(value) && (beforeHan || afterHan))) return false;
+                novelTerm = true;
+                literalOnly = false;
+            }
+            // Adjacent foreign words remain a phrase, even when they look like
+            // names or IDs. Preserve the existing AI CPU acronym exception.
+            if (previous is not null)
+            {
+                var gap = source[(previous.Index + previous.Length)..run.Index];
+                if (gap.Length > 0 && gap.All(char.IsWhiteSpace)
+                    && (!TechnicalAbbreviations.Contains(previous.Value) || !TechnicalAbbreviations.Contains(value)))
+                    return false;
+            }
+            previous = run;
+        }
+        return novelTerm && (literalOnly && runs.Count == 1 && hanCount >= 2
+            || runs.Count == 1 && hanCount >= 3 && !hasWhitespace
+            || hanCount >= 6 && hanCount >= latinCount * 2);
+    }
+
+    [GeneratedRegex(@"[A-Za-z][A-Za-z0-9]*(?:[._:/+?#=&%~@-][A-Za-z0-9]+)*(?:\+{1,2}|#)?", RegexOptions.CultureInvariant)]
+    private static partial Regex ReadableTermRuns();
+    [GeneratedRegex(@"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,63}(?:/[A-Za-z0-9._~%+\-]*)?$", RegexOptions.CultureInvariant)]
+    private static partial Regex EmbeddedDomain();
+    // Existing compact numeric prefixes, optional product suffix and literal
+    // +/# variants. Long all-uppercase words and interleaved capitals are prose.
+    [GeneratedRegex(@"^(?:[A-Z]{1,4}|[A-Z][a-z]+(?:[A-Z][a-z]+)*)[-_]?[0-9]{1,12}(?:[A-Z][a-z]+)?(?:\+{1,2}|#)?$", RegexOptions.CultureInvariant)]
+    private static partial Regex LiteralIdentifier();
+    [GeneratedRegex(@"^[A-Z]{2,}$", RegexOptions.CultureInvariant)]
+    private static partial Regex UppercaseLabel();
+    [GeneratedRegex(@"^(?:[A-Z][a-z][A-Za-z]*|[a-z]+[A-Z][A-Za-z]*)$", RegexOptions.CultureInvariant)]
+    private static partial Regex TermName();
+    [GeneratedRegex(@"[a-z][A-Z]", RegexOptions.CultureInvariant)]
+    private static partial Regex InternalCapital();
+
     private static bool IsFormula(string source)
     {
         if (!source.Any(character => character is '=' or '+' or '×' or '*' or '÷' or '^'
@@ -157,7 +287,8 @@ public static partial class PageTextEligibility
     {
         if (source.Length > 180) return false;
         if (Copyright().IsMatch(source) || Identifier().IsMatch(source)
-            || StructuredIdentifier().IsMatch(source) || Registration().IsMatch(source)
+            || !IsContentWord(source) && (StructuredIdentifier().IsMatch(source) || LiteralIdentifier().IsMatch(source))
+            || Registration().IsMatch(source)
             || ReadingTime().IsMatch(source)) return true;
         var prefix = CreditPrefix().Match(source);
         var rest = prefix.Success ? source[prefix.Length..] : source;
