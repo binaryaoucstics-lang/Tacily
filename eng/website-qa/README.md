@@ -4,7 +4,7 @@
 
 ## 覆盖口径接口 v1
 
-[覆盖与有界证据契约](COVERAGE-EVIDENCE-20261013.md) 发布两种明确口径，固定基线已有以下参数。此次仅按 [assessment 契约](ASSESSMENT-PROOF-20261013.md) 扩展 automatic-page 的证据识别；本任务只修改文档，扩展实现仍须主控集成后验收。
+[覆盖与有界证据契约](COVERAGE-EVIDENCE-20261013.md) 发布两种明确口径，固定基线已有以下参数及 [assessment 契约](ASSESSMENT-PROOF-20261013.md) 的 automatic-page 证据识别。本轮将独立 normalizer、evaluator、各自的新回归和文档移植到已审查采集性能与源 epoch 的固定基线；主控仍须审查差异并在实际 integration HEAD 重跑完整验收。
 
 - `normalize_case`、`evaluate`、`_score_case` 增加关键字 `coverage_scope="strict"`，保留现有位置参数调用。CLI 增加 `--coverage-scope strict|automatic-page`，非法模式必须拒绝。
 - 归一化案例与评分报告记录 `coverageScope={"schemaVersion":1,"mode":"strict"}` 或 `{"schemaVersion":1,"mode":"automatic-page"}`。覆盖口径版本与原有案例 envelope 的 `schemaVersion` 分别保留。
@@ -53,14 +53,14 @@ holdout 标签由独立审核者保存，不用于调参。评分器只读取固
 只需 Python 标准库，不联网、不启动浏览器、不读取用户设置或凭据。所有输入路径由调用者提供，截图读取限于显式证据根目录内，拒绝通过 `..` 或符号链接逃出该目录。
 
 ```powershell
-# 真实采集和独立审核由主控完成；证据放在忽略目录。
-python eng/website-qa/evaluate.py --cases .parallel/website-qa/cases.json --evidence-root .parallel/website-qa > .parallel/website-qa/report.json
+# 真实采集和独立审核由主控完成；证据放在忽略目录，输出选择未使用的新路径。
+python eng/website-qa/evaluate.py --cases .parallel/website-qa/cases.json --evidence-root .parallel/website-qa --output .parallel/website-qa/report.legacy.json
 python -m unittest discover -s eng/website-qa -p 'test_*.py'
 ```
 
 默认清单为同目录 `sites.json`，可用 `--sites` 指定明确版本。案例输入为 JSON 数组，或 `{"schemaVersion":1,"cases":[...]}`。退出码：0 表示 `achieved=true`；1 表示已成功评分但门槛未满足；2 表示输入/文件错误。报告始终明确 `achieved`，不会把空数据或基础设施验收成功当作真实目标完成。
 
-以下是现有版本化覆盖接口的离线 CLI 用法；本轮 assessment 扩展仍须集成验证。同一原始捕获及冻结审核分别生成新文件，不覆盖原 case、review、截图或旧报告。两份 `cases.*.json` 由对应口径的归一化案例组成数组或上述 envelope，不能将单个案例对象当作数组，也不能混用口径。
+以下是现有版本化覆盖接口的 legacy 离线 CLI 用法，省略视觉审核开关。同一原始捕获及冻结审核分别生成新文件，不覆盖原 case、review、截图或旧报告。两份 `cases.*.json` 由对应口径的归一化案例组成数组或上述 envelope，不能将单个案例对象当作数组，也不能混用口径。
 
 ```powershell
 python eng/website-qa/normalize.py --case .parallel/website-qa/case.json --review .parallel/website-qa/review.json --evidence-root .parallel/website-qa --coverage-scope strict --output .parallel/website-qa/normalized.strict.json
@@ -70,6 +70,91 @@ python eng/website-qa/evaluate.py --cases .parallel/website-qa/cases.automatic-p
 ```
 
 评分 CLI 新增可选 `--output <path>`，指定时以独占创建方式写入新报告，已存在的路径必须拒绝；省略时保留原 stdout 输出。配对报告使用 `--output` 并选择未使用的新名字，不用 PowerShell 重定向覆盖旧证据。两份报告并列审核；automatic-page 的完成数不能记作 strict 完成数。退出码与 `achieved` 含义不变，输出文件存在不表示质量目标已达到。
+
+## 独立视觉结果接口 v1（显式启用）
+
+[独立截图结果公共契约](VISUAL-PROOF-20261014.md) 规定 `normalize_case`、`evaluate` 和 `_score_case` 的关键字 `require_visual_review=False`，以及两者 CLI 的 `--require-visual-review`。有效 false 节点的不必要视觉翻译保留为测得的错误，不另加零假阳性要求。每个可见结果，包括 `unchanged`，都须有下述明确输出 phase。默认 False 保留所有旧调用、测试与报告行为，属于 legacy 模式：生产 `completed`、成功 terminal 和截图通过票仍不能独立证明每个源的文字确实正确显示为译文。即使 legacy 报告给出 `achieved=true`，也不足以验证包含实际截图确认的完整目标。
+
+**完整目标验证必须在归一化和评分两步都显式传入 `--require-visual-review`**，逐案例要求独立视觉结果，并在报告记录 `visualCoverage={"schemaVersion":1,"required":true}`。该版本独立于 `coverageScope` 和案例 envelope；视觉审核要求可与 strict 或 automatic-page 配对，不能用覆盖口径开关代替。保持 fixed50、原识别公式与全部质量门槛。
+
+独立审核文件中的新增 `visualReview` 形状如下。示例只展示字段，哈希占位说明须替换为实际值，不能作为真实审核或可评分 fixture：
+
+```json
+{
+  "visualReview": {
+    "schemaVersion": 1,
+    "caseSha256": "原始捕获文件字节的 SHA256",
+    "sourceReviewSha256": "冻结源审核的 SHA256，与外层同名字段一致",
+    "reviewed": true,
+    "independent": true,
+    "nodes": [
+      {
+        "sourceId": "source-1",
+        "sourceTextSha256": "该源精确原文 UTF-8 字节的 SHA256",
+        "outcome": "correct_translation",
+        "reviewed": true,
+        "independent": true,
+        "evidence": [{"phase": "stable-full", "note": "实际查看的文字、位置、事实及几何情况"}]
+      }
+    ]
+  }
+}
+```
+
+| 校验对象 | 必须满足 |
+| --- | --- |
+| 类型与版本 | `visualReview` 是对象，`schemaVersion` 是整数 1；review 和每个节点的 reviewed/independent 均为明确 boolean true，不接受字符串、数字或以 boolean 冒充版本整数；nodes 是列表，outcome 是下表枚举之一 |
+| 捕获身份 | `caseSha256` 绑定未修改的原始文件字节；normalizer 核对实际原始文件，evaluator 核对保留的 provenance 哈希，不通过重写捕获获取新身份 |
+| 源审核身份 | `sourceReviewSha256` 是非空字符串，恰含 64 个十六进制字符（`0-9a-fA-F`），与外层冻结的原值精确一致；合法的大写或混合大小写原值须在 normalizer/evaluator 两端一致接受，不转换大小写、trim 或重算替换；不把新增视觉文件的哈希冒充原源审核哈希 |
+| 源身份与原文 | 每个且仅每个原始 sourceId 有一个唯一对象结果行，sourceId 是非空字符串；`sourceTextSha256` 核对精确原文 UTF-8 字节，不 trim、折叠空白、改事实、使用译文或当前源替代历史原文；全部哈希须为 64 位十六进制字符串 |
+| 可见证据 | evidence 是非空列表；每项 phase 属于实际捕获且已经审核的原始截图，note 是非空字符串并描述实际检查；每个可见 outcome（包括 unchanged）至少引用一个下列明确输出 phase |
+
+输出 phase 精确为 `after`、`after-full`、`stable`、`stable-full`、`scroll-after`、`return-after`、`reflow-after`、`disclosure-open`、`disclosure-restored`，以及 `stable-refresh-N` / `stable-full-refresh-N`（N 为无前导零的非零十进制整数，匹配 `[1-9][0-9]*`）。`before`、`before-full`、`scroll-before` 单独或组合都不能证明输出；任意自定义非 before phase、`after-refresh-1`、`stable-refresh-0`、`stable-full-refresh-01` 或额外后缀也不接受。该规则适用于 correct/partial/incorrect/unnecessary_translation 和 unchanged，包括负页 policy skip。`unknown` / `not_visible` 可以记录输入图上的无法确认，但仍未解决、阻止完成，不取得跳过信用。
+
+两端均须独立检查完整形状、类型、身份、哈希、phase 和说明，不能由 normalizer 的摘要直接赋予 evaluator 完成信用；直接输入归一化案例评分也受相同要求。缺少 visualReview/结果行、重复或额外源、错误哈希、无效类型、虚构 phase 等均拒绝完整证明，不能推断投票或补写成功。源标签、历史 sourceNodes、原始生产 completed/failed 与请求证据留在 provenance，视觉审核不能覆写它们。
+
+| 冻结标签 / outcome | required 模式中的含义 |
+| --- | --- |
+| true / `correct_translation` | 仅与原有实际 live 成功 terminal、有效生产预测和对应源完整完成证据同时成立时，才计入 translatedPositiveNodes；审核票不能创造模型工作 |
+| true / `partial_translation` 或 `incorrect_translation` | 部分英文残留、错误译文、日期/计数等事实改变均阻止完成，不取得翻译信用 |
+| true / `unchanged` | strict 中仍是必须翻译的遗漏；automatic-page 仅在上述全部已证明负页零调用策略及有效预测满足时计 policySkippedPositiveNodes，仍属于未翻译正节点 |
+| false / `unchanged` | 已可读中文/繁中、无需翻译的名称或 metadata 正确保留原文；无需人为翻译这些节点取得视觉成功，负页仍须零不必要请求 |
+| false / `unnecessary_translation` | 有效且独立确认的不必要输出递增 unnecessaryVisualTranslations，不单独使案例 incomplete；不重写 eligible 或识别混淆矩阵，由原 95% accuracy/precision 门槛衡量识别错误 |
+| 任意标签 / `not_visible` 或 `unknown` | 可见性或结果未解决，继续阻止完成；隐藏不消除源或遗漏，不自动变成正确未翻译 |
+| unknown 源标签 | 无论视觉票如何，标签仍是 unknown，原未知门禁继续失败；与已知标签矛盾的 outcome 组合无效 |
+
+识别 TP/TN/FP/FN 仍仅由冻结 needTranslation 与真实 eligible 决定，节点 accuracy=(TP+TN)/(TP+TN+FP+FN)、precision=TP/(TP+FP)、recall=TP/(TP+FN)，页面 accuracy 仍为正确页面决策/有独立真值的有效页面。视觉错误不能改标签或识别预测来美化这些比例。
+
+required 模式才将视觉确认加入原 `translatedPositiveNodes`、`unTranslatedPositiveNodes`、`policySkippedPositiveNodes`、`confirmedOmissions` 的证据计算；`annotatedPositiveNodes` 分母及 translationCoverage 原公式不变，policy skip 不增加翻译数。案例和 overall/development/holdout 聚合均须从证据计算并呈现以下视觉计数：
+
+| 视觉计数 | 门禁含义 |
+| --- | --- |
+| `unknownVisualNodes` | 未解决视觉结果；须为零，unknown/not_visible、缺失或无效证明仍阻止完成 |
+| `incorrectVisualTranslations` | 必须翻译的部分或错误输出；须为零，事实错误不能取得完整翻译信用 |
+| `unnecessaryVisualTranslations` | false 节点上有效的不必要输出；如实递增，不要求为零，不新增 `noUnnecessaryVisualTranslations` 门禁 |
+
+完整报告仍须必须翻译的节点有已知正确视觉结果、合法 unchanged/policy skip 有完整证明，以及全部旧门禁通过。机器成功却必须翻译的文字仍为原文、未知/缺失视觉结果、部分翻译或事实错误均阻止完成。有效 false / unnecessary_translation 本身不使案例 incomplete，也不抹去其他节点的正确翻译；实际无效 native/source 证据、矛盾标签/outcome、错误、缺请求/终止、源历史 unknown、遗漏或已确认撤回仍阻止完成。原 `unnecessaryRequests` / `noUnnecessaryRequests` 仅按原负页请求规则计算，和逐节点视觉计数是不同字段；修订不解除负页零调用要求，也不把正页上的每个 false 节点输出当成负页请求错误。后来恢复不能擦除历史失败。
+
+### 原始 phase 与可读裁剪票
+
+原始 review（包括 notes 与 crop votes）、捕获、截图哈希和旧公开失败保持不可变。审核者须实际打开并检查图片，先核对完整长页各区域，再用可读裁剪检查具体源的文字和事实；1px 合成图片或机器摘要不能充当真实视觉检查。原 `review.screenshots` 仍是所有且仅所有实际捕获 phase 的 boolean 投票映射，完整页、details 与每次刷新图均分别审核。裁剪便于阅读，不能冒充新捕获 phase，不能把裁剪键或对象票塞入原 boolean 映射，也不能以最终裁剪通过替代旧失败票。
+
+只有完成实际图片检查后，才允许生成新的补充视觉审核文件，保留冻结源标签与 sourceReviewSha256、原 notes/crop votes，使用未占用的新路径。主控负责将裁剪票单独打包，并将 visualReview.evidence.phase 关联到已经审核的原图 phase；不放宽截图 schema、不改旧 review、不合并刷新 phase。本 worker 不进行真实图片审核，也不补造视觉票。
+
+### 完整视觉验证的配对命令（集成后）
+
+以下假设主控已通过图片检查生成新的 `review.visual.json`，其中保留冻结标签与原 phase 投票并添加 visualReview。每个 `cases.visual.*.json` 是对应新归一化案例组成的数组或 envelope，不能将单个案例对象直接评分。两个工具都使用显式开关；每种口径输出到新的独占文件，保留所有旧报告。
+
+```powershell
+python eng/website-qa/normalize.py --case .parallel/website-qa/case.json --review .parallel/website-qa/review.visual.json --evidence-root .parallel/website-qa --require-visual-review --coverage-scope strict --output .parallel/website-qa/normalized.visual.strict.json
+python eng/website-qa/normalize.py --case .parallel/website-qa/case.json --review .parallel/website-qa/review.visual.json --evidence-root .parallel/website-qa --require-visual-review --coverage-scope automatic-page --output .parallel/website-qa/normalized.visual.automatic-page.json
+python eng/website-qa/evaluate.py --cases .parallel/website-qa/cases.visual.strict.json --evidence-root .parallel/website-qa --require-visual-review --coverage-scope strict --output .parallel/website-qa/report.visual.strict.json
+python eng/website-qa/evaluate.py --cases .parallel/website-qa/cases.visual.automatic-page.json --evidence-root .parallel/website-qa --require-visual-review --coverage-scope automatic-page --output .parallel/website-qa/report.visual.automatic-page.json
+```
+
+这些是主控最终 required-mode 验证的命令示例，本任务不执行真实捕获或视觉审核。独立 normalizer/evaluator 回归及组合 roundtrip 核对机器成功但文字未译、部分/事实错误、未知可见性、缺失/重复/损坏票、哈希/源身份（包括精确绑定的大写冻结源审核哈希）、输出 phase、正确 true、unchanged false 和合法 policy skip；旧测试不修改。主控须在实际 integration HEAD 运行两套完整 QA 和全仓门禁，再用固定真实清单、独立冻结标签及实际图片检查执行上述 required-mode 最终验证。离线通过只验证接口与失败保护，不证明至少 100 域完成、95% 节点 accuracy/precision 或 97% 页面 accuracy 已达到。
+
+不必要输出回归独立构造多种 false 源（如已可读中文、无需翻译的名称、metadata），配有原有合法 live native 工作、成功 terminal、完整源身份及全部正确翻译的 true 节点。断言不必要计数递增、TP/TN/FP/FN 与原评分一致、有效案例不因该视觉结果单独 incomplete，并保留无效 native/source、矛盾 outcome 与负页请求失败对照。合成算术示例：19 TP、1 FP、0 TN、0 FN 时 accuracy 与 precision 恰为 95%，20 个节点中那一个 false 源的不必要输出不应新增零门禁；18 TP、2 FP 时两项为 90%，仍被原门槛拒绝。原有不少于 100 域、97% 页面、holdout、遗漏/撤回等门禁须分别满足，单个示例不能宣称 achieved。先前两项独立实现的 fixtures 原样保留，再新增组合回归。
 
 ## 独立审核输入约定
 
@@ -142,11 +227,11 @@ assessment 扩展的合成回归须包含真实形状的 fixture assessment 证�
 
 holdout 覆盖和质量门禁是额外的保守约束，防止 100 个开发站遮蔽未测留出集。召回、翻译覆盖和逐站遗漏仍独立呈现。清单中剩余未访问/排除项不算完成，允许主控保留阻塞并使用固定替补，不自动删掉失败证据。
 
-新增口径不调整上述 95/97、域数、holdout、未知/无效预测、错误、撤回及请求门禁；默认 strict 的全部原测试保持不变。文档任务的离线验收运行两个完整 QA 套件：
+新增口径不调整上述 95/97、域数、holdout、未知/无效预测、错误、撤回及请求门禁；默认 strict 的全部原测试保持不变。本轮 visual-proof 的验收核对归属，并运行两个完整 QA 套件及完整扩展回归：
 
 ```powershell
-pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId assessment-docs
-pwsh -NoProfile -File .parallel/Validate-AssessmentProofTask.ps1 -TaskId assessment-docs
+pwsh -NoProfile -File eng/parallel/Test-OwnedFiles.ps1 -PlanPath .parallel/plan.json -TaskId visual-proof
+pwsh -NoProfile -File .parallel/Validate-QualityRecoveryTask.ps1 -TaskId visual-proof
 python -m unittest discover -s eng/browser-use-qa/tests -p 'test_*.py'
 python -m unittest discover -s eng/website-qa -p 'test_*.py'
 ```
@@ -155,7 +240,7 @@ python -m unittest discover -s eng/website-qa -p 'test_*.py'
 
 ### 离线文档链接与配对命令检查
 
-以下检查只读取三个文档及本 checkout 的链接目标；不执行示例中的归一化、评分或真实采集命令，不生成证据文件。它核对本地链接、版本化模式 JSON，以及四条配对命令的模式、输出唯一性和输入保护。assessment 扩展的 CLI 行为仍须由集成后的实现套件验证。
+以下检查只读取三个文档及本 checkout 的链接目标；不执行示例中的归一化、评分或真实采集命令，不生成证据文件。它核对本地链接、版本化模式 JSON，以及四条 legacy 与四条 required-visual 配对命令的模式、显式开关、输出唯一性和输入保护。新视觉接口的 CLI 行为仍须由集成后的实现套件验证。
 
 ```powershell
 @'
@@ -181,20 +266,27 @@ for path, text in zip(paths, texts):
 
 commands = re.findall(r"^python eng/website-qa/(?:normalize|evaluate)\.py .*--coverage-scope .+$",
                       texts[0], flags=re.M)
-assert len(commands) == 4
+assert len(commands) == 8
 outputs, inputs, pairs = set(), set(), set()
 for command in commands:
     tokens = shlex.split(command)
+    visual = "--require-visual-review" in tokens
+    assert tokens.count("--require-visual-review") == int(visual)
+    tokens = [token for token in tokens if token != "--require-visual-review"]
     assert len(tokens[2:]) % 2 == 0 and not any(token.startswith(">") for token in tokens)
     options = dict(zip(tokens[2::2], tokens[3::2]))
     mode, output = options["--coverage-scope"], options["--output"]
     assert mode in {"strict", "automatic-page"}
     assert output.endswith("." + mode + ".json") and output not in outputs
+    assert (".visual." in output) == visual
     outputs.add(output)
     inputs.update(value for key, value in options.items() if key in {"--case", "--review", "--cases"})
-    pairs.add((Path(tokens[1]).stem, mode))
-assert pairs == {(tool, mode) for tool in ("normalize", "evaluate")
-                 for mode in ("strict", "automatic-page")}
+    pairs.add((Path(tokens[1]).stem, mode, visual))
+    if visual:
+        input_key = "--review" if Path(tokens[1]).stem == "normalize" else "--cases"
+        assert ".visual." in options[input_key]
+assert pairs == {(tool, mode, visual) for tool in ("normalize", "evaluate")
+                 for mode in ("strict", "automatic-page") for visual in (False, True)}
 assert outputs.isdisjoint(inputs)
 print(f"Checked {links} local links, versioned modes and {len(commands)} paired commands")
 '@ | python -

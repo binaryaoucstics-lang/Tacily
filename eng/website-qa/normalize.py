@@ -15,6 +15,10 @@ Coverage defaults to strict. Explicit automatic-page scope can defer coverage
 only for independently reviewed negative pages correctly skipped at zero calls,
 with live capabilities and successful, identified local terminal evidence or a
 matching live negative host assessment with no translation requests/terminals.
+Explicit --require-visual-review additionally requires independent, source-bound
+visual outcomes; producer completion alone never establishes visible correctness.
+Unnecessary translations on false labels are counted; recognition accuracy and
+precision retain their existing thresholds, including measured false positives.
 """
 
 from __future__ import annotations
@@ -36,6 +40,10 @@ CHECK_PHASES = {"firstViewport": ("before", "after"),
                 "afterScroll": ("scroll-before", "scroll-after"),
                 "layout": ("reflow-after", "stable"),
                 "dynamicReturn": ("return-after", "stable")}
+VISUAL_OUTCOMES = {"correct_translation", "partial_translation", "incorrect_translation",
+                   "unchanged", "unnecessary_translation", "not_visible", "unknown"}
+OUTPUT_PHASES = {"after", "after-full", "stable", "stable-full", "scroll-after",
+                 "return-after", "reflow-after", "disclosure-open", "disclosure-restored"}
 
 
 class NormalizationError(ValueError):
@@ -65,6 +73,17 @@ def _count(value):
     return type(value) is int and value >= 0
 
 
+def _same_json(left, right):
+    """Retained JSON witnesses must match values and their original types."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_json(left[k], right[k]) for k in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def _label(row, node_id=None):
     if row is None:
         row = {}
@@ -88,6 +107,74 @@ def _label(row, node_id=None):
 def _known(label):
     return (type(label["needTranslation"]) is bool
             and label["reviewed"] is True and label["independent"] is True)
+
+
+def _visual_review(review, case_hash, nodes, labels, screenshots, issues):
+    """Validate supplemental votes against immutable source/review identities."""
+    visual = review.get("visualReview")
+    source_hash = review.get("sourceReviewSha256")
+    if (not isinstance(visual, dict)
+            or type(visual.get("schemaVersion")) is not int or visual["schemaVersion"] != 1
+            or any(type(visual.get(k)) is not bool or visual[k] is not True
+                   for k in ("reviewed", "independent"))
+            or visual.get("caseSha256") != case_hash
+            or not isinstance(source_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", source_hash)
+            or visual.get("sourceReviewSha256") != source_hash
+            or not isinstance(visual.get("nodes"), list)):
+        raise NormalizationError("invalid_visual_review")
+    source_by_id = {n["id"]: n for n in nodes}
+    label_by_id = {label["nodeId"]: label for label in labels}
+    by_id = {}
+    unknown = incorrect = unnecessary = 0
+    for row in visual["nodes"]:
+        if (not isinstance(row, dict) or not isinstance(row.get("sourceId"), str)
+                or row["sourceId"] not in source_by_id or row["sourceId"] in by_id):
+            raise NormalizationError("duplicate_or_unmatched_visual_source")
+        identity = row["sourceId"]
+        text = source_by_id[identity]["text"]
+        if (not isinstance(text, str)
+                or row.get("sourceTextSha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()
+                or any(type(row.get(k)) is not bool or row[k] is not True
+                       for k in ("reviewed", "independent"))
+                or not isinstance(row.get("outcome"), str) or row["outcome"] not in VISUAL_OUTCOMES
+                or not isinstance(row.get("evidence"), list) or not row["evidence"]):
+            raise NormalizationError("invalid_visual_node:" + identity)
+        phases = set()
+        for evidence in row["evidence"]:
+            if (not isinstance(evidence, dict) or not isinstance(evidence.get("phase"), str)
+                    or evidence["phase"] not in screenshots or evidence["phase"] == "checks"
+                    or screenshots[evidence["phase"]].get("reviewed") is not True
+                    or not isinstance(evidence.get("note"), str) or not evidence["note"].strip()):
+                raise NormalizationError("invalid_visual_evidence:" + identity)
+            phases.add(evidence["phase"])
+        outcome = row["outcome"]
+        if outcome in ("correct_translation", "partial_translation", "incorrect_translation",
+                       "unnecessary_translation", "unchanged") and not any(
+                phase in OUTPUT_PHASES or re.fullmatch(r"stable(?:-full)?-refresh-[1-9][0-9]*", phase)
+                for phase in phases):
+            raise NormalizationError("visual_outcome_requires_output_phase:" + identity)
+        label = label_by_id[identity]
+        if _known(label) and (
+                label["needTranslation"] is False and outcome in (
+                    "correct_translation", "partial_translation", "incorrect_translation")
+                or label["needTranslation"] is True and outcome == "unnecessary_translation"):
+            raise NormalizationError("visual_outcome_label_mismatch:" + identity)
+        if not _known(label) or outcome in ("unknown", "not_visible"):
+            unknown += 1
+            issues.append("unknown_visual_node:" + identity)
+        if outcome in ("partial_translation", "incorrect_translation"):
+            incorrect += 1
+            issues.append("incorrect_visual_translation:" + identity)
+        elif outcome == "unnecessary_translation":
+            unnecessary += 1
+            # The original recognition gates measure false positives. This
+            # observation does not introduce a zero-false-positive requirement.
+        by_id[identity] = row
+    if set(by_id) != set(source_by_id):
+        raise NormalizationError("missing_visual_source_votes")
+    return deepcopy(visual), by_id, {"unknownVisualNodes": unknown,
+                                   "incorrectVisualTranslations": incorrect,
+                                   "unnecessaryVisualTranslations": unnecessary}
 
 
 def _position(rects):
@@ -181,12 +268,13 @@ def _retractions(case, review, source_ids, issues):
     return result
 
 
-def _predictions(case, nodes, issues, *, coverage_scope="strict"):
+def _predictions(case, nodes, issues, *, coverage_scope="strict", require_visual_review=False):
     pieces = case.get("predictions")
     if not isinstance(pieces, list) or not all(isinstance(p, dict) for p in pieces):
         raise NormalizationError("invalid_prediction_evidence")
     observations = case.get("productionEligibility", [])
     retained_members = {}
+    seen_sources = set()
     current_piece_ids = {p.get("id") for p in pieces}
     if not isinstance(observations, list) or not all(isinstance(row, dict) for row in observations):
         raise NormalizationError("invalid_production_eligibility")
@@ -226,7 +314,9 @@ def _predictions(case, nodes, issues, *, coverage_scope="strict"):
                 continue
             observations.append({"sourceId": source_id, "eligible": record["eligible"]})
             for piece in record["pieces"]:
-                if (not isinstance(piece, dict) or history_by_id.get(piece.get("id")) != piece
+                if (not isinstance(piece, dict)
+                        or (not _same_json(history_by_id.get(piece.get("id")), piece)
+                            if require_visual_review else history_by_id.get(piece.get("id")) != piece)
                         or source_id not in piece.get("sourceIds", [piece.get("sourceId")])):
                     raise NormalizationError("source_observation_not_in_raw_prediction_history")
                 retained.append(piece)
@@ -239,6 +329,10 @@ def _predictions(case, nodes, issues, *, coverage_scope="strict"):
                 raise NormalizationError("conflicting_source_observation")
             selected[piece["id"]] = piece
         pieces = list(selected.values())
+    if require_visual_review:
+        for node in nodes:
+            if node.get("currentlyRendered") is False and node["id"] not in seen_sources:
+                issues.append("unknown_retired_source:" + node["id"])
     grouped = {n["id"]: [] for n in nodes}
     seen = set()
     for piece in pieces:
@@ -320,7 +414,7 @@ def _predictions(case, nodes, issues, *, coverage_scope="strict"):
 
 
 def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid,
-                     assessment_zero_call_valid):
+                     assessment_zero_call_valid, visual_votes=None):
     """Derive coverage from labels, predictions and accounted host evidence."""
     terminals = [e for e in result["hostEvents"] if e.get("type") == "terminal"]
     terminal_ok = bool(terminals) and all(
@@ -328,6 +422,15 @@ def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_v
         and e["failedCount"] == 0 and _count(e.get("cacheHits"))
         and _count(e.get("requestCount")) for e in terminals)
     request_count = result["requestCount"]
+    source_pieces = {}
+    if visual_votes is not None:
+        raw = result["provenance"]["rawCapture"]
+        history = raw.get("predictionHistory", [])
+        if isinstance(history, list):
+            source_pieces.update({p.get("id"): p for p in history if isinstance(p, dict)
+                                  and isinstance(p.get("id"), str)})
+        source_pieces.update({p.get("id"): p for p in raw["predictions"]
+                              if isinstance(p.get("id"), str)})
     positive = translated_count = untranslated = skipped = 0
     rows = []
     for label, prediction in zip(result["annotations"], result["predictions"]):
@@ -339,6 +442,23 @@ def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_v
         # when its individual boolean flags have the correct types.
         if coverage_scope == "automatic-page" and prediction["completed"] and not translated:
             issues.append("contradictory_node_completion:" + prediction["nodeId"])
+        if visual_votes is not None:
+            # Retain the producer flags, but a source audit failure cannot earn
+            # visible completion credit, including a shared atomic piece.
+            audited = ("invalid_source_node:" + prediction["nodeId"] not in issues
+                       and "unknown_retired_source:" + prediction["nodeId"] not in issues
+                       and "unobserved_retired_source:" + prediction["nodeId"] not in issues
+                       and bool(prediction["pieceIds"]) and all(
+                           identity in source_pieces
+                           and source_pieces[identity].get("sourceEvidence") != "unmatched"
+                           and not source_pieces[identity].get("auditIssue")
+                           for identity in prediction["pieceIds"]))
+            translated = (translated and audited
+                          and visual_votes[prediction["nodeId"]]["outcome"] == "correct_translation")
+            if (visual_votes[prediction["nodeId"]]["outcome"] == "correct_translation"
+                    and _known(label) and not translated):
+                result["unknownVisualNodes"] += 1
+                issues.append("visual_translation_without_native_completion:" + prediction["nodeId"])
         rows.append((label, prediction, valid, translated))
     page = result["pageAnnotation"]
     policy_page = (coverage_scope == "automatic-page" and not issues
@@ -350,6 +470,13 @@ def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_v
                    and (terminal_ok or assessment_zero_call_valid) and request_evidence_valid
                    and any(e.get("type") == "capabilities" and e.get("live") is True
                            for e in result["hostEvents"]))
+    if visual_votes is not None:
+        # The zero-call policy keeps the entire negative page unchanged. An
+        # observed translation on a false source cannot lend policy skip credit
+        # to an untranslated true source elsewhere on that page.
+        policy_page = policy_page and all(
+            _known(label) and visual_votes[label["nodeId"]]["outcome"] == "unchanged"
+            for label in result["annotations"])
     for label, prediction, valid, translated in rows:
         if not _known(label) or label["needTranslation"] is not True:
             continue
@@ -357,9 +484,10 @@ def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_v
         translated_count += int(translated)
         untranslated += int(not translated)
         policy_skip = (policy_page and valid and not prediction["failed"]
-                       and not prediction["completed"])
+                       and not prediction["completed"]
+                       and (visual_votes is None or visual_votes[label["nodeId"]]["outcome"] == "unchanged"))
         skipped += int(policy_skip)
-        if coverage_scope == "automatic-page" and not translated and not policy_skip:
+        if (coverage_scope == "automatic-page" or visual_votes is not None) and not translated and not policy_skip:
             issues.append("confirmed_omission:" + label["nodeId"])
     result.update(annotatedPositiveNodes=positive, translatedPositiveNodes=translated_count,
                   translationCoverage=translated_count / positive if positive else None,
@@ -367,10 +495,13 @@ def _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_v
                   confirmedOmissions=untranslated - skipped)
 
 
-def normalize_case(case_path, review_path, output_path, evidence_root=None, *, coverage_scope="strict"):
+def normalize_case(case_path, review_path, output_path, evidence_root=None, *, coverage_scope="strict",
+                   require_visual_review=False):
     """Create one scorer case exclusively, retaining the original evidence."""
     if not isinstance(coverage_scope, str) or coverage_scope not in ("strict", "automatic-page"):
         raise NormalizationError("invalid_coverage_scope")
+    if type(require_visual_review) is not bool:
+        raise NormalizationError("invalid_require_visual_review")
     case_path, review_path, output_path = map(Path, (case_path, review_path, output_path))
     if output_path.exists() or output_path.resolve() in (case_path.resolve(), review_path.resolve()):
         raise NormalizationError("output_must_be_new_file")
@@ -433,7 +564,16 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None, *, c
     for label in result["annotations"]:
         if not _known(label):
             issues.append("unknown_node_label:" + label["nodeId"])
-    result["predictions"] = _predictions(case, nodes, issues, coverage_scope=coverage_scope)
+    visual_votes = None
+    if require_visual_review:
+        visual, visual_votes, visual_counts = _visual_review(
+            review, case_hash, nodes, result["annotations"], result["screenshots"], issues)
+        result["visualCoverage"] = {"schemaVersion": 1, "required": True}
+        result["visualReview"] = visual
+        result["sourceReviewSha256"] = review["sourceReviewSha256"]
+        result.update(visual_counts)
+    result["predictions"] = _predictions(case, nodes, issues, coverage_scope=coverage_scope,
+                                         require_visual_review=require_visual_review)
     if coverage_scope == "strict" and case.get("pageDecision") is False:
         for label in result["annotations"]:
             if _known(label) and label["needTranslation"] is True:
@@ -532,7 +672,7 @@ def normalize_case(case_path, review_path, output_path, evidence_root=None, *, c
             and not (case.get("completed") is False and "screenshot_review_pending" in reasons)):
         issues.append("capture_completion_not_established")
     _coverage_counts(result, coverage_scope, issues, reasons, request_evidence_valid,
-                     assessment_zero_call_valid)
+                     assessment_zero_call_valid, visual_votes)
     if not issues:
         reasons = [r for r in reasons if r != "screenshot_review_pending"]
     issues = list(dict.fromkeys(reasons + issues))
@@ -554,12 +694,19 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--evidence-root", type=Path)
     parser.add_argument("--coverage-scope", choices=("strict", "automatic-page"), default="strict")
+    parser.add_argument("--require-visual-review", action="store_true")
     args = parser.parse_args(argv)
     try:
         result = normalize_case(args.case, args.review, args.output, args.evidence_root,
-                                coverage_scope=args.coverage_scope)
-        print(json.dumps({"completed": result["completed"], "blockedReason": result["blockedReason"],
-                          "coverageScope": result["coverageScope"]}))
+                                coverage_scope=args.coverage_scope,
+                                require_visual_review=args.require_visual_review)
+        report = {"completed": result["completed"], "blockedReason": result["blockedReason"],
+                  "coverageScope": result["coverageScope"]}
+        if args.require_visual_review:
+            report["visualCoverage"] = result["visualCoverage"]
+            for key in ("unknownVisualNodes", "incorrectVisualTranslations", "unnecessaryVisualTranslations"):
+                report[key] = result[key]
+        print(json.dumps(report))
         return 0 if result["completed"] else 1
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
         print(json.dumps({"completed": False, "error": str(error)}), file=sys.stderr)
