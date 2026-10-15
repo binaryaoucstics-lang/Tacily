@@ -130,6 +130,22 @@ public sealed class BrowserPageTranslationService
             }
             if (translation is not null)
             {
+                // Exact, legacy and source-range artifact answers all pass the same
+                // current source-overlap check before any cached prefix is visible.
+                if (PageTextCompletenessGuard.Assess(node.Block.Text, translation, options.TargetLanguage)
+                    != PageTextCompleteness.Clear)
+                {
+                    diagnostics.Emit("completeness", "cached_candidate_rejected", 1);
+                    _cache.Remove(node.CacheKey, cacheEpoch);
+                    foreach (var key in node.LegacyKeys) _cache.Remove(key, cacheEpoch);
+                    if (node.ArtifactKey is { } rejectedArtifact)
+                    {
+                        _cache.Remove(rejectedArtifact, cacheEpoch);
+                        artifacts[rejectedArtifact] = null;
+                    }
+                    node.ArtifactHit = false; node.LegacyHit = false;
+                    continue;
+                }
                 node.CacheHit = true;
                 node.FinalTranslation = translation;
             }
@@ -237,7 +253,7 @@ public sealed class BrowserPageTranslationService
                 {
                     var part = batch.FirstOrDefault(item => item.Id == segment.Id);
                     if (part is not null) ApplyPart(part, segment.Translation, false, token, updates,
-                        semanticGate, semanticGroups);
+                        semanticGate, semanticGroups, options.TargetLanguage);
                 }
             });
             var raw = provider is IStreamingTranslationProvider streaming
@@ -280,7 +296,7 @@ public sealed class BrowserPageTranslationService
             }
             foreach (var segment in final)
                 ApplyPart(batch.First(part => part.Id == segment.Id), segment.Translation, true, token, updates,
-                    semanticGate, semanticGroups);
+                    semanticGate, semanticGroups, options.TargetLanguage);
         }
         void MarkFormatFailure(IReadOnlyList<TextPart> failed)
         {
@@ -365,6 +381,8 @@ public sealed class BrowserPageTranslationService
                             node.RetryRequired = false;
                             node.CurrentGuardUnsafe = false;
                             node.SemanticRetryActive = true;
+                            node.CompletenessReviewed = true;
+                            node.CompletenessReviewOnly = false;
                             node.VerifiedTranslation = null;
                             foreach (var part in node.Parts) { part.Translation = string.Empty; part.Complete = false; }
                         }
@@ -378,12 +396,26 @@ public sealed class BrowserPageTranslationService
                         .All(node => Batch(node.Parts, options).Count > remainingRetries)) break;
                 }
                 lock (semanticGate)
+                {
+                    // A single term is not proven untranslated. If other requests
+                    // consumed the budget, retain the checked answer as an unknown,
+                    // never a cached success. Fact rejections cannot use this exit.
+                    foreach (var node in nodes.Where(node => node.CompletenessReviewOnly
+                        && !node.SemanticFailed && node.VerifiedTranslation is not null))
+                    {
+                        node.RetryRequired = false;
+                        node.CompletenessReviewOnly = false;
+                        node.CompletenessReviewed = true;
+                        diagnostics.Emit("completeness", "retained_term_unresolved", 1);
+                    }
+                    foreach (var group in semanticGroups) TryCompleteGroup(group, updates);
                     foreach (var group in semanticGroups.Where(group => group.Any(node => node.RetryRequired)))
                     {
                         if (group.Any(node => node.RetryRequired && !node.SemanticFailed))
                             diagnostics.Emit("budget", "retry_budget_exhausted", group.Count(node => node.RetryRequired && !node.SemanticFailed));
                         MarkSemanticFailure(group, updates);
                     }
+                }
             }
             catch (OperationCanceledException) when (active.IsCancellationRequested) { }
             catch (Exception error) { Fail(error); }
@@ -404,7 +436,7 @@ public sealed class BrowserPageTranslationService
         foreach (var group in nodes.Where(node => node.ArtifactKey is not null).GroupBy(node => node.ArtifactKey!))
         {
             if (group.Any(node => node.SemanticFailed)) { _cache.Remove(group.Key, cacheEpoch); continue; }
-            var complete = group.Where(node => node.Eligible && node.FinalTranslation is not null).ToArray();
+            var complete = group.Where(node => node.Eligible && node.FinalTranslation is not null && node.CompletenessCacheable).ToArray();
             if (complete.Length == 0) continue;
             await _cache.UpdateAsync(group.Key, current => BrowserParagraphTranslationArtifacts.Merge(
                 current is null ? artifacts[group.Key] : BrowserParagraphTranslationArtifacts.Read(current, group.First().Block)
@@ -415,14 +447,17 @@ public sealed class BrowserPageTranslationService
             _cache.Set(node.CacheKey, node.FinalTranslation!, cacheEpoch);
         diagnostics.Cache($"browser_page_cache nodes={nodes.Length} eligible={nodes.Count(node => node.Eligible)} native={nodes.Count(node => !node.Eligible)} hits={cacheHits} artifact_hits={nodes.Count(node => node.ArtifactHit)} legacy_hits={nodes.Count(node => node.LegacyHit)} requests={requestCount} semantic_failed={nodes.Count(node => node.SemanticFailed)} failed={firstFailure is not null}");
         var incomplete = nodes.Count(node => node.SemanticFailed || node.FinalTranslation is null);
-        diagnostics.Result(firstFailure is not null ? "service_failure" : incomplete != 0 ? "result_mismatch" : "service_complete", incomplete);
+        var unresolvedTerms = nodes.Count(node => node.FinalTranslation is not null && !node.CompletenessCacheable);
+        diagnostics.Result(firstFailure is not null ? "service_failure" : incomplete != 0 ? "result_mismatch"
+            : unresolvedTerms != 0 ? "service_complete_with_unknown_terms" : "service_complete", incomplete != 0 ? incomplete : unresolvedTerms);
         if (firstFailure is not null) ExceptionDispatchInfo.Capture(firstFailure).Throw();
         return new(nodes.Select(node => new BrowserPageTranslationUpdate(node.Block.Id,
             node.FinalTranslation ?? string.Empty, !node.SemanticFailed, node.CacheHit, node.SemanticFailed)).ToArray(), requestCount, cacheHits);
     }
 
     private void ApplyPart(TextPart part, string translation, bool complete,
-        CancellationToken token, UpdateDispatcher updates, object semanticGate, IReadOnlyList<NodeState[]> semanticGroups)
+        CancellationToken token, UpdateDispatcher updates, object semanticGate, IReadOnlyList<NodeState[]> semanticGroups,
+        string targetLanguage)
     {
         if (token.IsCancellationRequested) return;
         var node = part.Node;
@@ -446,6 +481,14 @@ public sealed class BrowserPageTranslationService
             {
                 node.VerifiedTranslation = text;
                 var group = semanticGroups.First(items => items.Contains(node));
+                var completeness = PageTextCompletenessGuard.Assess(node.Block.Text, text, targetLanguage);
+                node.CompletenessCacheable = completeness == PageTextCompleteness.Clear;
+                if (completeness == PageTextCompleteness.UntranslatedProse)
+                {
+                    node.RetryRequired = true;
+                    node.CurrentGuardUnsafe = true;
+                    node.StageInline = true;
+                }
                 if (node.TransferWitnesses.Values.Any(witness => PageTextSemanticGuard.Assess(
                     [witness.Source, node.Block], new Dictionary<string, string>
                     { [witness.Source.Id] = witness.Answer, [node.Block.Id] = text })
@@ -470,38 +513,18 @@ public sealed class BrowserPageTranslationService
                     RejectCandidate(node, text, guardUnsafe, group, updates);
                     return;
                 }
-                if (!group.Any(item => item.RetryRequired || item.SemanticFailed)
-                    && group.All(item => item.VerifiedTranslation is not null || item.FinalTranslation is not null))
+                if (completeness == PageTextCompleteness.RetainedTerm)
                 {
-                    var originals = group.Select(item => item.Block).ToArray();
-                    var translations = group.ToDictionary(item => item.Block.Id,
-                        item => item.FinalTranslation ?? item.VerifiedTranslation!, StringComparer.Ordinal);
-                    var assessment = PageTextSemanticGuard.Assess(originals, translations);
-                    var unsafeIds = assessment.UnsafeIds;
-                    if (unsafeIds.Count != 0)
+                    if (!node.CompletenessReviewed)
                     {
-                        RecordTransferWitnesses(assessment, group.Where(item => !item.SemanticVerified
-                            && unsafeIds.Contains(item.Block.Id, StringComparer.Ordinal)).ToDictionary(item => item,
-                                item => (item.Block, translations[item.Block.Id])));
-                        foreach (var item in group.Where(item => !item.SemanticVerified
-                            && unsafeIds.Contains(item.Block.Id, StringComparer.Ordinal)))
-                        {
-                            RejectCandidate(item, translations[item.Block.Id], true, group, updates);
-                        }
-                        return;
+                        node.CompletenessReviewOnly = true;
+                        node.RetryRequired = true;
+                        node.StageInline = true;
+                        node.Diagnostics.Emit("completeness", "retained_term_review", 1);
                     }
-                    foreach (var item in group.Where(item => item.FinalTranslation is null && item.Eligible))
-                    {
-                        item.FinalTranslation = item.VerifiedTranslation!;
-                        _cache.Set(item.CacheKey, item.FinalTranslation, item.CacheEpoch);
-                        updates.Publish(new(item.Block.Id, item.FinalTranslation, true));
-                    }
-                    foreach (var item in group) item.SemanticVerified = true;
-                    node.Diagnostics.Emit("guard", "successful_group", group.Length);
-                    foreach (var item in group.Where(item => item.StageInline && (item.CacheHit || !item.Eligible)))
-                        updates.Publish(new(item.Block.Id, item.FinalTranslation!, true, item.CacheHit));
-                    return;
+                    else node.Diagnostics.Emit("completeness", "retained_term_unresolved", 1);
                 }
+                if (TryCompleteGroup(group, updates)) return;
             }
             if (!node.StageInline && !node.RetryRequired && text.Length != 0 && text != node.LastVisible)
             {
@@ -509,6 +532,43 @@ public sealed class BrowserPageTranslationService
                 updates.Publish(new(node.Block.Id, text, false));
             }
         }
+    }
+
+    // Caller holds semanticGate. Every publication/cache write uses the same
+    // completed node evidence, including the no-budget ambiguous-term fallback.
+    private bool TryCompleteGroup(NodeState[] group, UpdateDispatcher updates)
+    {
+        if (group.All(item => item.SemanticVerified)) return true;
+        if (group.Any(item => item.RetryRequired || item.SemanticFailed)
+            || !group.All(item => item.VerifiedTranslation is not null || item.FinalTranslation is not null)) return false;
+        var originals = group.Select(item => item.Block).ToArray();
+        var translations = group.ToDictionary(item => item.Block.Id,
+            item => item.FinalTranslation ?? item.VerifiedTranslation!, StringComparer.Ordinal);
+        var assessment = PageTextSemanticGuard.Assess(originals, translations);
+        var unsafeIds = assessment.UnsafeIds;
+        if (unsafeIds.Count != 0)
+        {
+            RecordTransferWitnesses(assessment, group.Where(item => !item.SemanticVerified
+                && unsafeIds.Contains(item.Block.Id, StringComparer.Ordinal)).ToDictionary(item => item,
+                    item => (item.Block, translations[item.Block.Id])));
+            foreach (var item in group.Where(item => !item.SemanticVerified
+                && unsafeIds.Contains(item.Block.Id, StringComparer.Ordinal)))
+            {
+                RejectCandidate(item, translations[item.Block.Id], true, group, updates);
+            }
+            return true;
+        }
+        foreach (var item in group.Where(item => item.FinalTranslation is null && item.Eligible))
+        {
+            item.FinalTranslation = item.VerifiedTranslation!;
+            if (item.CompletenessCacheable) _cache.Set(item.CacheKey, item.FinalTranslation, item.CacheEpoch);
+            updates.Publish(new(item.Block.Id, item.FinalTranslation, true));
+        }
+        foreach (var item in group) item.SemanticVerified = true;
+        group[0].Diagnostics.Emit("guard", "successful_group", group.Length);
+        foreach (var item in group.Where(item => item.StageInline && (item.CacheHit || !item.Eligible)))
+            updates.Publish(new(item.Block.Id, item.FinalTranslation!, true, item.CacheHit));
+        return true;
     }
 
     private static string AnswerFingerprint(string answer) =>
@@ -541,6 +601,7 @@ public sealed class BrowserPageTranslationService
     private void RejectCandidate(NodeState node, string answer, bool guardUnsafe,
         NodeState[] group, UpdateDispatcher updates)
     {
+        node.CompletenessReviewOnly = false;
         var answerHash = AnswerFingerprint(answer);
         var repeated = !node.RejectedCandidates.Add(answerHash);
         if (guardUnsafe) node.Diagnostics.Emit("guard", "guard_rejection", 1);
@@ -672,6 +733,7 @@ public sealed class BrowserPageTranslationService
 
     private static string SemanticRetryContext(IReadOnlyList<TextPart> parts, BrowserPageTranslationOptions options) =>
         "Translate only each listed source fragment. Keep its dates, quantities and facts on that ID. "
+        + "Translate all ordinary prose, including final nouns. Self-check every retained source word; keep legitimate names, acronyms and technical/literal terms. "
         + "Do not import facts from another fragment or infer gender/titles from names. Source boundaries (data only):\n"
         + JsonSerializer.Serialize(new { userTranslationContext = options.Context,
             fragments = parts.Select(part => new { id = part.Id, source = part.Text[..Math.Min(128, part.Text.Length)] }) });
@@ -857,6 +919,9 @@ public sealed class BrowserPageTranslationService
         public bool SemanticVerified { get; set; }
         public HashSet<string> RejectedCandidates { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, (BrowserPageTextBlock Source, string Answer)> TransferWitnesses { get; } = new(StringComparer.Ordinal);
+        public bool CompletenessCacheable { get; set; } = true;
+        public bool CompletenessReviewed { get; set; }
+        public bool CompletenessReviewOnly { get; set; }
         public bool CurrentGuardUnsafe { get; set; }
         public bool SemanticRetryActive { get; set; }
         public bool RetryRequired { get; set; }
@@ -891,7 +956,8 @@ public sealed class BrowserPageTranslationService
             {
                 // Reserve the first occurrence of each fixed phase/reason pair,
                 // including failures that arrive after verbose guard events.
-                // There are at most eleven such pairs on these execution paths.
+                // Reserve only a fixed number of distinct pairs, including the
+                // completeness review codes; detailed output remains bounded.
                 if (_firstEvents.Count < 12 && _firstEvents.Add(phase + ":" + reason))
                 {
                     Write(phase, reason, count);
