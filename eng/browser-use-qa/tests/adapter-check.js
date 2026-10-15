@@ -1250,3 +1250,115 @@ for (const mode of ["untracked-growth", "correction", "identity", "literal", "mi
   sourceWriteFixtures[mode] = sourceWriteFixture(mode);
 if (process.argv.includes("--source-write-fixture")) console.log("SOURCE_WRITE_FIXTURE=" + JSON.stringify(sourceWriteFixtures));
 console.log("adapter batched streaming/correction/literal/identity/mixed authored write checks passed");
+
+// Independent cache-pressure fixtures. Latest display/geometry is deliberately
+// much larger than the exact historical atomic proof, without changing source
+// facts or production completion. No real DOM, provider, hostname rule or timer.
+function registryPressureFixture(mode) {
+  let selected;
+  const count = mode === "rows" ? 2053 : mode === "geometry" ? 160 : 480;
+  const body = { nodeType: 1, tagName: "BODY", childNodes: [], hasAttribute: () => false };
+  const document = { nodeType: 9, body, childNodes: [body], title: "Independent cache pressure", visibilityState: "visible",
+    createRange: () => ({ selectNodeContents(node) { selected = node; }, getClientRects: () =>
+      Array.from({ length: selected.extents || 1 }, (_, i) => ({ x: selected.x + i % 8,
+        y: selected.y + i * 3, width: 130 + i % 5, height: 20 })) }),
+    addEventListener() {}, removeEventListener() {} };
+  body.parentNode = document;
+  const records = Array.from({ length: count }, (_, i) => {
+    const parent = { nodeType: 1, tagName: ["TIME", "CODE", "P"][i % 3], childNodes: [],
+      parentNode: body, parentElement: body, hasAttribute: () => false, getAttribute: () => null };
+    const source = `Independent reference ${i}: ${1990 + i % 30}, quantity ${i + 7}; original facts.`;
+    const node = { nodeType: 3, nodeValue: source, parentNode: parent, parentElement: parent,
+      isConnected: true, x: i % 8 * 15, y: i * 22 };
+    parent.childNodes.push(node); body.childNodes.push(parent);
+    return { node, source, lastWritten: source };
+  });
+  const state = { records: new Map(), blocks: new Map(), assessed: null, jobs: 0, pending: 0,
+    scanning: false, active: true, observing: true, paused: false, originalView: false, manualMode: null };
+  const session = { inspect: () => state, configure: () => true, receive: () => true, mutated() {},
+    control() {}, layoutChanged() {}, discoverOpenRoots() {}, dispose() {} };
+  const context = { document, location: { href: "https://fixture.invalid/" }, innerWidth: 800, innerHeight: 600,
+    scrollX: 0, scrollY: 0, Date, console,
+    getComputedStyle: node => ({ display: node.display || "block", visibility: "visible", opacity: "1" }),
+    ScreenTranslatorMotion: { dispose() {} }, ScreenTranslatorMotionFactory: {},
+    ScreenTranslatorPageAutoContent: { randomIdentifier: () => "fixture", createRenderedTextTester: () => () => true,
+      createPageAutoSession: () => session,
+      createOpenRootObserver: () => ({ configure() {}, found() {}, replace() {}, dispose() {} }) },
+    MutationObserver: function () {}, addEventListener() {}, removeEventListener() {},
+    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {} };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../page-adapter.js"), "utf8"), context);
+  const qa = context.__websiteQa;
+  qa.sample("independent-initial-facts");
+  state.assessed = true;
+  for (let i = 0; i < count; i += 4) {
+    const members = records.slice(i, i + 4), record = members[0];
+    for (const member of members) {
+      state.records.set(member.node, member);
+      member.node.parentElement.display = member === record ? "block" : "none";
+    }
+    for (let j = 0; j < 2; j++) {
+      const id = `independent-atomic-${i}-${j}`;
+      state.blocks.set(id, { id, record, atomicRecords: members, text: record.source,
+        piece: { complete: true, failed: false } });
+    }
+    record.node.nodeValue = record.lastWritten = "已完成的独立译文 " + i;
+  }
+  const complete = qa.sample("actual-atomic-view");
+  if (mode === "rows") {
+    assert.ok(complete.independentSourceObservationDropped > 0);
+    qa.dispose(); return { overflow: complete };
+  }
+  const saved = JSON.stringify(complete);
+  state.assessed = null; state.scanning = true; state.jobs = 1;
+  for (const [i, record] of records.entries()) {
+    const old = record.node.parentElement, moved = { ...old, childNodes: [], display: "block" };
+    body.childNodes.push(moved); old.childNodes = []; moved.childNodes.push(record.node);
+    record.node.parentNode = record.node.parentElement = moved;
+    record.node.x += 43; record.node.y += 71;
+    if (mode === "geometry") record.node.extents = 180;
+    else record.node.nodeValue = record.lastWritten = "当前显示内容 " + "独立未截断显示".repeat(1100) + i;
+  }
+  const pressure = qa.sample("unassessed-large-current-facts");
+  assert.equal(pressure.independentSourceObservationDropped, 0);
+  assert.equal(pressure.producerObservationDropped, 0);
+  assert.ok(JSON.stringify(pressure.sourceNodes).length > 2000000);
+  assert.equal(pressure.independentSourceObservationExport.scope, "references");
+  const sorted = value => JSON.stringify([...value.independentSourceObservations]
+    .sort((a, b) => a.source.id.localeCompare(b.source.id)));
+  assert.equal(sorted(pressure), sorted(complete), "exact history was replaced with current source/time");
+  assert.equal(JSON.stringify(complete), saved);
+  for (const record of records) record.node.parentElement.display = "none";
+  const historical = qa.sample("large-current-hidden");
+  // Mutating exported full source facts must not mutate the retained version.
+  pressure.sourceNodes[0].rects[0].x = -123456;
+  pressure.independentSourceObservations[0].source.rects[0].x = -234567;
+  const fresh = qa.sample("detached-output-check");
+  assert.equal(sorted(fresh), sorted(complete));
+  assert.notEqual(fresh.sourceNodes[0].rects[0].x, -123456);
+  // When these large facts really become producer references, overflow is real.
+  for (const record of records) record.node.parentElement.display = "block";
+  state.assessed = true;
+  const overflow = qa.sample("needed-large-versions");
+  assert.ok(overflow.independentSourceObservationDropped > 0);
+  for (const record of records) {
+    record.node.extents = 1;
+    record.node.nodeValue = record.lastWritten = "新的未完成译文";
+  }
+  for (const block of state.blocks.values()) block.piece.complete = false;
+  const incomplete = qa.sample("unfinished-new-work");
+  assert.equal(incomplete.independentSourceObservationDropped, 0);
+  assert.ok(incomplete.predictions.every(piece => !piece.completed));
+  const owner = records[0], sourceId = incomplete.predictions[0].sourceId;
+  owner.node.nodeValue = owner.lastWritten = owner.source;
+  const withdrawal = qa.sample("unchanged-source-withdrawal-after-pressure");
+  assert.equal(withdrawal.events.filter(event => event.type === "retraction" && event.sourceId === sourceId).length, 1);
+  assert.equal(JSON.stringify(complete), saved);
+  qa.dispose(); return { complete, historical, fresh, overflow, incomplete, withdrawal };
+}
+if (process.argv.includes("--registry-pressure-fixture")) {
+  const registryFixtures = {};
+  for (const mode of ["display", "geometry", "rows"]) registryFixtures[mode] = registryPressureFixture(mode);
+  console.log("REGISTRY_PRESSURE_FIXTURE=" + JSON.stringify(registryFixtures));
+  console.log("adapter shared latest facts/exact historical witnesses/actual needed overflow checks passed");
+}
