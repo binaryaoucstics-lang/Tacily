@@ -24,7 +24,7 @@ internal sealed class JsonlHost : IAsyncDisposable
     private readonly TextWriter? _diagnosticOutput;
     private readonly object _diagnosticGate = new();
     private static readonly Regex SafeDiagnostic = new(
-        @"\Abrowser_page_diagnostic phase=(initial|format_retry|semantic_retry|guard|budget|result|diagnostics) reason=(format_failure|retry_started|guard_rejection|numeric_transfer|repeated_rejected_answer|successful_group|retry_budget_exhausted|request_budget_exceeded|result_mismatch|service_complete|service_failure|output_limited) count=([0-9]{1,5}) requests=([0-9]{1,2})\z",
+        @"\Abrowser_page_diagnostic phase=(initial|format_retry|semantic_retry|guard|budget|result|diagnostics|completeness) reason=(format_failure|retry_started|guard_rejection|numeric_transfer|repeated_rejected_answer|successful_group|retry_budget_exhausted|request_budget_exceeded|result_mismatch|service_complete|service_failure|output_limited|cached_candidate_rejected|retained_term_review|retained_term_unresolved) count=([0-9]{1,5}) requests=([0-9]{1,2})\z",
         RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
