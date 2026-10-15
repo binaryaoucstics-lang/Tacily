@@ -72,6 +72,7 @@ public sealed class BrowserPageTranslationService
     {
         Validate(blocks, options, onUpdate);
         cancellationToken.ThrowIfCancellationRequested();
+        var diagnostics = new DiagnosticSession(_diagnostic);
         using var active = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var cacheEpoch = _cache.ClearEpoch;
         var pageHasJapanese = blocks.Any(block => PageTextEligibility.HasJapaneseScript(block.Text)
@@ -86,7 +87,7 @@ public sealed class BrowserPageTranslationService
                 + "\nforeignHanContext=" + (pageHasJapanese || block.ForeignHanContext),
                 SelectionOverridesPolicy(block, options, pageHasJapanese || block.ForeignHanContext)),
             LegacyCacheKeys(block, blocks, options, pageHasJapanese || block.ForeignHanContext),
-            pageHasJapanese || block.ForeignHanContext)).ToArray();
+            pageHasJapanese || block.ForeignHanContext, diagnostics)).ToArray();
         var semanticGate = new object();
         var semanticGroups = nodes.GroupBy(node => node.Block.GroupId is { Length: > 0 } group
             ? "group:" + group : "node:" + node.Block.Id).Select(group => group.ToArray()).ToList();
@@ -164,7 +165,10 @@ public sealed class BrowserPageTranslationService
         var batches = Batch(parts, options);
         // The entire request budget is validated before any provider/key/network operation.
         if (batches.Count > options.MaxRequests)
+        {
+            diagnostics.Emit("budget", "request_budget_exceeded", batches.Count);
             throw new TranslationConfigurationException("网页段落超过本轮请求预算，已保留原文。请缩小自动翻译范围。");
+        }
 
         Exception? firstFailure = null;
         void Fail(Exception error)
@@ -188,14 +192,25 @@ public sealed class BrowserPageTranslationService
             lock (requestBudget)
             {
                 if (retry && remainingRetries <= 0)
+                {
+                    diagnostics.Emit("budget", "retry_budget_exhausted", current.Count);
                     return false;
+                }
                 if (retry) remainingRetries--;
                 requestCount++;
+                diagnostics.Requests = requestCount;
             }
+            var phase = semanticRetry ? "semantic_retry" : retry ? "format_retry" : "initial";
+            if (retry) diagnostics.Emit(phase, "retry_started", current.Count);
             await _providerSlots.WaitAsync(token).ConfigureAwait(false);
             try
             {
                 await TranslateProviderBatch(current, token, semanticRetry).ConfigureAwait(false);
+            }
+            catch (TranslationFormatException)
+            {
+                diagnostics.Emit(phase, "format_failure", current.Count);
+                throw;
             }
             finally { _providerSlots.Release(); }
             return true;
@@ -240,6 +255,7 @@ public sealed class BrowserPageTranslationService
             var unsafeParts = assessment.UnsafeIds;
             if (unsafeParts.Count != 0)
             {
+                diagnostics.Emit("guard", "guard_rejection", unsafeParts.Count);
                 lock (semanticGate)
                 {
                     var affected = batch.Select(part => part.Node).Distinct()
@@ -363,7 +379,11 @@ public sealed class BrowserPageTranslationService
                 }
                 lock (semanticGate)
                     foreach (var group in semanticGroups.Where(group => group.Any(node => node.RetryRequired)))
+                    {
+                        if (group.Any(node => node.RetryRequired && !node.SemanticFailed))
+                            diagnostics.Emit("budget", "retry_budget_exhausted", group.Count(node => node.RetryRequired && !node.SemanticFailed));
                         MarkSemanticFailure(group, updates);
+                    }
             }
             catch (OperationCanceledException) when (active.IsCancellationRequested) { }
             catch (Exception error) { Fail(error); }
@@ -393,7 +413,9 @@ public sealed class BrowserPageTranslationService
         }
         foreach (var node in nodes.Where(node => node.Eligible && node.CacheHit && node.FinalTranslation is not null && !node.SemanticFailed))
             _cache.Set(node.CacheKey, node.FinalTranslation!, cacheEpoch);
-        _diagnostic?.Invoke($"browser_page_cache nodes={nodes.Length} eligible={nodes.Count(node => node.Eligible)} native={nodes.Count(node => !node.Eligible)} hits={cacheHits} artifact_hits={nodes.Count(node => node.ArtifactHit)} legacy_hits={nodes.Count(node => node.LegacyHit)} requests={requestCount} semantic_failed={nodes.Count(node => node.SemanticFailed)} failed={firstFailure is not null}");
+        diagnostics.Cache($"browser_page_cache nodes={nodes.Length} eligible={nodes.Count(node => node.Eligible)} native={nodes.Count(node => !node.Eligible)} hits={cacheHits} artifact_hits={nodes.Count(node => node.ArtifactHit)} legacy_hits={nodes.Count(node => node.LegacyHit)} requests={requestCount} semantic_failed={nodes.Count(node => node.SemanticFailed)} failed={firstFailure is not null}");
+        var incomplete = nodes.Count(node => node.SemanticFailed || node.FinalTranslation is null);
+        diagnostics.Result(firstFailure is not null ? "service_failure" : incomplete != 0 ? "result_mismatch" : "service_complete", incomplete);
         if (firstFailure is not null) ExceptionDispatchInfo.Capture(firstFailure).Throw();
         return new(nodes.Select(node => new BrowserPageTranslationUpdate(node.Block.Id,
             node.FinalTranslation ?? string.Empty, !node.SemanticFailed, node.CacheHit, node.SemanticFailed)).ToArray(), requestCount, cacheHits);
@@ -475,6 +497,7 @@ public sealed class BrowserPageTranslationService
                         updates.Publish(new(item.Block.Id, item.FinalTranslation, true));
                     }
                     foreach (var item in group) item.SemanticVerified = true;
+                    node.Diagnostics.Emit("guard", "successful_group", group.Length);
                     foreach (var item in group.Where(item => item.StageInline && (item.CacheHit || !item.Eligible)))
                         updates.Publish(new(item.Block.Id, item.FinalTranslation!, true, item.CacheHit));
                     return;
@@ -500,6 +523,8 @@ public sealed class BrowserPageTranslationService
         // Receivers may also have unrelated errors (such as a changed weekday);
         // retain the actual owner evidence even while those errors are corrected.
         var byId = candidates.Keys.ToDictionary(node => node.Block.Id, StringComparer.Ordinal);
+        if (assessment.NumericTransfers.Count != 0 && candidates.Count != 0)
+            candidates.Keys.First().Diagnostics.Emit("guard", "numeric_transfer", assessment.NumericTransfers.Count);
         foreach (var edge in assessment.NumericTransfers)
         {
             if (!byId.TryGetValue(edge.OwnerId, out var owner)
@@ -518,6 +543,7 @@ public sealed class BrowserPageTranslationService
     {
         var answerHash = AnswerFingerprint(answer);
         var repeated = !node.RejectedCandidates.Add(answerHash);
+        if (guardUnsafe) node.Diagnostics.Emit("guard", "guard_rejection", 1);
         var fingerprint = node.CacheKey + answerHash;
         bool known;
         lock (_rejectionGate)
@@ -535,7 +561,10 @@ public sealed class BrowserPageTranslationService
         // History only shortens retries after today's guard also rejected the
         // fresh answer. A new corrected answer can always complete and cache.
         if ((guardUnsafe && known) || (node.SemanticRetryActive && repeated))
+        {
+            node.Diagnostics.Emit("guard", "repeated_rejected_answer", 1);
             MarkSemanticFailure(group, updates);
+        }
     }
 
     private void MarkSemanticFailure(IEnumerable<NodeState> group, UpdateDispatcher updates)
@@ -807,8 +836,9 @@ public sealed class BrowserPageTranslationService
     }
 
     private sealed class NodeState(BrowserPageTextBlock block, string key, string groupContext, long cacheEpoch,
-        bool eligible, string? artifactKey, IReadOnlyList<string> legacyKeys, bool foreignHanContext)
+        bool eligible, string? artifactKey, IReadOnlyList<string> legacyKeys, bool foreignHanContext, DiagnosticSession diagnostics)
     {
+        public DiagnosticSession Diagnostics { get; } = diagnostics;
         public BrowserPageTextBlock Block { get; } = block;
         public string CacheKey { get; } = key;
         public string GroupContext { get; } = groupContext;
@@ -846,6 +876,41 @@ public sealed class BrowserPageTranslationService
     }
 
     private sealed record SourcePiece(string Text, string Joiner);
+    // Invocation-local bound, including concurrent batches. Only private fixed codes
+    // and bounded integers enter this channel; callback failures cannot change results.
+    private sealed class DiagnosticSession(Action<string>? writer)
+    {
+        private readonly object _gate = new();
+        private int _lines;
+        private readonly HashSet<string> _firstEvents = new(StringComparer.Ordinal);
+        public int Requests;
+        public void Emit(string phase, string reason, int count)
+        {
+            if (writer is null) return;
+            lock (_gate)
+            {
+                // Reserve the first occurrence of each fixed phase/reason pair,
+                // including failures that arrive after verbose guard events.
+                // There are at most eleven such pairs on these execution paths.
+                if (_firstEvents.Count < 12 && _firstEvents.Add(phase + ":" + reason))
+                {
+                    Write(phase, reason, count);
+                    return;
+                }
+                if (_lines >= 50) return;
+                if (++_lines == 50) { phase = "diagnostics"; reason = "output_limited"; count = 1; }
+                Write(phase, reason, count);
+            }
+        }
+        // Reserve final summaries even if detailed events reached the bound.
+        public void Result(string reason, int count) { lock (_gate) Write("result", reason, count); }
+        public void Cache(string line) { lock (_gate) { try { writer?.Invoke(line); } catch { } } }
+        private void Write(string phase, string reason, int count)
+        {
+            try { writer?.Invoke(FormattableString.Invariant($"browser_page_diagnostic phase={phase} reason={reason} count={Math.Clamp(count, 0, MaximumCharacters)} requests={Math.Clamp(Volatile.Read(ref Requests), 0, 32)}")); }
+            catch { }
+        }
+    }
     private sealed class InlineProgress(Action<TranslationStreamUpdate> callback) : IProgress<TranslationStreamUpdate>
     { public void Report(TranslationStreamUpdate value) => callback(value); }
 

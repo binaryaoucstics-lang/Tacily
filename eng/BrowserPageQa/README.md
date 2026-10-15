@@ -71,6 +71,44 @@ worker 仅运行离线验收。主控负责在已授权环境准备构建资源�
 主控将原始 JSONL/stdout/stderr 和退出码保存到忽略证据目录，并核验身份匹配及 terminal 完整性。
 模拟 self-test、可访问页面、零请求跳过不能替代需要翻译页面的真实模型与逐节点证据。
 
+## 可选失败诊断
+
+在原有 JSONL 启动参数之前加 `--diagnostics`，例如：
+
+```powershell
+dotnet eng/BrowserPageQa/bin/Release/net8.0-windows10.0.19041.0/BrowserPageQa.dll --diagnostics
+dotnet eng/BrowserPageQa/bin/Release/net8.0-windows10.0.19041.0/BrowserPageQa.dll --diagnostics --use-running-app-preset
+dotnet eng/BrowserPageQa/bin/Release/net8.0-windows10.0.19041.0/BrowserPageQa.dll --diagnostics --saved-preset-snapshot PATH
+```
+
+同样支持 `--diagnostics --running-preset-snapshot PATH`。默认无诊断输出；原有
+`--self-test` 仍独立运行，不读取真实配置。诊断只写 stderr，不添加 stdout 协议帧，
+不改变候选、守卫、缓存、流式暂存、请求预算、provider 或提示。
+构造 JsonlHost 时也可提供可选 diagnosticOutput（用于 stderr 或离线测试）。
+
+每个已接纳 message 的诊断为单行 JSON：`type=diagnostic`、`schemaVersion=1`、
+`idHash`、`caseIdHash`、`phase`、`reason`、整数 `count` 和 `requests`。
+身份哈希为原 JSONL `id`／`caseId` 解码字符串的 UTF-8 SHA-256 大写十六进制；
+主控可据此关联原始请求和 case，包括并发请求。身份字符串不直接写入诊断，防止
+调用者把正文、URL 或凭据放入这些字段。哈希是关联标识，并不保证低熵身份无法被猜出。
+
+- `initial`／`format_retry`／`semantic_retry` 的 `format_failure` 来自实际格式异常；
+  后两种 phase 的 `retry_started` 仅在已有预算允许请求时出现。
+- `guard` 的 `guard_rejection`、`numeric_transfer`、`repeated_rejected_answer` 来自
+  现有语义守卫、数值归属边和已拒绝答案历史；`successful_group` 表示实际核验通过的组。
+- `budget` 的 `retry_budget_exhausted` 表示剩余预算不足以完成所需重试，
+  `request_budget_exceeded` 表示初始批次数已超限，未创建 provider。
+- `result` 的 `service_complete`、`service_failure`、`result_mismatch` 报告实际服务结果；
+  QA 主机也在完成节点数不匹配时记录 `result_mismatch`。它们不替代 stdout 的 terminal。
+
+服务每次调用最多 66 行（含原有安全缓存计数），QA 每个 message 最多 66 条诊断，
+每条不超过 384 字符。`diagnostics/output_limited` 表示详细事件被截断；各固定类别的
+首次事件和最终结果保留专用额度。计数是事件涉及的项数，事件可能在批次和整组核验重复出现，
+不可相加推断唯一节点数。缓存命中、跳过和未进入服务的错误可能没有详细事件。
+主机仅接受固定代码和有界整数并重建输出，不转发任意 callback 字符串；无源文、
+模型答复、配置、endpoint、异常文本或凭据。诊断写入失败不会改变翻译／terminal 结果。
+新增回归仅证明离线执行、隐私和归属行为，不证明真实网站或模型质量。
+
 离线回归覆盖已退出 message 的重复/跨 case 取消、非 message 和 busy 拒绝、活动取消失败，
 以及终止输出暂停期间取消和 shutdown 的竞态（始终只有一个原 terminal）。CLI 侧另保留前端
 `translation_timeout`、晚到成功 terminal 和原取消帧；幂等取消不代表前端完成，不修改生产计时器。
