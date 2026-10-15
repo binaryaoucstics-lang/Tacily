@@ -34,6 +34,10 @@ internal static class SelfTest
             ("continuation-reuses-document-assessment", ContinuationAsync),
             ("bounded-jsonl-and-eof-drain", InputAsync),
             ("broken-output-cannot-exit-successfully", TransportAsync),
+            ("diagnostics-opt-in-concurrent-attribution-and-privacy", DiagnosticsAsync),
+            ("diagnostics-bounded-failures-and-broken-sink", DiagnosticBoundsAsync),
+            ("diagnostics-observe-numeric-transfer-and-recovery", DiagnosticTransferAsync),
+            ("diagnostics-format-recovery-keeps-successful-groups", DiagnosticFormatRecoveryAsync),
         };
         var failed = 0;
         foreach (var test in tests)
@@ -377,6 +381,144 @@ internal static class SelfTest
 
     private static JsonlHost Host(TextWriter output, Func<AppSettings, ITranslationProvider> factory)
         => new(false, () => Task.FromResult(new AppSettings()), factory, output);
+
+    private static async Task DiagnosticsAsync()
+    {
+        // Hold two real host jobs inside their providers so attribution is tested
+        // across overlapping async continuations and smaller format retries.
+        var output = new StringWriter(); var diagnostics = new StringWriter();
+        var entered = 0; var both = Signal();
+        var provider = new SyntheticProvider(async (request, _, token) =>
+        {
+            if (Interlocked.Increment(ref entered) >= 2) both.TrySetResult();
+            await both.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            return request.Blocks[0].Text.Contains("SOURCE_SECRET", StringComparison.Ordinal)
+                ? "MODEL_SECRET sk-credential https://private.invalid" : Final(request);
+        });
+        await using (var host = new JsonlHost(false, () => Task.FromResult(new AppSettings { TranslationContext = "SETTINGS_SECRET" }),
+            _ => provider, output, diagnostics))
+        {
+            await host.HandleAsync(Candidate("ID_SECRET", "SOURCE_SECRET The entrance is blue.").Replace("\"caseId\":\"case\"", "\"caseId\":\"CASE_SECRET\""));
+            await host.HandleAsync(Candidate("success", Source + " The flowers bloom."));
+            await host.DrainAsync();
+        }
+        Check(!Terminal(output, "ID_SECRET").GetProperty("success").GetBoolean());
+        Check(Terminal(output, "success").GetProperty("success").GetBoolean());
+        Check(Events(output).All(e => Type(e) != "diagnostic"));
+        var records = Events(diagnostics);
+        var failure = records.Where(e => e.GetProperty("idHash").GetString() == HashIdentity("ID_SECRET")).ToArray();
+        var success = records.Where(e => e.GetProperty("idHash").GetString() == HashIdentity("success")).ToArray();
+        Check(failure.Length > 0 && success.Length > 0 && failure.Length + success.Length == records.Count);
+        Check(failure.All(e => e.GetProperty("caseIdHash").GetString() == HashIdentity("CASE_SECRET")));
+        Check(success.All(e => e.GetProperty("caseIdHash").GetString() == HashIdentity("case")));
+        Check(failure.Any(e => e.GetProperty("reason").GetString() == "format_failure"));
+        Check(failure.Any(e => e.GetProperty("phase").GetString() == "format_retry"));
+        Check(failure.Any(e => e.GetProperty("reason").GetString() == "result_mismatch"));
+        Check(success.All(e => e.GetProperty("reason").GetString() is "successful_group" or "service_complete"));
+        Check(!diagnostics.ToString().Contains("SECRET") && !diagnostics.ToString().Contains("entrance")
+            && !diagnostics.ToString().Contains("credential") && !diagnostics.ToString().Contains("https"));
+        Check(records.All(e => e.GetProperty("type").GetString() == "diagnostic" && e.GetProperty("requests").GetInt32() <= 32));
+
+        // Same malformed input with no writer keeps default protocol and terminal.
+        var plain = new StringWriter();
+        await using var defaultHost = Host(plain, _ => new SyntheticProvider((_, _, _) => Task.FromResult("MODEL_SECRET malformed")));
+        await defaultHost.HandleAsync(Candidate("default")); await defaultHost.DrainAsync();
+        Check(Events(plain).All(e => Type(e) != "diagnostic") && !Terminal(plain, "default").GetProperty("success").GetBoolean());
+        Check(Terminal(plain, "default").GetProperty("requestCount").GetInt32()
+            == Terminal(output, "ID_SECRET").GetProperty("requestCount").GetInt32());
+    }
+
+    private static async Task DiagnosticBoundsAsync()
+    {
+        var output = new StringWriter(); var diagnostics = new StringWriter();
+        var candidate = JsonNode.Parse(Candidate("bounded", "The demonstration took place in 1954."))!;
+        candidate["message"]!["blocks"] = JsonSerializer.SerializeToNode(Enumerable.Range(0, 48)
+            .Select(i => new { id = "fact" + i, text = "The demonstration took place in 1954." }));
+        var provider = new SyntheticProvider((request, _, _) => Task.FromResult(JsonSerializer.Serialize(new
+            { blocks = request.Blocks.Select(block => new { id = block.Id, translation = "MODEL_SECRET 演示于1955年举行。" }) })));
+        await using (var host = new JsonlHost(false, () => Task.FromResult(new AppSettings()), _ => provider, output, diagnostics))
+        {
+            await host.HandleAsync(candidate.ToJsonString()); await host.DrainAsync();
+        }
+        Check(!Terminal(output, "bounded").GetProperty("success").GetBoolean()
+            && Terminal(output, "bounded").GetProperty("failedCount").GetInt32() == 48);
+        var records = Events(diagnostics);
+        Check(records.Count <= 66 && records.Any(e => e.GetProperty("reason").GetString() == "output_limited")
+            && records.Any(e => e.GetProperty("reason").GetString() == "retry_budget_exhausted"));
+        Check(records.Any(e => e.GetProperty("reason").GetString() == "repeated_rejected_answer"));
+        Check(records.Any(e => e.GetProperty("reason").GetString() == "result_mismatch"));
+        Check(diagnostics.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).All(line => line.Length <= 384));
+        Check(!diagnostics.ToString().Contains("SECRET") && !diagnostics.ToString().Contains("演示"));
+        var brokenOutput = new StringWriter();
+        await using var broken = new JsonlHost(false, () => Task.FromResult(new AppSettings()),
+            _ => new SyntheticProvider(FinishAsync), brokenOutput, new BrokenDiagnosticWriter());
+        await broken.HandleAsync(Candidate("broken-diagnostic")); await broken.DrainAsync();
+        Check(Terminal(brokenOutput, "broken-diagnostic").GetProperty("success").GetBoolean());
+    }
+
+    private static string HashIdentity(string value) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    private static async Task DiagnosticTransferAsync()
+    {
+        var output = new StringWriter(); var diagnostics = new StringWriter(); var calls = 0;
+        var candidate = JsonNode.Parse(Candidate("transfer"))!;
+        candidate["message"]!["blocks"] = JsonSerializer.SerializeToNode(new[]
+        {
+            new { id = "receiver", text = "The demonstration", groupId = "inline" },
+            new { id = "owner", text = "took place in 1954.", groupId = "inline" },
+        });
+        var provider = new SyntheticProvider((request, _, _) =>
+        {
+            var retry = Interlocked.Increment(ref calls) > 1;
+            return Task.FromResult(JsonSerializer.Serialize(new { blocks = request.Blocks.Select(block => new
+            {
+                id = block.Id, translation = block.Text == "The demonstration"
+                    ? retry ? "演示" : "1954年的演示" : retry ? "于1954年举行。" : "举行。",
+            }) }));
+        });
+        await using var host = new JsonlHost(false, () => Task.FromResult(new AppSettings()), _ => provider, output, diagnostics);
+        await host.HandleAsync(candidate.ToJsonString()); await host.DrainAsync();
+        Check(Terminal(output, "transfer").GetProperty("success").GetBoolean() && calls == 3);
+        var records = Events(diagnostics);
+        Check(records.Any(e => e.GetProperty("reason").GetString() == "numeric_transfer"));
+        Check(records.Any(e => e.GetProperty("phase").GetString() == "semantic_retry"));
+        Check(records.Any(e => e.GetProperty("reason").GetString() == "successful_group"));
+        Check(!diagnostics.ToString().Contains("demonstration") && !diagnostics.ToString().Contains("1954")
+            && !diagnostics.ToString().Contains("演示"));
+    }
+
+    private sealed class BrokenDiagnosticWriter : StringWriter
+    {
+        public override void WriteLine(string? value) => throw new IOException("EXCEPTION_SECRET");
+    }
+
+    private static async Task DiagnosticFormatRecoveryAsync()
+    {
+        var output = new StringWriter(); var diagnostics = new StringWriter();
+        var candidate = JsonNode.Parse(Candidate("format-recovery"))!;
+        candidate["message"]!["blocks"] = JsonSerializer.SerializeToNode(Enumerable.Range(0, 6)
+            .Select(i => new { id = "node" + i, text = Source + (char)('a' + i) }));
+        var sizes = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        var provider = new SyntheticProvider((request, _, _) =>
+        {
+            sizes.Enqueue(request.Blocks.Count);
+            return Task.FromResult(request.Blocks.Count > 4 || request.Blocks[0].Text.EndsWith('e')
+                ? "MODEL_SECRET malformed" : Final(request));
+        });
+        await using var host = new JsonlHost(false, () => Task.FromResult(new AppSettings()), _ => provider, output, diagnostics);
+        await host.HandleAsync(candidate.ToJsonString()); await host.DrainAsync();
+        var terminal = Terminal(output, "format-recovery");
+        Check(!terminal.GetProperty("success").GetBoolean() && terminal.GetProperty("requestCount").GetInt32() == 3
+            && terminal.GetProperty("failedCount").GetInt32() == 2 && sizes.SequenceEqual(new[] { 6, 4, 2 }));
+        var complete = Events(output).Where(e => Type(e) == "packet")
+            .SelectMany(e => e.GetProperty("packet").GetProperty("updates").EnumerateArray())
+            .Where(e => e.GetProperty("complete").GetBoolean() && !e.GetProperty("failed").GetBoolean());
+        Check(complete.Select(e => e.GetProperty("id").GetString()).Distinct().Count() == 4);
+        var records = Events(diagnostics);
+        Check(records.Any(e => e.GetProperty("reason").GetString() == "successful_group")
+            && records.Any(e => e.GetProperty("phase").GetString() == "format_retry"));
+        Check(!diagnostics.ToString().Contains("SECRET") && !diagnostics.ToString().Contains("entrance"));
+    }
 
     private static string Candidate(string id, string source = Source) => Request(id, "message", new { message = new
     {

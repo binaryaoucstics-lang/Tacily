@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ScreenTranslator.App.Services.Browser;
 using ScreenTranslator.Core.Abstractions;
 using ScreenTranslator.Core.Browser;
@@ -19,6 +21,11 @@ internal sealed class JsonlHost : IAsyncDisposable
     private readonly bool _live;
     private readonly Lazy<Task<AppSettings>> _settings;
     private readonly TextWriter _output;
+    private readonly TextWriter? _diagnosticOutput;
+    private readonly object _diagnosticGate = new();
+    private static readonly Regex SafeDiagnostic = new(
+        @"\Abrowser_page_diagnostic phase=(initial|format_retry|semantic_retry|guard|budget|result|diagnostics) reason=(format_failure|retry_started|guard_rejection|numeric_transfer|repeated_rejected_answer|successful_group|retry_budget_exhausted|request_budget_exceeded|result_mismatch|service_complete|service_failure|output_limited) count=([0-9]{1,5}) requests=([0-9]{1,2})\z",
+        RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly object _gate = new();
@@ -35,11 +42,13 @@ internal sealed class JsonlHost : IAsyncDisposable
     private int _transportFailed;
 
     internal JsonlHost(bool live, Func<Task<AppSettings>> settings,
-        Func<AppSettings, ITranslationProvider> providerFactory, TextWriter output)
+        Func<AppSettings, ITranslationProvider> providerFactory, TextWriter output, TextWriter? diagnosticOutput = null)
     {
         _live = live; _settings = new(settings); _output = output;
+        _diagnosticOutput = diagnosticOutput;
         // The shared production service retains its ten provider slots and bounded memory-only cache.
-        _service = new(_ => new CountedProvider(providerFactory(_current.Value!.Settings!), _current.Value!), cache: _cache);
+        _service = new(_ => new CountedProvider(providerFactory(_current.Value!.Settings!), _current.Value!), cache: _cache,
+            diagnostic: diagnosticOutput is null ? null : Diagnostic);
     }
 
     internal async Task RunAsync(TextReader input)
@@ -237,7 +246,11 @@ internal sealed class JsonlHost : IAsyncDisposable
                 }, token);
                 work.RequestCount = result.RequestCount; work.CacheHits = result.CacheHits; work.FailedCount = result.FailedCount;
                 success = result.FailedCount == 0 && result.CompletedCount == work.Candidate.Blocks.Count;
-                if (!success) failure = "translation_incomplete";
+                if (!success)
+                {
+                    failure = "translation_incomplete";
+                    Diagnostic($"browser_page_diagnostic phase=result reason=result_mismatch count={work.Candidate.Blocks.Count - result.CompletedCount} requests={result.RequestCount}");
+                }
             }
             else success = true;
             // Commit completion under the same lock as cancellation. A cancel
@@ -285,6 +298,32 @@ internal sealed class JsonlHost : IAsyncDisposable
         try { return await _settings.Value.ConfigureAwait(false); }
         catch { throw new HostException("settings_unavailable"); }
     }
+
+    private void Diagnostic(string line)
+    {
+        var work = _current.Value;
+        if (_diagnosticOutput is null || work is null || line.Length > 192) return;
+        // Reconstruct from an allowlist. Never forward arbitrary callback text,
+        // exceptions, settings or even raw caller-controlled identity fields.
+        var match = SafeDiagnostic.Match(line);
+        if (!match.Success || !int.TryParse(match.Groups[3].Value, out var count) || count > 32_768
+            || !int.TryParse(match.Groups[4].Value, out var requests) || requests > 32) return;
+        lock (_diagnosticGate)
+        {
+            if (work.DiagnosticLines >= 66) return;
+            work.DiagnosticLines++;
+            try
+            {
+                _diagnosticOutput.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, type = "diagnostic",
+                    idHash = IdentityHash(work.Id), caseIdHash = IdentityHash(work.CaseId),
+                    phase = match.Groups[1].Value, reason = match.Groups[2].Value, count, requests }));
+                _diagnosticOutput.Flush();
+            }
+            catch { } // An optional diagnostic sink must not change translation/protocol results.
+        }
+    }
+
+    private static string IdentityHash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
     private Task PacketAsync(Work work, AutoPagePacket packet, bool accepted = false)
     {
@@ -367,6 +406,7 @@ internal sealed class JsonlHost : IAsyncDisposable
         public int RequestCount;
         public int CacheHits;
         public int FailedCount;
+        public int DiagnosticLines;
         public bool Finalizing;
     }
 

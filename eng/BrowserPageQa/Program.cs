@@ -11,6 +11,8 @@ internal static class Program
         Console.InputEncoding = new UTF8Encoding(false);
         Console.OutputEncoding = new UTF8Encoding(false);
         if (args.SequenceEqual(new[] { "--self-test" })) return await SelfTest.RunAsync();
+        var diagnostics = args.Length > 0 && args[0] == "--diagnostics";
+        if (diagnostics) args = args[1..];
         var useRunningPreset = args.SequenceEqual(new[] { "--use-running-app-preset" });
         var pinnedPreset = args.Length == 2 && args[0] == "--saved-preset-snapshot";
         var snapshotPath = args.Length == 2 && (args[0] == "--running-preset-snapshot" || pinnedPreset) ? args[1] : null;
@@ -21,7 +23,8 @@ internal static class Program
             return 2;
         }
         using var runtime = new LiveRuntime();
-        await using var host = new JsonlHost(true, () => LiveRuntime.LoadSettingsAsync(useRunningPreset, snapshotPath, pinnedPreset), runtime.CreateProvider, Console.Out);
+        await using var host = new JsonlHost(true, () => LiveRuntime.LoadSettingsAsync(useRunningPreset, snapshotPath, pinnedPreset), runtime.CreateProvider, Console.Out,
+            diagnostics ? Console.Error : null);
         // Console.In wraps a synchronous reader. Once an async continuation owns
         // its thread, waiting for the next line can delay queued translation work
         // until another input arrives. Use the underlying UTF-8 stream directly.
