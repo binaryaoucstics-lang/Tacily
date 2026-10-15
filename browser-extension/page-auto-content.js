@@ -476,6 +476,31 @@
     }
     return null;
   }
+  function renderSlotsFor(node) {
+    const slots = new Set();
+    for (let parent = composedParent(node); parent; parent = composedParent(parent)) if (parent.tagName === "SLOT") slots.add(parent);
+    return slots;
+  }
+  function sameRenderSlots(left, right) {
+    return (left?.size || 0) === (right?.size || 0) && [...(left || [])].every(slot => right.has(slot));
+  }
+  function sameAuthoredMembers(before, next) {
+    return !!before && before.length === next?.length && before.every((member, index) => {
+      const current = next[index];
+      return member.node === current.node && member.source === current.source && member.sourceLink === current.sourceLink
+        && sameRenderSlots(member.renderSlots, current.renderSlots);
+    });
+  }
+  function authoredSourceKey(members) {
+    if (!members) return null;
+    const links = new Map();
+    return JSON.stringify(members.map(member => {
+      const link = member.sourceLink;
+      if (link && !links.has(link)) links.set(link, links.size);
+      return [member.source, link ? [links.get(link), link.getAttribute?.("href")] : null];
+    }));
+  }
+  function sourceOrder(left, right) { return (left.authoredOrder ?? left.groupOrder) - (right.authoredOrder ?? right.groupOrder); }
   function completedSourceSpacing(previous, next) {
     if (!previous.length || !next.length) return false;
     const source = previous.map(record => record.source).join("");
@@ -523,13 +548,13 @@
   }
   async function extractPageSnapshot(environment, previous = new Map()) {
     const { document, getStyle, makeId, yieldWork = () => Promise.resolve(), viewportHeight = 800, targetLanguage = "简体中文" } = environment;
-    const records = [], groups = new Map(), openRoots = new Set(), groupParents = new WeakMap();
+    const records = [], groups = new Map(), openRoots = new Set(), groupParents = new WeakMap(), authoredGroups = new Map();
     const previousGroups = new Map();
     for (const record of previous.values()) {
       if (!previousGroups.has(record.groupElement)) previousGroups.set(record.groupElement, []);
       previousGroups.get(record.groupElement).push(record);
     }
-    for (const group of previousGroups.values()) group.sort((left, right) => left.groupOrder - right.groupOrder);
+    for (const group of previousGroups.values()) group.sort(sourceOrder);
     let fragmentDelay = 0, visibleFragmentDelay = 0;
     let eligibility = new WeakMap(); const checkedFragments = new WeakSet();
     const fragmentGroups = environment.fragmentGroups || new WeakSet();
@@ -570,6 +595,13 @@
       const before = previous.get(node);
       const source = before && node.nodeValue === before.lastWritten ? before.source : node.nodeValue;
       if (typeof source !== "string" || !source.length) continue;
+      // Local identity proof includes unpainted members as well as visible ones.
+      // Range geometry (including collapsed inline gaps) must not be mistaken
+      // for an authored paragraph edit. These members never enter request text,
+      // samples or language evidence unless they pass the rendering checks below.
+      const renderSlots = renderSlotsFor(node), link = sourceLink(node);
+      if (!authoredGroups.has(candidateGroup)) authoredGroups.set(candidateGroup, []);
+      authoredGroups.get(candidateGroup).push({ node, source, sourceLink: link, renderSlots });
       // Animated word wrappers include separator nodes with zero-width ranges
       // at line breaks. They remain part of the authored sentence and identity.
       const fragmentSeparator = fragmentGroups.has(candidateGroup) && !source.trim();
@@ -583,11 +615,10 @@
       let group = groups.get(element);
       if (!group) { const prose = isProseGroup(element); group = { id: makeId(), element, text: "", records: [], prose,
         kind: /^H[1-6]$/u.test(element.tagName) ? "heading" : !prose ? "navigation" : "body", main: isMainGroup(element) }; groups.set(element, group); }
-      const renderSlots = new Set();
-      for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") renderSlots.add(ancestor);
       const bounds = layout.bounds(element);
-      const record = { node, source, sourceLink: sourceLink(node), lastWritten: node.nodeValue, groupId: group.id, groupKind: group.kind, groupElement: element,
-        groupOrder: group.records.length, groupSourceStart: group.text.length, renderSlots, pieces: [], before, renderEligible: true,
+      const record = { node, source, sourceLink: link, lastWritten: node.nodeValue, groupId: group.id, groupKind: group.kind, groupElement: element,
+        groupOrder: group.records.length, authoredOrder: authoredGroups.get(candidateGroup).length - 1,
+        groupSourceStart: group.text.length, renderSlots, pieces: [], before, renderEligible: true,
         visible: !!bounds && bounds.bottom > 0 && bounds.top < viewportHeight };
       for (const sourcePiece of policy.splitText(source)) {
         record.pieces.push({ source: sourcePiece, value: sourcePiece });
@@ -619,8 +650,23 @@
       if (sliceExpired()) await yieldSlice();
       const groupBlockStart = blocks.length;
       const unchanged = group.records.every(record => record.before?.groupId && record.before.source === record.source
-        && record.before.groupElement === group.element && record.before.groupText === group.text);
+        && record.before.groupElement === group.element && record.before.groupText === group.text
+        && record.before.sourceLink === record.sourceLink && sameRenderSlots(record.before.renderSlots, record.renderSlots));
       const sourceSpacing = !selectedRanges && completedSourceSpacing(previousGroups.get(group.element) || [], group.records);
+      const peers = previousGroups.get(group.element) || [], authoredMembers = authoredGroups.get(group.element);
+      const proofMatches = new Map();
+      const sameProof = proof => {
+        if (!proofMatches.has(proof)) proofMatches.set(proof, sameAuthoredMembers(proof, authoredMembers));
+        return proofMatches.get(proof);
+      };
+      const currentMembers = new Map(authoredMembers.map(member => [member.node, member]));
+      const ownershipChanged = [...new Set(peers.map(record => record.authoredMembers).filter(Boolean))].some(proof => proof.some(member => {
+        const current = currentMembers.get(member.node);
+        return current && (member.sourceLink !== current.sourceLink || !sameRenderSlots(member.renderSlots, current.renderSlots));
+      }));
+      const layoutOnly = !selectedRanges && peers.some(record => record.pieces.some(piece => piece.id && piece.complete))
+        && peers.every(record => record.groupId && !record.selectionScoped && !record.atomicOwner
+          && sameProof(record.authoredMembers));
       if (unchanged || sourceSpacing) {
         group.id = (sourceSpacing ? previousGroups.get(group.element)[0] : group.records[0].before).groupId;
         for (const record of group.records) record.groupId = group.id;
@@ -630,9 +676,13 @@
         // a proven separate horizontal gap. A changed date or inline neighbour must
         // not leave fragments displaying facts from the previous paragraph.
         const before = record.before;
-        if (before?.source === record.source && before.groupElement === group.element && (before.groupText === group.text || sourceSpacing))
+        if (before?.source === record.source && before.groupElement === group.element
+            && before.sourceLink === record.sourceLink && sameRenderSlots(before.renderSlots, record.renderSlots)
+            && (before.groupText === group.text && (!before.authoredMembers || sameProof(before.authoredMembers))
+              || sourceSpacing || layoutOnly))
           record.pieces = before.pieces.map(piece => ({ ...piece }));
-        record.groupText = group.text; record.groupHash = group.sourceDigest; delete record.before;
+        record.groupText = group.text; record.groupHash = group.sourceDigest; record.authoredMembers = authoredMembers;
+        record.ownershipChanged = ownershipChanged; delete record.before;
         if (selectedRanges) applySelectedPieces(record, selectedRanges.get(record.node) || []);
       }
       if (!policy.hasLanguageText(group.text)) continue;
@@ -758,7 +808,7 @@
       if (!before || before.source !== source) { fragmentSources.set(element, { source, changedAt: now }); return 220; }
       return Math.max(0, 220 - (now - before.changedAt));
     };
-    const { document, token, send, onStatus = () => {}, onDecision = () => {}, onView = () => {}, schedule = callback => setTimeout(callback, 0), clearSchedule = clearTimeout } = environment;
+    const { document, token, send, onStatus = () => {}, onDecision = () => {}, onView = () => {}, schedule = (callback, delay = 0) => setTimeout(callback, delay), clearSchedule = clearTimeout } = environment;
     let config = { enabled: false, active: true, manualAvailable: false, generation: 0, targetLanguage: "简体中文", judgementMode: "program", concurrency: 10,
       chineseProseShareThresholdPercent: 50, cacheScope: "", cacheEpoch: 0 };
     let revision = 0, records = new Map(), blocks = new Map(), queue = [], jobs = new Map(), assessed = null, knownOpenRoots = new Set();
@@ -786,7 +836,7 @@
         if (!groups.has(element)) groups.set(element, []); groups.get(element).push(record);
       }
       for (const groupRecords of groups.values()) {
-        groupRecords.sort((left, right) => left.groupOrder - right.groupOrder);
+        groupRecords.sort(sourceOrder);
         const pieces = groupRecords.flatMap(record => record.pieces);
         if (!pieces.some(piece => piece.id) || pieces.some(piece => piece.id && (!piece.complete || piece.failed))) continue;
         const source = groupRecords.map(part => part.source).join("");
@@ -794,10 +844,12 @@
         const key = groupKey(groupRecords);
         const values = groupRecords.map(record => record.pieces.map(piece => ({ source: piece.source,
           value: piece.value, eligible: !!piece.id })));
-        const characters = key.length + values.flat().reduce((sum, piece) => sum + piece.source.length + piece.value.length, 0);
+        const authoredSource = authoredSourceKey(groupRecords[0].authoredMembers);
+        const characters = key.length + (authoredSource?.length || 0) + values.flat().reduce((sum, piece) => sum + piece.source.length + piece.value.length, 0);
         if (characters > maximumCompletedCharacters) continue;
         const old = completedGroups.get(key); if (old) { completedCharacters -= old.characters; completedGroups.delete(key); }
-        completedGroups.set(key, { values, characters, selectionScoped: groupRecords.some(record => record.selectionScoped),
+        completedGroups.set(key, { values, characters, authoredSource, slots: groupRecords.map(record => record.renderSlots),
+          selectionScoped: groupRecords.some(record => record.selectionScoped),
           ...(groupRecords.every(record => record.socialAtomic) ? { socialValue: values.flat().map(piece => piece.value).join("") } : {}) }); completedCharacters += characters;
         while (completedCharacters > maximumCompletedCharacters || completedGroups.size > maximumCompletedGroups) {
           const first = completedGroups.keys().next().value;
@@ -813,6 +865,9 @@
       }
       for (const groupRecords of groups.values()) {
         const key = groupKey(groupRecords), entry = completedGroups.get(key); if (!entry) continue;
+        if (groupRecords.some(record => record.ownershipChanged)) continue;
+        if (!groupRecords.every((record, index) => sameRenderSlots(record.renderSlots, entry.slots[index]))) continue;
+        if (entry.authoredSource !== null && entry.authoredSource !== authoredSourceKey(groupRecords[0].authoredMembers)) continue;
         if (typeof entry.socialValue === "string" && groupRecords.every(record => record.socialAtomic)
             && groupRecords.flatMap(record => record.pieces).filter(piece => piece.id).length === 1) {
           for (const record of groupRecords) for (const piece of record.pieces) {
@@ -917,11 +972,15 @@
     function restore() {
       clearAnnotations();
       for (const record of records.values()) if (record.node.isConnected !== false && record.node.nodeValue === record.lastWritten) {
+        environment.motion?.writer.cancel(record.node); record.writeVersion = (record.writeVersion || 0) + 1;
         if (record.node.nodeValue !== record.source) record.node.nodeValue = record.source;
         record.lastWritten = record.source;
       }
     }
     function cancel(reason, restoreText = true, preserveProgress = false) {
+      // A pending layout/retry belongs to the cancelled revision. Retire it so
+      // an immediate scan for changed source or resume gets its own timer.
+      if (scanTimer !== null) { clearSchedule(scanTimer); scanTimer = null; }
       environment.motion?.clearText(!restoreText && preserveProgress);
       if (jobs.size) {
         // A request-less cancellation pauses the native automatic session.
@@ -943,8 +1002,10 @@
       if (!canRender() || record.node.isConnected === false || record.node.nodeValue !== record.lastWritten
           || !permitted(record.node, environment.getStyle, environment.fragmentGroups) || !renderedRecord(record, environment.isRenderedText)) return false;
       const text = viewMode === "translation" ? record.pieces.map(piece => piece.value).join("") : record.source;
+      const writeVersion = record.writeVersion = (record.writeVersion || 0) + 1;
       const commit = value => {
-        if (record.node.isConnected === false || record.node.nodeValue !== record.lastWritten || !canRender()
+        if (records.get(record.node) !== record || record.writeVersion !== writeVersion
+            || record.node.isConnected === false || record.node.nodeValue !== record.lastWritten || !canRender()
             || !permitted(record.node, environment.getStyle, environment.fragmentGroups)) return false;
         if (record.node.nodeValue !== value) record.node.nodeValue = value;
         record.lastWritten = value; return true;
@@ -954,7 +1015,8 @@
         const success = !record.pieces.some(piece => piece.failed);
         environment.motion.softReveal(record.groupElement, cached || !success);
         return environment.motion.writer.write(record.node, text, { read: () => record.node.nodeValue,
-          current: () => canRender() && record.node.isConnected !== false && record.node.nodeValue === record.lastWritten,
+          current: () => canRender() && records.get(record.node) === record && record.writeVersion === writeVersion
+            && record.node.isConnected !== false && record.node.nodeValue === record.lastWritten,
           commit, padding: record.source.match(/\s*$/u)[0], immediate: done || cached || !success });
       }
       environment.motion?.writer.cancel(record.node);
@@ -1406,6 +1468,8 @@
       function invalidateGroup(element) {
         if (!element) return;
         for (const record of records.values()) if (record.groupElement === element) {
+          environment.motion?.writer.cancel(record.node);
+          record.writeVersion = (record.writeVersion || 0) + 1;
           const ids = record.pieces.map(piece => piece.id).filter(Boolean);
           invalidated ||= ids.length > 0 || !environment.fragmentGroups.has(element);
           for (const id of ids) {
@@ -1423,6 +1487,37 @@
         }
         removeAnnotation(element);
       }
+      function wholeSourceKnown(previous) {
+        if (!previous.length || [...records.values()].filter(record => record.groupElement === previous[0].groupElement).length !== previous.length) return false;
+        const source = previous.map(record => record.source).join("");
+        if (previous.every(record => record.groupText === source)) return true;
+        // After a visibility-only scan groupText describes the readable subset.
+        // Rebinding still needs the entire, ordered authored membership proof.
+        const members = previous[0]?.authoredMembers;
+        return members?.length === previous.length && previous.every((record, index) =>
+          members[index].node === record.node && members[index].source === record.source);
+      }
+      function rebindNodes(element, previous) {
+        return [...walkAccessibleNodes(element)].filter(node => node.nodeType === 3 && groupElement(node) === element
+          && (String(node.nodeValue || "").length || previous.some(record => record.atomicOwner)));
+      }
+      function sameRebindOwnership(previous, nodes) {
+        const members = nodes.map((node, index) => ({ source: previous[index].source, sourceLink: sourceLink(node) }));
+        return authoredSourceKey(previous) === authoredSourceKey(members) && nodes.every((node, index) => {
+          const record = previous[index];
+          // Existing Text owners cannot be silently reassigned to another link.
+          return (node !== record.node || sourceLink(node) === record.sourceLink)
+            && sameRenderSlots(renderSlotsFor(node), record.renderSlots);
+        });
+      }
+      function refreshAuthoredMembers(previous) {
+        const members = previous.map(record => ({ node: record.node, source: record.source,
+          sourceLink: sourceLink(record.node), renderSlots: renderSlotsFor(record.node) }));
+        for (const [index, record] of previous.entries()) {
+          record.authoredMembers = members; record.authoredOrder = index;
+          record.sourceLink = members[index].sourceLink; record.renderSlots = members[index].renderSlots;
+        }
+      }
       function rebindRegroupedCompleted() {
         const previousGroups = new Map();
         for (const record of records.values()) {
@@ -1430,19 +1525,15 @@
           previousGroups.get(record.groupElement).push(record);
         }
         for (const [beforeElement, previous] of previousGroups) {
-          previous.sort((left, right) => left.groupOrder - right.groupOrder);
+          previous.sort(sourceOrder);
           const element = groupElement(previous[0].node);
           if (!element || element === beforeElement || previous.some(record => record.node.isConnected === false
               || groupElement(record.node) !== element)) continue;
           const kind = /^H[1-6]$/u.test(element.tagName) ? "heading" : isProseGroup(element) ? "body" : "navigation";
-          const source = previous.map(record => record.source).join("");
-          if (previous.some(record => record.groupKind !== kind || record.groupText !== source
+          if (!wholeSourceKnown(previous) || previous.some(record => record.groupKind !== kind
               || record.pieces.some(piece => piece.id && (!piece.complete || piece.failed)))
               || !previous.some(record => record.pieces.some(piece => piece.id && piece.value !== piece.source))) continue;
-          const nodes = [...walkAccessibleNodes(element)].filter(node => node.nodeType === 3 && groupElement(node) === element
-            && permitted(node, environment.getStyle, environment.fragmentGroups)
-            && (String(node.nodeValue || "").length || previous.some(record => record.atomicOwner))
-            && renderedRecord(records.get(node) || { node }, environment.isRenderedText));
+          const nodes = rebindNodes(element, previous);
           // Reparent only the entire proven group, in the same order. This must
           // never salvage an unchanged fragment from a changed prose paragraph
           // or carry an old translation across slot reassignment.
@@ -1452,8 +1543,9 @@
             const slots = new Set();
             for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") slots.add(ancestor);
             return slots.size === record.renderSlots?.size && [...slots].every(slot => record.renderSlots.has(slot));
-          })) continue;
+          }) || !sameRebindOwnership(previous, nodes)) continue;
           removeAnnotation(beforeElement); removeClonedAnnotations(element);
+          refreshAuthoredMembers(previous);
           for (const record of previous) { record.groupElement = element; record.lastWritten = record.node.nodeValue; write(record); }
           renderBilingual(new Set([element]));
         }
@@ -1461,18 +1553,17 @@
       function rebindUnchangedGroup(element) {
         if (!element) return false;
         const previous = [...records.values()].filter(record => record.groupElement === element)
-          .sort((left, right) => left.groupOrder - right.groupOrder);
+          .sort(sourceOrder);
         if (!previous.length) return false;
-        const nodes = [...walkAccessibleNodes(element)].filter(node => node.nodeType === 3
-          && groupElement(node) === element && permitted(node, environment.getStyle, environment.fragmentGroups) && (String(node.nodeValue || "").length || previous.some(record => record.atomicOwner))
-          && (!environment.isRenderedText || environment.isRenderedText(node) || node.nodeValue === "" && previous.some(record => record.atomicOwner)));
+        const nodes = rebindNodes(element, previous);
         if (nodes.length !== previous.length) return false;
         // Framework textContent/clone replacements can replace every Text node
         // without changing the paragraph. Rebind the actual job records before
         // observer invalidation, including an already visible stream prefix.
-        if (!nodes.every((node, index) => node.nodeValue === previous[index].source
-            || node.nodeValue === previous[index].lastWritten)) return false;
-        if (previous.some(record => record.groupText !== previous.map(part => part.source).join(""))) return false;
+        if (!nodes.every((node, index) => (node.nodeValue === previous[index].source
+            || node.nodeValue === previous[index].lastWritten) && sameRenderSlots(renderSlotsFor(node), previous[index].renderSlots))) return false;
+        if (!wholeSourceKnown(previous)) return false;
+        if (!sameRebindOwnership(previous, nodes)) return false;
         removeClonedAnnotations(element);
         for (const [index, node] of nodes.entries()) {
           const record = previous[index]; transferSelection(record.node, node); records.delete(record.node); record.node = node;
@@ -1480,6 +1571,7 @@
           for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") record.renderSlots.add(ancestor);
           record.lastWritten = node.nodeValue; records.set(node, record); write(record);
         }
+        refreshAuthoredMembers(previous);
         for (const record of previous) if (record.atomicOwner) write(record);
         renderBilingual(new Set([element])); return true;
       }
@@ -1497,13 +1589,17 @@
           if (!nodes.length || nodes.some(node => records.has(node))) continue;
           const prose = isProseGroup(element), kind = /^H[1-6]$/u.test(element.tagName) ? "heading" : !prose ? "navigation" : "body";
           const groupRecords = nodes.map((node, groupOrder) => ({ node, source: node.nodeValue, lastWritten: node.nodeValue,
-            groupElement: element, groupOrder, groupKind: kind, renderSlots: new Set(),
+            groupElement: element, groupOrder, groupKind: kind, sourceLink: sourceLink(node), renderSlots: renderSlotsFor(node),
             pieces: policy.splitText(node.nodeValue).map(source => ({ source, value: source })) }));
           const source = groupRecords.map(record => record.source).join("");
           // Standalone Han headings depend on other paragraphs' Japanese
           // evidence; leave those to the complete source scan.
           if (policy.alreadyTargetText(source, config.targetLanguage)) continue;
           const entry = completedGroups.get(groupKey(groupRecords)); if (!entry) continue;
+          const members = [...walkAccessibleNodes(element)].filter(node => node.nodeType === 3 && groupElement(node) === element && node.nodeValue)
+            .map(node => ({ source: node.nodeValue, sourceLink: sourceLink(node) }));
+          if (entry.authoredSource !== null && entry.authoredSource !== authoredSourceKey(members)
+              || !groupRecords.every((record, index) => sameRenderSlots(record.renderSlots, entry.slots[index]))) continue;
           if (entry.selectionScoped && groupRecords.every((record, index) => entry.values[index]?.map(piece => piece.source).join("") === record.source)) {
             for (const [index, record] of groupRecords.entries()) {
               record.pieces = entry.values[index].map(piece => ({ source: piece.source, value: piece.source, selected: piece.eligible }));
@@ -1538,22 +1634,24 @@
         }
         const replacements = new Map();
         for (const added of addedNodes || []) for (const node of walkAccessibleNodes(added)) {
-          if (node.nodeType !== 3 || !permitted(node, environment.getStyle, environment.fragmentGroups)) continue;
+          if (node.nodeType !== 3) continue;
           const element = groupElement(node);
           const emptyCalendarPeer = node.nodeValue === "" && [...previousGroups.values()].some(group => group.some(record => record.atomicOwner));
-          if ((!String(node.nodeValue || "").length || environment.isRenderedText && !environment.isRenderedText(node)) && !emptyCalendarPeer) continue;
+          if (!String(node.nodeValue || "").length && !emptyCalendarPeer) continue;
           if (!replacements.has(element)) replacements.set(element, []); replacements.get(element).push(node);
         }
         const reboundRemoved = new Set();
         for (const [element, nodes] of replacements) {
           if (!element || nodes.some(node => records.has(node))) continue;
           const prose = isProseGroup(element), kind = /^H[1-6]$/u.test(element.tagName) ? "heading" : !prose ? "navigation" : "body";
-          const matches = [...previousGroups.values()].map(group => group.sort((left, right) => left.groupOrder - right.groupOrder))
+          const matches = [...previousGroups.values()].map(group => group.sort(sourceOrder))
             .filter(group => group.length === nodes.length && group[0].groupKind === kind
               && group.some(record => record.pieces.some(piece => piece.id && !piece.failed && piece.value !== piece.source))
               && group.every(record => record.pieces.every(piece => !piece.failed))
-              && group.every((record, index) => nodes[index].nodeValue === record.source || nodes[index].nodeValue === record.lastWritten)
-              && group.every(record => record.groupText === group.map(part => part.source).join("")));
+              && group.every((record, index) => (nodes[index].nodeValue === record.source || nodes[index].nodeValue === record.lastWritten)
+                && sameRenderSlots(renderSlotsFor(nodes[index]), record.renderSlots))
+              && wholeSourceKnown(group) && sameRebindOwnership(group, nodes)
+              && rebindNodes(element, group).every((node, index, all) => all.length === nodes.length && node === nodes[index]));
           // Only a uniquely identified replacement from this mutation may
           // recover the authored source from copied rendered Chinese text.
           if (matches.length !== 1) continue;
@@ -1566,12 +1664,23 @@
             for (let ancestor = composedParent(node); ancestor; ancestor = composedParent(ancestor)) if (ancestor.tagName === "SLOT") record.renderSlots.add(ancestor);
             record.lastWritten = node.nodeValue; records.set(node, record); write(record);
           }
+          refreshAuthoredMembers(previous);
           for (const record of previous) if (record.atomicOwner) write(record);
           renderBilingual(new Set([element]));
         }
         return reboundRemoved;
       }
       function hasUnchangedGroupSource(element, expected) {
+        const proof = [...records.values()].find(record => record.groupElement === element)?.authoredMembers;
+        if (proof) {
+          const members = [];
+          for (const node of walkAccessibleNodes(element)) {
+            if (node.nodeType !== 3 || groupElement(node) !== element) continue;
+            const record = records.get(node), source = record && node.nodeValue === record.lastWritten ? record.source : node.nodeValue;
+            if (source) members.push({ node, source, sourceLink: sourceLink(node), renderSlots: renderSlotsFor(node) });
+          }
+          return sameAuthoredMembers(proof, members);
+        }
         let text = "";
         for (const node of walkAccessibleNodes(element)) {
           if (node.nodeType !== 3 || groupElement(node) !== element || !permitted(node, environment.getStyle, environment.fragmentGroups)) continue;
@@ -1589,7 +1698,7 @@
       function rebindCoalescedGroup(element) {
         if (!element) return false;
         const previous = [...records.values()].filter(record => record.groupElement === element)
-          .sort((left, right) => left.groupOrder - right.groupOrder);
+          .sort(sourceOrder);
         if (previous.length < 2) return false;
         const nodes = [...walkAccessibleNodes(element)].filter(node => node.nodeType === 3
           && groupElement(node) === element && permitted(node, environment.getStyle, environment.fragmentGroups) && (String(node.nodeValue || "").length || previous.some(record => record.atomicOwner))
@@ -1679,7 +1788,7 @@
         if (!element || checkedSpacingGroups.has(element)) continue;
         checkedSpacingGroups.add(element);
         const previous = [...records.values()].filter(record => record.groupElement === element)
-          .sort((left, right) => left.groupOrder - right.groupOrder);
+          .sort(sourceOrder);
         if (!previous.some(record => record.pieces.some(piece => piece.id && piece.complete))
             || previous.some(record => record.pieces.some(piece => piece.id && (!piece.complete || piece.failed)))) continue;
         const next = [];
