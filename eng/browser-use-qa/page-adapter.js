@@ -25,8 +25,11 @@
   // references to those exact versions instead of a second copy in every row.
   const observationValues = new Map(), observationValueKeys = new Map();
   let observationValueSerial = 0;
-  // Independent traversal advances even while admission is reset. Keep the
-  // latest source version plus versions referenced by retained producer views.
+  // Latest full rows already belong to the independent sources registry. Store
+  // only their exact observation metadata here, rather than duplicating every
+  // source/display/geometry string. Replacing a sources row never mutates it:
+  // retained producer versions keep the old immutable row and its actual time.
+  // The full needed version union is still charged at export under both bounds.
   const sourceVersions = new Map();
   let sourceVersionCharacters = 0, sourceVersionDropped = 0;
   const scheduledScans = new Set();
@@ -35,6 +38,10 @@
   let serial = 0, session, observer, probeTimer, status = null, probeJob = null;
   const document = root.document;
   const timestamp = () => new Date().toISOString();
+  function sourceVersion(id) {
+    const reference = sourceVersions.get(id), source = sources.get(id);
+    return reference && source ? { at: reference.at, sequence: reference.sequence, source } : null;
+  }
   function internObservationValue(value) {
     const serialized = JSON.stringify(value);
     let entry = observationValueKeys.get(serialized);
@@ -469,9 +476,12 @@
         ...layout, displayedText: value, phase };
       // Only full independently observed rows enter history. If a node later
       // hides or detaches, the last complete row remains available for review.
-      sources.set(id, { ...row }); nodes.push(row);
-      const version = JSON.parse(JSON.stringify({ at, sequence, source: row }));
-      const size = JSON.stringify(version).length, oldVersion = sourceVersions.get(id);
+      sources.set(id, JSON.parse(JSON.stringify(row))); nodes.push(row);
+      const reference = { at, sequence };
+      // Charge the actual supplemental representation (including its source
+      // key). Full source rows are independently retained exactly once above;
+      // historical producer snapshots and exported proof are never shortened.
+      const size = JSON.stringify({ sourceId: id, ...reference }).length, oldVersion = sourceVersions.get(id);
       if (oldVersion) { sourceVersionCharacters -= oldVersion.size; sourceVersions.delete(id); }
       if (size <= observationCharacterLimit) {
         while (sourceVersions.size >= observationLimit || sourceVersionCharacters + size > observationCharacterLimit) {
@@ -479,7 +489,7 @@
           sourceVersionCharacters -= sourceVersions.get(oldest).size;
           sourceVersions.delete(oldest); sourceVersionDropped++;
         }
-        sourceVersions.set(id, { version, size }); sourceVersionCharacters += size;
+        sourceVersions.set(id, { ...reference, size }); sourceVersionCharacters += size;
       } else sourceVersionDropped++;
       const intentional = state?.originalView || state?.viewMode === "bilingual";
       // A changed production source receives a new identity. Unknown/changed authored
@@ -535,11 +545,11 @@
           represented.set(member, prediction.sourceId);
       for (const id of new Set([...currentSources, ...represented.keys()])) {
         const pieces = piecesBySource.get(id) || [];
-        const sourceVersion = sourceVersions.get(id)?.version;
-        const ownerVersion = sourceVersions.get(represented.get(id))?.version;
+        const observedVersion = sourceVersion(id);
+        const ownerVersion = sourceVersion(represented.get(id));
         const reference = version => version ? { at: version.at, sequence: version.sequence } : null;
         const value = { sourceId: id, phase, at, sequence,
-          sourceObservation: reference(sourceVersion),
+          sourceObservation: reference(observedVersion),
           representedSourceObservation: reference(ownerVersion),
           rendered: visibleRows.get(id)?.rendered === true,
           representedBy: represented.get(id) || null,
@@ -548,12 +558,12 @@
         // Detach snapshots from mutable DOM/session state and returned samples.
         const old = producerObservations.get(id);
         if (old) { releaseObservation(old); producerObservations.delete(id); }
-        if (!sourceVersion || represented.has(id) && !ownerVersion) { observationDropped++; continue; }
+        if (!observedVersion || represented.has(id) && !ownerVersion) { observationDropped++; continue; }
         value.work = internObservationValue(work);
         value.pieces = pieces.map(internObservationValue);
         const serialized = JSON.stringify(value), size = serialized.length + 1;
         const entry = { serialized, size, references: [value.work, ...value.pieces],
-          versions: [sourceVersion, ownerVersion].filter(Boolean) };
+          versions: [observedVersion, ownerVersion].filter(Boolean) };
         observationCharacters += size;
         producerObservations.set(id, entry);
         while (producerObservations.size > observationLimit || observationCharacters > observationCharacterLimit) {
@@ -564,8 +574,10 @@
       }
     }
     const versions = new Map();
-    for (const { version } of sourceVersions.values())
+    for (const id of sourceVersions.keys()) {
+      const version = sourceVersion(id);
       versions.set(JSON.stringify([version.source.id, version.sequence]), version);
+    }
     for (const { versions: retained } of producerObservations.values()) for (const version of retained)
       versions.set(JSON.stringify([version.source.id, version.sequence]), version);
     // Keep the legacy export unless its union exceeds a bound. At pressure only
@@ -626,8 +638,8 @@
     if (compact) producerRows = Array.from(producerObservations.values(), entry => JSON.parse(entry.serialized));
     return { at, finalUrl: root.location.href, title: document.title,
       viewport: { width: root.innerWidth, height: root.innerHeight, scrollX: root.scrollX, scrollY: root.scrollY },
-      nodes, sourceNodes: Array.from(sources.values(), value => ({ ...value,
-        currentlyRendered: currentSources.has(value.id) })), predictions, productionEligibility, status,
+      nodes, sourceNodes: JSON.parse(JSON.stringify(Array.from(sources.values(), value => ({ ...value,
+        currentlyRendered: currentSources.has(value.id) })))), predictions, productionEligibility, status,
       producerObservations: producerRows,
       ...(transport ? { producerObservationTransport: transport } : {}),
       producerObservationDropped: observationDropped,
