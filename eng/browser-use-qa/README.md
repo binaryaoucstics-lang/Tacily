@@ -151,3 +151,15 @@ python -m unittest discover -s eng/website-qa -p 'test_*.py'
 测试包括 mock CLI JSON/失败/分块注入（转义、非 BMP、中文与 UTF-16 边界），批量交付的原始帧/交错 RPC/单次确认/顺序、完整包装预算边界、大包安全数据分块、错误与逐事件日志、case 期限与子进程超时，Promise 空对象及任务 completed/failed/timeout 回归，负例只有完整 probe 才能转发 assess，合成 DOM 可见候选（脚本/样式/隐藏节点不生成证据、后来显示/隐藏/脱离保留完整历史、预测 unmatched）/稳定 ID/撤回/RPC/监听器，独立 JSONL 严格 mock 进程（拒绝空身份/重复请求、核验响应关联、同一主机连续两个站点），实际 Windows 句柄占用与模拟替换冲突/耗尽/旧证据保留/失败堆栈，持续 rect/locator/顺序/身份运动的语义稳定、所有替换源身份/unknown 历史保留、13 个 eligible 未翻译候选的 skipped 负例零翻译请求且捕获全部截图、负例文本变化/failed/未解决任务仍阻止稳定、文本/数量变化和未解决任务阻止稳定、完整页独立截图/哈希/审核门槛，逐站截图阶段、失败恢复、冻结/历史保护、完成门槛与独立审核。测试临时目录在 owned tests 内并自动清理。实际验收日志和修复前 trace 留在忽略目录，原主控审查失败报告保持不动；本任务的这些离线测试不执行真实 Browser Use、网络或模型，不改变已有真实访问的历史记录。
 
 capture-evidence 回归另外使用 fake wrapper runner 与假主机事件核对失败 packet 后的原始 failed terminal（包含真实形式的非零 requestCount/failedCount）、最终节点标志与截图哈希、截图失败不丢终止、缺失 terminal 和截止瞬间不启动额外采集。负页回归涵盖零模型 native assessment、实际模型调用拒绝、unknown/缺失 requestCount、采样间决策重置及持续零模型 assessment storm。全部仍是离线合成证据，不计真实网页完成率。
+
+## 调度延迟与截图生命周期诊断
+
+QA 的 `schedule(callback, delay)` 将生产请求的延迟原样交给 `setTimeout`；未传延迟时为 0。`scheduledScans` 包括尚未开始的实际定时扫描，执行或取消时移除，dispose 清理剩余计时器。原 producer work 证明以及 capture 的语义等待和最终未解决工作检查均保留此计数：已排队的延迟任务不能凭 completed/skipped 状态被视为 idle。扫描开始后的执行状态仍由生产 scanning/jobs/pending 证明。
+
+每次截图继续使用原 phase 的命令前完整样本，额外只调用两次轻量 `screenshotBoundary`，不增加 DOM 遍历、轮询或等待。新增 `screenshotLifecycle` 按截图尝试记录；成功图片通过 `lifecycleIndex` 关联。它包含页面命令前后时间、最后实际 sampleSequence、原始事件索引、viewport/scroll 和 scheduledScans，以及控制端 `commandStartedAt`/`commandFinishedAt`、实际命令返回或错误。诊断数量受已有截图阶段、刷新次数和 case 期限约束，不保留额外的源/producer 快照，不改变 2048 行、2,000,000 字符证明边界或刷新上限。
+
+JSONL 的 `screenshot_boundary` 同时保存该边界之前尚未导出的原始事件增量；索引对应原有 append-only `sample.events`，不是重新构造的 DOM 变化。命令前边界从该截图样本的事件数量开始，命令后边界从命令前边界继续。原历史不消费、不截断；撤回按原事件索引保留，完全相同的两条观察仍是两条。即使截图命令抛错，也在同一 case 期限内尝试结束边界并保存原始撤回与原错误；边界失败或期限耗尽明确记 unavailable，不延长期限或制造结束证据。较晚完整样本不能清除已保存的撤回。
+
+页面边界覆盖的时间还包含 CLI 往返；控制端时间只包围实际 screenshot wrapper 命令，两个时钟不可直接当成同一时钟比较。命令后边界之前导出的候选可以与之后的 scroll/reflow 区分，但不是精确写入时刻或浏览器 paint 证据。`paintedTransition` 始终为 unknown；最终图片已经恢复译文也不能抹除中途 DOM 候选、证明没有绘制过原文或使撤回通过。旧 v1 夹具没有边界接口时保留 unavailable/unknown，原 phase、截图文件/哈希、未知标签与审核门槛不变。
+
+新增 `test_capture_scheduler_parity.py` 和 `test_capture_screenshot_lifecycle.py` 及 append-only adapter 检查覆盖实际适配器的非零延迟/默认延迟、延迟期间 unknown、取消/后续调度/dispose、无额外遍历的边界、完整页截图前后撤回、截图与边界错误、截止时间和重复原始观察保留。它们仅提供开发期离线回归证据；真实页面/Browser Use/provider 重放由主控进行，不代表百站或 95/97 质量目标达成。

@@ -608,7 +608,7 @@ def completion_gate(case, path):
     if any(p.get("failed") for p in case.get("predictions", [])):
         reasons.append("node_failure")
     final_state = case.get("finalState", {})
-    if any(final_state.get(key) for key in ("jobs", "pending", "scanning", "rpcPending")) or (
+    if any(final_state.get(key) for key in ("jobs", "pending", "scanning", "rpcPending", "scheduledScans")) or (
             final_state and (type(final_state.get("pageDecision")) is not bool or
                              (final_state.get("status") or {}).get("state") not in ("skipped", "completed"))):
         reasons.append("production_work_unresolved")
@@ -1104,6 +1104,16 @@ class CaseCapture:
         installed = False
         backend_failed = False
         content_observations = []
+        raw_retractions = {}
+
+        def retain_retractions(events, offset=0):
+            # Raw event indices preserve duplicates as well as chronology. A
+            # later sample cannot erase a withdrawal exported after an image
+            # error (or replace it with a shorter/stale event history).
+            for index, event in enumerate(events, offset):
+                if event.get("type") == "retraction":
+                    raw_retractions.setdefault(index, event)
+            case["retractions"] = [raw_retractions[index] for index in sorted(raw_retractions)]
 
         def save():
             atomic_json(path / "case.json", case, on_retry=log.append)
@@ -1114,6 +1124,7 @@ class CaseCapture:
             if not isinstance(value, dict):
                 raise CaptureError("adapter_lost_or_invalid")
             log.append({"kind": "sample", "phase": phase, "value": value})
+            retain_retractions(value["events"])
             content_observations.append(content_observation(value))
             for row in value["sourceNodes"]:
                 source_history[row["id"]] = row
@@ -1131,9 +1142,8 @@ class CaseCapture:
                         sourceObservations=list(source_observations.values()),
                         productionEligibility=value.get("productionEligibility", []),
                         finalState={key: value.get(key) for key in
-                                    ("at", "jobs", "pending", "scanning", "rpcPending", "status", "pageDecision")},
-                        pageDecision=value["pageDecision"],
-                        retractions=[event for event in value["events"] if event["type"] == "retraction"])
+                                    ("at", "jobs", "pending", "scanning", "rpcPending", "scheduledScans", "status", "pageDecision")},
+                        pageDecision=value["pageDecision"])
             case["annotations"] = [{"sourceId": row["id"], "needTranslation": "unknown"} for row in case["sourceNodes"]]
             case["domainVerified"] = belongs_to(case["finalUrl"], site["registeredDomain"])
             if not case["domainVerified"]:
@@ -1150,10 +1160,58 @@ class CaseCapture:
             image = path / (phase + ".png")
             if image.exists() or any(shot["phase"] == phase for shot in case["screenshots"]):
                 raise CaptureError("screenshot_phase_or_file_exists")
-            if full:
-                self.browser.screenshot(image, full=True)
-            else:
-                self.browser.screenshot(image)
+            lifecycle = {"phase": phase, "path": image.name, "fullPage": full,
+                         "sampleAt": value.get("at"), "paintedTransition": "unknown"}
+            case.setdefault("screenshotLifecycle", []).append(lifecycle)
+
+            def boundary(edge, offset):
+                check_deadline(deadline)
+                marker = self.browser.qa("screenshotBoundary", offset)
+                # Older v1 fixtures may not supply boundary data. Preserve an
+                # honest unknown instead of manufacturing a page timestamp.
+                if not isinstance(marker, dict):
+                    lifecycle[edge] = {"state": "unavailable"}
+                    return offset
+                if (type(marker.get("eventOffset")) is not int or marker["eventOffset"] != offset
+                        or type(marker.get("eventCount")) is not int
+                        or not isinstance(marker.get("events"), list)
+                        or marker["eventCount"] != offset + len(marker["events"])):
+                    raise CaptureError("screenshot_boundary_invalid")
+                log.append({"kind": "screenshot_boundary", "phase": phase, "edge": edge, "value": marker})
+                retain_retractions(marker["events"], offset)
+                lifecycle[edge] = {key: item for key, item in marker.items() if key != "events"}
+                return marker["eventCount"]
+
+            offset = boundary("before", len(value["events"]))
+            check_deadline(deadline)
+            # These controller timestamps bracket the actual wrapper command;
+            # page markers bracket a wider interval including CLI round trips.
+            lifecycle["commandStartedAt"] = now()
+            log.append({"kind": "screenshot_command", "phase": phase, "edge": "start",
+                        "at": lifecycle["commandStartedAt"]})
+            try:
+                if full:
+                    self.browser.screenshot(image, full=True)
+                else:
+                    self.browser.screenshot(image)
+                lifecycle["commandState"] = "returned"
+            except (CaptureError, OSError, ValueError, KeyError, TypeError) as error:
+                lifecycle["commandState"] = "error"
+                lifecycle["commandError"] = error_record(error)
+                raise
+            finally:
+                lifecycle["commandFinishedAt"] = now()
+                log.append({"kind": "screenshot_command", "phase": phase, "edge": "end",
+                            "at": lifecycle["commandFinishedAt"], "state": lifecycle["commandState"]})
+                try:
+                    boundary("after", offset)
+                except (CaptureError, OSError, ValueError, KeyError, TypeError) as error:
+                    # Do not mask the original screenshot error or start work
+                    # past the deadline. Missing page-end evidence stays unknown.
+                    lifecycle["after"] = {"state": "unavailable", "error": error_record(error)}
+                    if time.monotonic() < deadline:
+                        case["errors"].append(error_record(error))
+                save()
             case["screenshots"].append({"phase": phase, "path": image.name, "at": now(), "viewport": value["viewport"],
                                         "sha256": hashlib.sha256(image.read_bytes()).hexdigest(), "fullPage": full,
                                         "contentSignature": screenshot_content_signature(value),
@@ -1162,6 +1220,7 @@ class CaseCapture:
                                         "semanticSignature": hashlib.sha256(semantic_signature(value).encode("utf-8")).hexdigest(),
                                         "requestCount": len(case["requestIds"]),
                                         "sampleAt": value.get("at"),
+                                        "lifecycleIndex": len(case["screenshotLifecycle"]) - 1,
                                         "contentObservation": content_observations[-1],
                                         "observationIndex": len(content_observations) - 1,
                                         **({"basePhase": base_phase} if base_phase is not None else {})})
@@ -1360,7 +1419,8 @@ class CaseCapture:
                     source_content[source_id] = row_content
                 geometry_changed = geometry is not None and candidate_geometry != geometry
                 geometry_changes += int(geometry_changed)
-                idle = not value["jobs"] and not value["pending"] and not value["scanning"] and not value["rpcPending"]
+                idle = (not value["jobs"] and not value["pending"] and not value["scanning"]
+                        and not value["rpcPending"] and not value.get("scheduledScans", 0))
                 status_ready = bool(value["status"] and value["status"]["state"] in ("skipped", "completed"))
                 terminals_complete = all(entry["terminal"] for entry in pending.values())
                 # A skipped page may retain untranslated eligible blocks. Their
