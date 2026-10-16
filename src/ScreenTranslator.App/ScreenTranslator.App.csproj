@@ -6,7 +6,7 @@
     <RootNamespace>ScreenTranslator.App</RootNamespace>
     <Product>默译 · Tacily</Product>
     <Description>点击选段、截图直译 · DeepSeek / OpenAI Responses / Claude Messages</Description>
-    <Version>0.14.6</Version>
+    <Version>0.14.7</Version>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <Nullable>enable</Nullable>

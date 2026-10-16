@@ -67,7 +67,7 @@ dotnet test ScreenTranslator.sln -c Release --no-build
 node --test (Get-ChildItem ./browser-extension/tests -Filter *.test.js).FullName
 
 # 生成 Windows 自包含包；输出目录须为空
-./eng/build-release.ps1 -Version 0.14.6
+./eng/build-release.ps1 -Version 0.14.7
 ```
 
 大体积字体与 ONNX 权重不纳入 Git，来源、版本、哈希见 [资源清单](eng/assets.json)。网页语言识别使用固定的 Unicode、正文与常用词程序规则，不加载语言模型；图片判断使用轻量 PP-OCRv5。本地判断不发送网络请求。已移除旧 OvisOCR2/Python、Manga OCR、CRAFT/Comic Text Detector、D1、NTextCat/Core14 与双 VLM 定位实验链路。
